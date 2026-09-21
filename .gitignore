@@ -26,7 +26,21 @@ npm-debug.log*
 *.pem
 *.key
 *.p12
+*.ppk
 .credentials.yaml
+
+# SSH 私钥兜底 —— 2026-09-21 真实踩中：ssh-keygen 用了相对路径，
+#   私钥被写进了**仓库根目录**（`Set-Location` 不改变原生子进程的 cwd）。
+#   当时尚未 commit，但 `git add -A` 本会把它推进公开仓库。
+#   ⇒ 密钥一律放 `~/.ssh`，生成时**必须用绝对路径**。
+id_ed25519
+id_ed25519.pub
+id_rsa
+id_rsa.pub
+id_ecdsa
+id_ecdsa.pub
+id_dsa
+id_dsa.pub
 
 # ── 内部工作笔记（AI 助手的工作记忆与日志，不是项目内容）──
 .workbuddy/
