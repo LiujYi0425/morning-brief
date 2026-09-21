@@ -1,0 +1,406 @@
+/* =====================================================================
+   probe.css —— M0 验证控制台样式
+   ---------------------------------------------------------------------
+   注意：这是**开发工具**，不是产品 UI。
+   产品 UI 的形态铁律（R-C08 / R-C09）约束的是卡片，不是这个控制台。
+   所以本文件用固定的中性色，不参与双形态切换 —— 这是刻意的，
+   否则"控制台本身也有两种形态"会让验证结果无法归因。
+   ===================================================================== */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.6;
+  color: #1c1c1e;
+  background: #f7f7f5;
+  padding: 0 0 40px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  padding: 16px 20px;
+}
+
+/* ---------------- 顶栏 ---------------- */
+
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: #ffffffee;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.top h1 {
+  font-size: 15px;
+  font-weight: 500;
+  flex: 1 1 auto;
+}
+
+.chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.chip--pass {
+  background: #e1f5ee;
+  border-color: #9fe1cb;
+  color: #085041;
+}
+.chip--fail {
+  background: #fcebeb;
+  border-color: #f7c1c1;
+  color: #791f1f;
+}
+.chip--warn {
+  background: #faeeda;
+  border-color: #fac775;
+  color: #633806;
+}
+.chip--unable {
+  background: #f1efe8;
+  border-color: #d3d1c7;
+  color: #444441;
+}
+.chip--pending {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.15);
+  color: #5f5e5a;
+}
+
+/* ---------------- 通用区块 ---------------- */
+
+section {
+  margin-top: 20px;
+}
+
+h2 {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+h2 small {
+  font-size: 12px;
+  font-weight: 400;
+  color: #5f5e5a;
+}
+
+/* 子标题：比 h2 小一号，用在卡片盒子内部 */
+h2.sub {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.card-box {
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.card-box + .card-box {
+  margin-top: 10px;
+}
+
+/* ---------------- 事实表 ---------------- */
+
+.kv {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+
+.kv dt {
+  color: #5f5e5a;
+}
+
+.kv dd {
+  color: #1c1c1e;
+  word-break: break-all;
+}
+
+.note {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.note--ok {
+  background: #e1f5ee;
+  color: #085041;
+}
+.note--bad {
+  background: #fcebeb;
+  color: #791f1f;
+}
+.note--muted {
+  background: #f1efe8;
+  color: #444441;
+}
+.note--warn {
+  background: #faeeda;
+  color: #633806;
+}
+
+pre {
+  margin-top: 8px;
+  background: #f1efe8;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  overflow-x: auto;
+  max-height: 180px;
+  line-height: 1.5;
+}
+
+/* ---------------- 控制区 ---------------- */
+
+.ctrl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ctrl + .ctrl {
+  margin-top: 10px;
+}
+
+.ctrl--tight {
+  margin-top: 8px;
+}
+
+.ctrl__label {
+  font-size: 12px;
+  color: #5f5e5a;
+  min-width: 76px;
+}
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: #fff;
+  color: #1c1c1e;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #f1efe8;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.is-on {
+  background: #0f6e56;
+  border-color: #0f6e56;
+  color: #fff;
+}
+
+button.primary {
+  background: #1c1c1e;
+  border-color: #1c1c1e;
+  color: #fff;
+}
+
+button.primary:hover {
+  background: #3c3c3e;
+}
+
+button.ok {
+  border-color: #1d9e75;
+  color: #085041;
+}
+button.ok.is-on {
+  background: #1d9e75;
+  border-color: #1d9e75;
+  color: #fff;
+}
+
+button.bad {
+  border-color: #a32d2d;
+  color: #791f1f;
+}
+button.bad.is-on {
+  background: #a32d2d;
+  border-color: #a32d2d;
+  color: #fff;
+}
+
+/* ---------------- 验收清单 ---------------- */
+
+.check {
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.check + .check {
+  margin-top: 8px;
+}
+
+.check__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.check__no {
+  font-size: 12px;
+  color: #5f5e5a;
+  font-variant-numeric: tabular-nums;
+}
+
+.check__title {
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1 1 auto;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.badge--pass {
+  background: #e1f5ee;
+  color: #085041;
+  border-color: #9fe1cb;
+}
+.badge--fail {
+  background: #fcebeb;
+  color: #791f1f;
+  border-color: #f7c1c1;
+}
+.badge--warn {
+  background: #faeeda;
+  color: #633806;
+  border-color: #fac775;
+}
+.badge--unable {
+  background: #f1efe8;
+  color: #444441;
+  border-color: #d3d1c7;
+}
+.badge--pending {
+  background: #fff;
+  color: #5f5e5a;
+  border-color: rgba(0, 0, 0, 0.15);
+}
+
+.check__how {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #5f5e5a;
+}
+
+.check__detail {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #1c1c1e;
+}
+
+.check__evidence {
+  margin-top: 6px;
+  padding-left: 16px;
+  font-size: 11px;
+  color: #5f5e5a;
+  line-height: 1.7;
+}
+
+.check__evidence li {
+  list-style: disc;
+}
+
+.check__actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+textarea {
+  font-family: inherit;
+  font-size: 12px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  resize: vertical;
+  min-height: 34px;
+  color: #1c1c1e;
+  background: #fff;
+}
+
+textarea::placeholder {
+  color: #9a9a96;
+}
+
+/* ---------------- 焦点测试进度 ---------------- */
+
+.focus {
+  margin-top: 8px;
+}
+
+.focus__bar {
+  height: 6px;
+  border-radius: 999px;
+  background: #e5e3dc;
+  overflow: hidden;
+}
+
+.focus__fill {
+  height: 100%;
+  width: 0;
+  background: #0f6e56;
+}
+
+.focus__stats {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #5f5e5a;
+}
+
+.hidden {
+  display: none;
+}

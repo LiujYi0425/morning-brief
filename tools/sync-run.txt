@@ -1,0 +1,24 @@
+
+晨报机 · 文档同步校验
+==========================================================
+
+扫描到 9 份文档、4 个代理定义
+
+  [doc]   AGENT-SYSTEM     v1.1.1  agents/README.md
+  [doc]   CHARTER          v1.1.1  docs/01-立项文档.md
+  [doc]   DESIGN-SPEC      v1.1.1  docs/02-设计研究与页面架构规范.md
+  [doc]   ARCHITECTURE     v1.2.0  docs/03-工程架构文档.md
+  [doc]   AUDIT            v1.2.0  docs/04-项目审查报告.md
+  [doc]   M0-RECORD        v1.0.0  docs/05-M0验收记录.md
+  [doc]   M0-PROBE         v1.1.0  m0-probe/README.md
+  [doc]   PROJECT-RULES    v1.2.0  项目规则.md
+  [doc]   MASTER-PLAN      v1.2.0  项目计划工程书.md
+  [agent] brief-writer     v1.1.1  agents/brief-writer.md
+  [agent] collector        v1.0.2  agents/collector.md
+  [agent] curator          v1.1.1  agents/curator.md
+  [agent] design-critic    v1.1.1  agents/design-critic.md
+
+结果：全部通过。
+
+
+退出码：0

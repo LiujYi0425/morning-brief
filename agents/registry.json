@@ -1,0 +1,164 @@
+{
+  "schema": "morning-brief-agent-registry",
+  "schemaVersion": "1.0.0",
+  "updated": "2026-09-19",
+  "note": "本文件是代理系统的机器可读注册表。修改任何代理定义后，必须同步更新对应条目。",
+  "agentTypes": ["worker", "critic", "curator"],
+  "statusValues": ["ACTIVE", "DRAFT", "DEPRECATED"],
+  "agents": [
+    {
+      "agentId": "collector",
+      "file": "agents/collector.md",
+      "type": "worker",
+      "version": "1.0.3",
+      "status": "ACTIVE",
+      "trigger": "定时调度触发，或用户手动点击刷新",
+      "dependsOn": ["ARCHITECTURE@1.2.1"],
+      "upstream": [],
+      "downstream": ["brief-writer"],
+      "evalScore": null,
+      "runCount": 0,
+      "successCount": 0,
+      "lessonsCount": 1,
+      "lessonsConverted": 1,
+      "createdAt": "2026-09-18",
+      "lastReviewedAt": "2026-09-19",
+      "versionChangeType": "dependency-only",
+      "note": "ARCHITECTURE 1.2.1 核对结论：内容无需改动。本次新增的是 §5.8（拆零依赖模块）与 TD-06（blurmeasure 绑在 Electron 上），都在主进程侧，不触及采集层 —— 依赖铁律 D3 第三次兑现（collect 不认识 brief）。另：文件末尾页脚版本号已由 1.0.1 勘误为 1.0.3（原为漂移）"
+    },
+    {
+      "agentId": "brief-writer",
+      "file": "agents/brief-writer.md",
+      "type": "worker",
+      "version": "1.1.2",
+      "status": "ACTIVE",
+      "trigger": "采集完成、拿到 NormalizedItem[] 之后",
+      "dependsOn": ["ARCHITECTURE@1.2.1", "DESIGN-SPEC@1.1.2"],
+      "upstream": ["collector"],
+      "downstream": ["design-critic"],
+      "evalScore": null,
+      "runCount": 0,
+      "successCount": 0,
+      "lessonsCount": 1,
+      "lessonsConverted": 1,
+      "createdAt": "2026-09-18",
+      "lastReviewedAt": "2026-09-19",
+      "versionChangeType": "dependency-only",
+      "note": "1.1.0 的实质变更（API Key 边界）保持。本次仅 dependsOn 跟进：ARCHITECTURE 1.2.1 / DESIGN-SPEC 1.1.2 核对结论 —— 内容无需改动（S-01 措辞更正针对组件 CSS，简报生成不写组件 CSS）。另：页脚版本号已由 1.1.0 勘误为 1.1.2（原为漂移）"
+    },
+    {
+      "agentId": "design-critic",
+      "file": "agents/design-critic.md",
+      "type": "critic",
+      "version": "1.2.0",
+      "status": "ACTIVE",
+      "trigger": "任何界面产出完成后，以及每个阶段收尾时",
+      "dependsOn": ["DESIGN-SPEC@1.1.2", "PROJECT-RULES@1.3.0"],
+      "upstream": ["brief-writer"],
+      "downstream": [],
+      "evalScore": null,
+      "runCount": 0,
+      "successCount": 0,
+      "lessonsCount": 2,
+      "lessonsConverted": 2,
+      "createdAt": "2026-09-18",
+      "lastReviewedAt": "2026-09-19",
+      "versionChangeType": "substantive",
+      "note": "1.2.0 实质变更：第 18 项检查改写。原措辞「有没有直接写 backdrop-filter」抄的是属性名，而 S-01 禁的是值 —— 照字面执行会把 card.css 里 5 处 backdrop-filter: var(--card-blur) 判成违规并 block（假阳性）。现改为「禁止硬编码的形态值」并补两条判别问句；var(--token) 明确合规。本次核对确认：本代理是 DESIGN-SPEC 1.1.2 修订唯一的真消费者，其余 6 个下游只是记账。⚠️ 仍有一个待办未执行：第六组「平台硬规则」（B12/B10/B11 + 新增 §5.8 拆零依赖模块），属实质变更，已登记为 M1 前置任务"
+    },
+    {
+      "agentId": "curator",
+      "file": "agents/curator.md",
+      "type": "curator",
+      "version": "1.1.2",
+      "status": "ACTIVE",
+      "trigger": "每 10 次代理运行后，或每个阶段收尾时",
+      "dependsOn": ["AGENT-SYSTEM@1.1.2", "MASTER-PLAN@1.2.0", "PROJECT-RULES@1.3.0"],
+      "upstream": [],
+      "downstream": [],
+      "evalScore": null,
+      "runCount": 0,
+      "successCount": 0,
+      "lessonsCount": 1,
+      "lessonsConverted": 1,
+      "createdAt": "2026-09-18",
+      "lastReviewedAt": "2026-09-19",
+      "versionChangeType": "dependency-only",
+      "note": "1.1.0 新增的执行清单第 10 步（区分「实质变更」与「仅依赖跟进」）本轮第二次实际使用：本次 8 个文件里 1 个实质 + 7 个跟进，第 10 步让两者被明确区分，没有一起升 minor。本次仅 dependsOn 跟进（PROJECT-RULES +R-B10/R-B11），检查内容无需改动。另：页脚版本号已由 1.1.0 勘误为 1.1.2（原为漂移）"
+    },
+    {
+      "agentId": "arch-critic",
+      "file": null,
+      "type": "critic",
+      "version": null,
+      "status": "DRAFT",
+      "trigger": "审查代码是否符合工程架构文档",
+      "dependsOn": ["ARCHITECTURE@1.2.1"],
+      "upstream": [],
+      "downstream": [],
+      "evalScore": null,
+      "runCount": 0,
+      "successCount": 0,
+      "lessonsCount": 0,
+      "lessonsConverted": 0,
+      "createdAt": null,
+      "lastReviewedAt": null,
+      "versionChangeType": "dependency-only",
+      "note": "按需创建：M1 阶段开始写代码后再建立，避免过早定义。dependsOn 跟进到 ARCHITECTURE@1.2.1。检查清单应覆盖：ADR-009 窗口几何、ADR-010 唯一启动入口、§5.6/§5.7 静默失败族，以及新增的 §5.8「拆零依赖模块，让逻辑能在无头环境被验证」—— 建议与 design-critic 的「第六组 · 平台硬规则」合并为同一次实质变更"
+    }
+  ],
+  "healthThresholds": {
+    "minEvalScore": 60,
+    "retireAfterConsecutiveLowScores": 3,
+    "splitWhenChecklistStepsExceed": 7,
+    "promoteWhenConvertedLessonsAtLeast": 2,
+    "minLessonConversionRate": 0.5,
+    "reviewEveryRuns": 10
+  },
+  "changeLog": [
+    {
+      "date": "2026-09-18",
+      "change": "注册表首次建立，登记 4 个 ACTIVE 代理 + 1 个待创建代理",
+      "reason": "用户要求建立可自动学习与迭代进化的子代理机制"
+    },
+    {
+      "date": "2026-09-18",
+      "change": "全量核对一轮：design-critic 1.0.0→1.1.0（+第五组双形态 6 项）、brief-writer 1.0.0→1.1.0（+API Key 边界）、curator 1.0.0→1.1.0（+执行清单第 10 步）、collector 1.0.0→1.0.1（仅依赖跟进，内容未改）。arch-critic 的 dependsOn 跟进到 ARCHITECTURE@1.1.0",
+      "reason": "MASTER-PLAN 升 1.1.0（A1/B1 两个 P0 决策落地为 ADR-007 / ADR-008），触发代理体系级联核对",
+      "versionChangeTypes": {
+        "design-critic": "substantive",
+        "brief-writer": "substantive",
+        "curator": "substantive",
+        "collector": "dependency-only"
+      }
+    },
+    {
+      "date": "2026-09-18",
+      "change": "依赖跟进一轮，5 个代理定义内容一字未改，仅更新 dependsOn：collector 1.0.1→1.0.2 → [ARCHITECTURE@1.2.0]；brief-writer 1.1.0→1.1.1 → [ARCHITECTURE@1.2.0, DESIGN-SPEC@1.1.1]；design-critic 1.1.0→1.1.1 → [DESIGN-SPEC@1.1.1, PROJECT-RULES@1.2.0]；curator 1.1.0→1.1.1 → [AGENT-SYSTEM@1.1.1, MASTER-PLAN@1.2.0, PROJECT-RULES@1.2.0]；arch-critic（未创建）→ [ARCHITECTURE@1.2.0]",
+      "reason": "MASTER-PLAN 升 1.2.0（M0 实施完毕）；PROJECT-RULES 升 1.2.0（+R-B07/B08/B09）；ARCHITECTURE 升 1.2.0（+ADR-009/010、+§5.6/§5.7）；DESIGN-SPEC 升 1.1.1（仅依赖跟进）；AGENT-SYSTEM 升 1.1.1（仅依赖跟进）。按同步规则第 1 条，上游升版 → 下游必须重新核对，即使无需改动也要留痕",
+      "versionChangeTypes": {
+        "collector": "dependency-only",
+        "brief-writer": "dependency-only",
+        "design-critic": "dependency-only",
+        "curator": "dependency-only",
+        "arch-critic": "dependency-only"
+      },
+      "pending": "design-critic 需增设「第六组 · 平台硬规则」检查组（覆盖 B12 窗口几何 / B10 顶层 await / B11 启动方式）。M0 抓到的三个静默失败问题，正是审查该拦住却没有检查项的那一类（与 TD-01 同类：没有检查项的规则等于不存在）。**属代理定义的实质变更，须走 curator 流程，已登记为 M1 前置任务，本轮刻意未执行** —— 不为凑同步而顺手改。"
+    },
+    {
+      "date": "2026-09-19",
+      "change": "S-01 措辞级联的一轮：design-critic 1.1.1→1.2.0（**实质变更**：第 18 项检查改写，原文只禁属性名、S-01 实际禁的是值，照字面会误伤 card.css 5 处合规写法）；brief-writer 1.1.1→1.1.2、collector 1.0.2→1.0.3、curator 1.1.1→1.1.2（三者**仅依赖跟进**，内容一字未改）；arch-critic dependsOn → [ARCHITECTURE@1.2.1]；AGENT-SYSTEM（agents/README.md）1.1.1→1.1.2（仅依赖跟进 + §6.3 补充）。**另有勘误一项：四个代理定义的页脚版本号已修正**（见 versionChangeTypes 之外的第 5 项说明）",
+      "reason": "上游连环升版触发级联：DESIGN-SPEC 1.1.1→1.1.2（S-01 措辞更正）、ARCHITECTURE 1.2.0→1.2.1（+§5.8 / +TD-06）、PROJECT-RULES 1.2.0→1.3.0（+R-B10 / +R-B11）、AUDIT 1.3.0→1.4.0（B13 闭环）。同步规则第 1 条：下游必须重新核对，无需改动也要留痕",
+      "versionChangeTypes": {
+        "design-critic": "substantive",
+        "brief-writer": "dependency-only",
+        "collector": "dependency-only",
+        "curator": "dependency-only",
+        "arch-critic": "dependency-only",
+        "AGENT-SYSTEM": "dependency-only"
+      },
+      "pageFooterErratum": "collector（1.0.1→1.0.3）、brief-writer（1.1.0→1.1.2）、curator（1.1.0→1.1.2）、design-critic（1.1.0→1.2.0）四处文件页脚版本号原本停在上一版，与 frontmatter 不一致。根因：sync-check 只读 frontmatter、不读页脚，故「仅依赖跟进」那一轮漏改页脚不会让校验失败。已在 agents/README.md §6.3 补「版本号有三个载体（frontmatter / 页脚 / registry.json），必须同一次改完」，并关联 MASTER-PLAN §7 的候选规则「同一份受管文件必须整块一致修改」",
+      "pending": "design-critic 的「第六组 · 平台硬规则」仍未执行（须合并新增的 §5.8 拆零依赖模块），属实质变更，M1 前置任务"
+    }
+  ]
+}

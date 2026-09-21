@@ -1,0 +1,38 @@
+=== 宽度 +1~2px 的来源追踪 ===
+时间: 2026-09-18T12:20:45.139Z
+scaleFactor=1.5  请求 360×44 @ (1335,36)
+
+--- 场景 1：复刻产品顺序（构造 → setBounds → load → show）---
+① 构造完成后                            getBounds= 364× 46  物理(dipToScreenRect)=547×69  Δw=4 Δh=2  ✗
+② setAlwaysOnTop + setVisibleOnAll getBounds= 364× 46  物理(dipToScreenRect)=547×69  Δw=4 Δh=2  ✗
+③ setBounds 校正后                    getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+④ ready-to-show 触发后                getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑤ showInactive 之后立刻                getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑥ show 之后 +400ms                   getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑦ show 之后 +1600ms                  getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+
+--- 场景 2：show 之后再 setBounds 校正 ---
+⑧ show 后 setBounds                 getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑨ +600ms                           getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑩ +2100ms                          getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+
+--- 场景 3：hide 再 showInactive ---
+⑪ hide 后                           getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑫ showInactive +500ms              getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+
+--- 场景 4：不做任何操作，只重复读 5 次（看读数本身稳不稳）---
+⑬.1 纯读                             getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑬.2 纯读                             getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑬.3 纯读                             getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑬.4 纯读                             getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+⑬.5 纯读                             getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+
+--- 场景 5：移动到屏中央（远离右边界）---
+⑭ 屏中央                              getBounds= 360× 44  物理(dipToScreenRect)=540×66  Δw=0 Δh=0  ✅
+⑮ 回到右上角                            getBounds= 361× 44  物理(dipToScreenRect)=542×66  Δw=1 Δh=0  ✗
+
+--- 小结 ---
+看 ①→②③ 与 ④⑤⑥⑦ 两段的 Δw：前者说明构造参数的偏差，
+后者说明 show() 是否又顶大了一次、以及 show 后校正是否管用。
+
+（实验结束）

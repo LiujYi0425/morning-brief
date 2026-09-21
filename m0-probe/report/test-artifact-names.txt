@@ -1,0 +1,70 @@
+产物命名契约 · 离线考裁判
+生成时间：2026-09-20T04:00:04.272Z
+结果：PASS
+
+┌─ 产物命名契约 · 离线考裁判 ────────────────────────────────
+│ 被测：src/main/artifact-names.js
+│ 环境变量：M0_SELFTEST_TAG　｜　校准后缀：.calib
+│ ⚠️ 范围：只考"名字算得对不对"，不考"校准器有没有真的传对变量"。
+└────────────────────────────────────────────────────────────
+
+--- 第一关 · 命名正确性 ---
+  ✓ 空后缀 → 正式报告名 === CANONICAL_REPORT  →  "_selftest-report.md"
+  ✓ 空后缀 → 正式日志名 === CANONICAL_LOG  →  "selftest-log.txt"
+  ✓ "" → _selftest-report.md　（未隔离 = 正式产物（基准名））
+  ✓ ".calib" → _selftest-report.calib.md　（校准器实际用的后缀）
+  ✓ "-v2" → _selftest-report-v2.md　（横线开头）
+  ✓ "_run1" → _selftest-report_run1.md　（下划线开头）
+  ✓ "a1B2" → _selftest-reporta1B2.md　（字母数字）
+
+  · 恶意/非法后缀必须降级为空（= 正式产物）
+    ✓ "../evil" → ""　（相对路径穿越）
+    ✓ "a/b" → ""　（正斜杠分隔）
+    ✓ "a\\b" → ""　（反斜杠分隔（Windows））
+    ✓ ".\\..\\evil" → ""　（Windows 形式穿越）
+    ✓ "C:/abs" → ""　（绝对路径）
+    ✓ "a\u0000b" → ""　（空字节截断）
+    ✓ "a b" → ""　（空格）
+    ✓ "a*b" → ""　（通配符）
+    ✓ "后缀" → ""　（非 ASCII（避免不同代码页下表现不一致））
+    ✓ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" → ""　（超过长度上限）
+    ✓ "" → ""　（空串）
+    ✓ "   " → ""　（只有空白）
+    ✓ null → ""　（null）
+    ✓ undefined → ""　（undefined）
+    ✓ 42 → ""　（数字（非字符串））
+
+  · 路径逃逸检查（真正的安全断言）
+    ✓ "../evil" → _selftest-report.md
+    ✓ "a/b" → _selftest-report.md
+    ✓ "a\\b" → _selftest-report.md
+    ✓ ".\\..\\evil" → _selftest-report.md
+    ✓ "C:/abs" → _selftest-report.md
+    ✓ "a\u0000b" → _selftest-report.md
+    ✓ "a b" → _selftest-report.md
+    ✓ "a*b" → _selftest-report.md
+    ✓ "后缀" → _selftest-report.md
+    ✓ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" → _selftest-report.md
+    ✓ "" → _selftest-report.md
+    ✓ "   " → _selftest-report.md
+    ✓ null → _selftest-report.md
+    ✓ undefined → _selftest-report.md
+    ✓ 42 → _selftest-report.md
+
+  ✓ tagFromEnv({}) → ''  →  ""
+  ✓ tagFromEnv({ M0_SELFTEST_TAG: '.calib' }) → '.calib'  →  ".calib"
+  ✓ tagFromEnv({ M0_SELFTEST_TAG: '../x' }) → ''  →  ""
+  ✓ isIsolated('') === false  →  false
+  ✓ isIsolated('.calib') === true  →  true
+
+--- 第二关 · 用例表本身的判别力（变异测试）---
+  ✓ M1 已被抓住（11 条用例报警）—— 不做任何校验，直接把后缀拼进文件名
+  ✓ M2 已被抓住（5 条用例报警）—— 白名单里混进了 `/` 与 `\`
+  ✓ M3 已被抓住（20 条用例报警）—— 空后缀也硬加一个点（正式产物被改名）
+
+┌─ 结论 ──────────────────────────────────────────────────────
+│ ✓ PASS —— 命名正确，且用例表已被证明有判别力（3/3 变异体全部落网）
+│ ⚠️ 但这只覆盖"名字算得对不对"。
+│    "校准器有没有真的把 M0_SELFTEST_TAG=.calib 传进主进程"，仍需 npm run calibrate 实跑一次。
+│    那一侧由校准器自己的"守卫"（跑前快照 / 跑后逐字节比对）兜底。
+└────────────────────────────────────────────────────────────

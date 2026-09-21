@@ -1,0 +1,61 @@
+# ── 依赖 ──────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+
+# ── 打包产物 ──────────────────────────────────────────
+dist/
+out/
+release/
+build/
+
+# ── 系统 / 编辑器 ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# ── 日志 ──────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── 密钥 / 凭据（本项目用 safeStorage 落 userData，正常不该进仓库；此为兜底）──
+.env
+.env.*
+*.pem
+*.key
+*.p12
+.credentials.yaml
+
+# ── 内部工作笔记（AI 助手的工作记忆与日志，不是项目内容）──
+.workbuddy/
+
+# ── 对外提交素材（含内部评审口吻，是否公开由你决定）──
+_DSH提交材料包.md
+
+# ── AI 助手执行任务时的中间产物（补丁 / 勘察 / 记账脚本，不属于项目）──
+# 注：本项目另有正当的 `_` 开头文件（如 agents/_template.md），所以**不能**用通配 `_*`，
+#     只排除下面这几类脚本命名。
+_patch-*.mjs
+_append-*.mjs
+_scan*.mjs
+_commit-msg.txt
+
+# ── m0-probe/report：区分「结论」与「运行日志」──
+# ⚠️ 2026-09-21 更正：上一版把整个 report/ 判为「证据保留」，**判断有误** ——
+#    扫描发现其中若干**运行日志**写有本机绝对路径与 Windows 用户名，
+#    公开出去既泄漏隐私、对别人也毫无用处。改为按下面这条原则处理：
+#      **结论进仓，运行日志不进仓。**
+m0-probe/report/calib-*.txt
+m0-probe/report/*.calib.*
+m0-probe/report/*.calib-backup
+m0-probe/report/diag-electron-api.txt
+m0-probe/report/selftest-log.txt
+# 注：`_selftest-report.calib.md` 是校准器**故意改坏**的那一版假记录（写着「M0 未通过」），
+#     公开会误导读者 —— 由上一条 `*.calib.*` 一并排除。
+
+# 说明：以下**刻意不排除**，因为它们是「可验证」的证据，也是目录站审核的加分项 ——
+#   m0-probe/report/ 里的结论类产物：_selftest-report.md / M0-验收记录_*.md /
+#     calibration-focus-referee.md / test-*.txt / winsize*.txt / boot-heartbeat.txt
+#   docs/ agents/ tools/  项目治理体系本身：单一权威源 + 铁律 + 自动同步校验 + 带变异测试的考裁判

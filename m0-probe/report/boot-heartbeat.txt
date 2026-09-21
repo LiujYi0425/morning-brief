@@ -1,0 +1,1 @@
+booted=2026-09-20T03:52:14.003Z process.type=browser electron=44.4.2 chrome=152.0.7977.130 node=24.21.0 pid=29380 ELECTRON_RUN_AS_NODE=undefined prev_crash="none"
