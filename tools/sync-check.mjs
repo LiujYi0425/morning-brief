@@ -182,9 +182,37 @@ const files = [];
 for (const dir of SCAN_DIRS) files.push(...collectMarkdown(dir));
 
 for (const file of [...new Set(files)]) {
-  const text = fs.readFileSync(file, 'utf8');
+  const raw = fs.readFileSync(file, 'utf8');
+
+  /* ⚠️⚠️ CRLF 陷阱（2026-09-22 实测抓到，属"检查静默失效"）
+   *
+   * 旧的写法是 `const text = fs.readFileSync(file, 'utf8')` 直接喂给 parseFrontmatter。
+   * 在 **CRLF** 文件上这会**静默丢掉 frontmatter 的最后一个键**，原因有三步、缺一不可：
+   *   ① `text.indexOf('\n---', 3)` 定位到的是 `\r\n` 里的那个 `\n`，
+   *      所以 `text.slice(3, end)` **把行尾的 `\r` 留在了块里**；
+   *   ② `block.split(/\r?\n/)` 只吃成对的 `\r\n`，**末尾那个孤立的 `\r` 不会被切掉**；
+   *   ③ JS 正则的 `.` **不匹配 `\r`**（`\r` 是行终止符），于是 `(.*)$` 匹配不上
+   *      —— `$` 要求到达输入末尾，而 `.*` 又吃不掉那个 `\r`，回溯也救不回来。
+   *   ⇒ 最后一行 `NO-MATCH`，那个键直接消失。
+   *
+   * 实际后果（真实发生）：`项目规则.md` 是全项目**唯一**的 CRLF 文件，
+   * 而它 `depends_on` 恰好是**最后一个键** ⇒ 检查器**从来没看见过它的上游依赖**，
+   * 于是"依赖未跟进"这条闸门对它**永久失效**，而且**不会有任何报错**。
+   *
+   * 处置：① 归一化（修正确性）；② 对 CRLF 直接判 FAIL（修约定 —— 不报就没人知道）。
+   * 光做 ① 会让这个文件差异从"会报错"变成"被悄悄容忍"，那正是本项目最忌讳的方向。
+   */
+  const text = raw.replace(/\r\n?/g, '\n');
   const meta = parseFrontmatter(text);
   const r = rel(file);
+
+  if (/\r/.test(raw)) {
+    errors.push(
+      `${r}：文件用了 **CRLF** 换行，本项目约定 **LF**（无 BOM）。` +
+        `CRLF 会让 frontmatter 的最后一个键被解析器静默丢掉（原因见本循环上方的注释），` +
+        `从而让该文件的依赖同步检查**永久失效且不报错**。请把该文件统一改为 LF。`
+    );
+  }
 
   if (!meta) {
     errors.push(`${r}：缺少元数据块（文件必须以 --- 开头）`);

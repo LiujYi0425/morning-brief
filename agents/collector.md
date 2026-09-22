@@ -2,10 +2,10 @@
 agent_id: collector
 version: 1.0.3
 type: worker
-updated: 2026-09-19
+updated: 2026-09-22
 status: ACTIVE
 trigger: 定时调度触发，或用户手动点击刷新，或需要拉取某个源的条目时
-depends_on: ARCHITECTURE@1.3.0
+depends_on: ARCHITECTURE@1.4.0
 eval_score: null
 run_count: 0
 success_count: 0
@@ -105,4 +105,4 @@ success_count: 0
 
 ---
 
-*版本：1.0.3 ｜ 类型：worker ｜ 更新时间：2026-09-19*
+*版本：1.0.3 ｜ 类型：worker ｜ 更新时间：2026-09-22*

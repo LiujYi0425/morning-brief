@@ -2,10 +2,10 @@
 agent_id: curator
 version: 1.1.2
 type: curator
-updated: 2026-09-19
+updated: 2026-09-22
 status: ACTIVE
 trigger: 每 10 次代理运行后，或每个阶段收尾时，或任一代理 eval_score 明显下滑时
-depends_on: AGENT-SYSTEM@1.1.2, MASTER-PLAN@1.3.0, PROJECT-RULES@1.4.0
+depends_on: AGENT-SYSTEM@1.1.2, MASTER-PLAN@1.4.0, PROJECT-RULES@1.4.0
 eval_score: null
 run_count: 0
 success_count: 0
@@ -124,4 +124,4 @@ success_count: 0
 
 ---
 
-*版本：1.1.2 ｜ 类型：curator ｜ 更新时间：2026-09-19*
+*版本：1.1.2 ｜ 类型：curator ｜ 更新时间：2026-09-22*

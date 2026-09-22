@@ -2,10 +2,10 @@
 agent_id: brief-writer
 version: 1.1.2
 type: worker
-updated: 2026-09-20
+updated: 2026-09-22
 status: ACTIVE
 trigger: 采集完成、拿到 NormalizedItem[] 之后
-depends_on: ARCHITECTURE@1.3.0, DESIGN-SPEC@1.3.0
+depends_on: ARCHITECTURE@1.4.0, DESIGN-SPEC@1.4.0
 eval_score: null
 run_count: 0
 success_count: 0
@@ -116,4 +116,4 @@ success_count: 0
 
 ---
 
-*版本：1.1.2 ｜ 类型：worker ｜ 更新时间：2026-09-20*
+*版本：1.1.2 ｜ 类型：worker ｜ 更新时间：2026-09-22*

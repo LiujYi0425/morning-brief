@@ -1,9 +1,9 @@
 ---
 doc_id: AGENT-SYSTEM
 version: 1.1.2
-updated: 2026-09-20
+updated: 2026-09-22
 status: ACTIVE
-depends_on: MASTER-PLAN@1.3.0, PROJECT-RULES@1.4.0
+depends_on: MASTER-PLAN@1.4.0, PROJECT-RULES@1.4.0
 ---
 
 # 晨报机 · 子代理机制
@@ -231,6 +231,25 @@ Critic 的意见由 Worker **显式处理**（规则 R-F05）：要么修，要�
 > **另：四个代理定义的 `depends_on` 本轮记账跟进**（依 R-D05 **不升版本号**）：`brief-writer` → `ARCHITECTURE@1.3.0`、`DESIGN-SPEC@1.2.0`；`collector` → `ARCHITECTURE@1.3.0`；`curator` → `MASTER-PLAN@1.3.0`；`design-critic` → `DESIGN-SPEC@1.2.0`。
 > 核对结论：**四者内容均无需改动** —— 它们的输入/输出契约、检查清单与职责边界都不受 ADR-011 与「移除展开全部」的影响。
 > （`design-critic` 的检查清单确实"该"新增一项「窗口层级」，但那是**代理定义的实质变更**，须单独走 curator 流程，不在收尾时顺手改。）
+>
+> **2026-09-22 补充（记账，依 R-D05 不改版本号）**：核对上游 **`MASTER-PLAN@1.4.0`**、**`ARCHITECTURE@1.4.0`**、**`DESIGN-SPEC@1.4.0`**，
+> **结论：本文件与四个代理定义均无需改动**。SSOT 本轮升 1.4.0（实质：**A10 结案 —— 桌面层挂载 FAIL ⇒ 新增 ADR-012「置底顶层窗口」**；
+> ADR-011 结案并加删除线保留；补齐 `§3.2`／`§5.5`／`§8 R12` 三处**"宣告了却没落笔"**的正文）。
+> **这些都不触及任何代理的输入/输出契约、检查清单或职责边界** —— 层级改的是"窗口怎么摆"，不改"代理干什么"。
+>
+> **四个代理定义的 `depends_on` 本轮记账跟进**（依 R-D05 **不升版本号**）：
+> `brief-writer` → `ARCHITECTURE@1.4.0`、`DESIGN-SPEC@1.4.0`；`collector` → `ARCHITECTURE@1.4.0`；
+> `curator` → `MASTER-PLAN@1.4.0`；`design-critic` → `DESIGN-SPEC@1.4.0`。
+> 核对结论：**四者内容均无需改动** —— ADR-012 只把卡片从"桌面层"改成"置底顶层窗口"，
+> 既不新增代理职责，也不改变任何契约。
+>
+> ⚠️ **一条仍然挂着的代理层待办（本轮复核后维持）**：`design-critic` 的「第六组 · 平台硬规则」仍未执行，
+> 且本轮复核**确认「窗口层级」这一项仍需写进该组** —— **ADR-012 只是改了层级的取值，代理层照样"该查而没查"**。
+> 属**代理定义的实质变更**，须走 curator 流程（R-F03 / R-F04：不顺手改代理定义）。
+>
+> **另：本轮抓到一处"检查静默失效"，与代理体系无关但值得记** —— `sync-check` 的 frontmatter 解析在 **CRLF** 文件上会
+> **丢掉最后一个键**，而 `项目规则.md` 是全项目唯一的 CRLF 文件 ⇒ 它的 `depends_on` 从未被机器看见。
+> 已修（归一化 ＋ CRLF 直接报错），详见 SSOT §7 同批补充。
 
 ---
 
@@ -280,5 +299,5 @@ agents/*.md          具体代理定义
 
 ---
 
-*文档版本：1.1.2 ｜ 状态：ACTIVE ｜ 更新时间：2026-09-19*
-*上游：MASTER-PLAN@1.2.0 ｜ PROJECT-RULES@1.4.0*
+*文档版本：1.1.2 ｜ 状态：ACTIVE ｜ 更新时间：2026-09-22*
+*上游：MASTER-PLAN@1.4.0 ｜ PROJECT-RULES@1.4.0*

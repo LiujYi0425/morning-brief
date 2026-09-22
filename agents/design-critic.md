@@ -2,10 +2,10 @@
 agent_id: design-critic
 version: 1.2.0
 type: critic
-updated: 2026-09-20
+updated: 2026-09-22
 status: ACTIVE
 trigger: 任何界面产出完成后（新组件、样式改动、动效新增），以及每个阶段收尾时
-depends_on: DESIGN-SPEC@1.3.0, PROJECT-RULES@1.4.0
+depends_on: DESIGN-SPEC@1.4.0, PROJECT-RULES@1.4.0
 eval_score: null
 run_count: 0
 success_count: 0
@@ -143,4 +143,4 @@ success_count: 0
 
 ---
 
-*版本：1.2.0 ｜ 类型：critic ｜ 更新时间：2026-09-20*
+*版本：1.2.0 ｜ 类型：critic ｜ 更新时间：2026-09-22*
