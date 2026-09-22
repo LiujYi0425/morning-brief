@@ -1,0 +1,228 @@
+{
+    "ok":  true,
+    "script":  "desktop-layer-facts.ps1",
+    "purpose":  "A10 前置侦察：判定本机桌面层属于 legacy 还是 modern-24h2（只读）",
+    "capturedAt":  "2026-09-21T21:51:26",
+    "windows":  {
+                    "productName":  "Windows 10 Home China",
+                    "displayVersion":  "25H2",
+                    "build":  "26200",
+                    "ubr":  "9457",
+                    "buildFull":  "26200.9457",
+                    "edition":  "CoreCountrySpecific"
+                },
+    "verdict":  "legacy",
+    "evidence":  {
+                     "progmanHwnd":  "65828",
+                     "workerwCount":  14,
+                     "defviewCount":  0,
+                     "progmanHasNoRedirBitmap":  false,
+                     "defviewIsLayered":  false,
+                     "defviewParentIsProgman":  false
+                 },
+    "progman":  "65828",
+    "defview":  null,
+    "workerw":  [
+                    {
+                        "hwnd":  "1050076",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "461822",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "198852",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "198304",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "66104",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "197118",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "131326",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "66012",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "66014",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "65858",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "65852",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x84000000",
+                        "exStyle":  "0x08000080",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  true
+                    },
+                    {
+                        "hwnd":  "65850",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "65818",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    },
+                    {
+                        "hwnd":  "131352",
+                        "cls":  "WorkerW",
+                        "visible":  false,
+                        "parent":  "0",
+                        "style":  "0x04C00000",
+                        "exStyle":  "0x00000100",
+                        "noRedirBmp":  false,
+                        "layered":  false,
+                        "transparent":  false,
+                        "toolWindow":  false
+                    }
+                ],
+    "progmanChildren":  [
+                            {
+                                "hwnd":  "65836",
+                                "cls":  "SHELLDLL_DefView",
+                                "visible":  true,
+                                "parent":  "65828",
+                                "style":  "0x56010000",
+                                "exStyle":  "0x00080000",
+                                "noRedirBmp":  false,
+                                "layered":  true,
+                                "transparent":  false,
+                                "toolWindow":  false
+                            },
+                            {
+                                "hwnd":  "131734",
+                                "cls":  "WorkerW",
+                                "visible":  true,
+                                "parent":  "65828",
+                                "style":  "0x58000000",
+                                "exStyle":  "0x080000A0",
+                                "noRedirBmp":  false,
+                                "layered":  false,
+                                "transparent":  true,
+                                "toolWindow":  true
+                            }
+                        ],
+    "notes":  [
+                  "ProductName 写着 Windows 10，但 build \u003e= 22000 ⇒ 实为 Windows 11（注册表字符串未更新）",
+                  "判定为 23H2 及之前架构：传统 WorkerW 方案可试。"
+              ],
+    "errors":  [
+
+               ]
+}
