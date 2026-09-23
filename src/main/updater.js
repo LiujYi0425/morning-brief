@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 import {
   createUpdateState,
@@ -250,22 +250,66 @@ export async function downloadUpdate({ manifest, dataDir, log = () => {}, net, o
 
 /* ───────────────────────── 应用 / 回退 ───────────────────────── */
 
-/** spawn 那个活得比我们久的助手，然后调用方应当立刻 `app.quit()`。 */
+/**
+ * spawn 那个"活得比我们久"的助手。
+ *
+ * ⚠️⚠️ **不能用 `child_process.spawn(..., { detached: true })`。**
+ *   这是演练时实测出来的，代价是一次真实的失败升级：
+ *   Chromium 在 Windows 上把主进程放进一个 **Job Object**（kill-on-close），
+ *   `detached: true` 的子进程**仍然继承那个 job** ⇒ 我们一 `app.quit()`，
+ *   助手就被一起带走。实验记录：
+ *     · detached + unref  → `child.pid = 27268`，但 300ms 内就 `exit: 0`，
+ *                            交给它做的事一件没做
+ *     · WMI 创建          → `pid=33348 rc=0`，父进程退出后它照常跑完
+ *   所以改用 **WMI 的 `Win32_Process.Create`**：进程由 WMI 服务创建，
+ *   不在我们的 job 里，因此不受我们退出影响。
+ *
+ * ⚠️ 另一件事：**必须验证 spawn 真的成功了。**
+ *   原来这里 `spawn()` 之后直接 `return child.pid`，调用方据此认为"已经交给助手了"——
+ *   而实际上什么都没发生，日志却写着"已交给助手安装"。又是一次
+ *   **报成功、什么都没做**。所以现在阻塞等 WMI 返回，并把 pid 带回来核对。
+ *
+ * @returns {{ok:boolean, pid:number|null, detail:string}}
+ */
 function spawnHelper({ script, waitPid, mode, installDir, exePath, installer, snapshotDir, resultFile, log }) {
-  const args = [
-    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script,
+  const q = (s) => `"${String(s)}"`;
+  const tokens = [
+    'powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', q(script),
     '-WaitPid', String(waitPid),
     '-Mode', mode,
-    '-InstallDir', installDir,
+    '-InstallDir', q(installDir),
   ];
-  if (exePath) args.push('-ExePath', exePath);
-  if (installer) args.push('-Installer', installer);
-  if (snapshotDir) args.push('-SnapshotDir', snapshotDir);
-  if (resultFile) args.push('-ResultFile', resultFile);
-  log(`[update] 交给助手脚本（${mode}）：${script}`);
-  const child = spawn('powershell.exe', args, { detached: true, stdio: 'ignore', windowsHide: true });
-  child.unref();
-  return child.pid;
+  if (exePath) tokens.push('-ExePath', q(exePath));
+  if (installer) tokens.push('-Installer', q(installer));
+  if (snapshotDir) tokens.push('-SnapshotDir', q(snapshotDir));
+  if (resultFile) tokens.push('-ResultFile', q(resultFile));
+  const commandLine = tokens.join(' ');
+
+  /* PowerShell 单引号字符串：只需把内部的单引号翻倍。
+     ⚠️ 不能用 JSON.stringify —— 它会输出 \" 并翻倍反斜杠，
+        而 PowerShell 里 \" 不是转义，直接语法错（这个也踩过一次）。 */
+  const lit = "'" + commandLine.replace(/'/g, "''") + "'";
+  const psArgs = [
+    '-NoProfile', '-NonInteractive', '-Command',
+    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${lit} };` +
+    ' Write-Output ("MBOUT pid=" + $r.ProcessId + " rc=" + $r.ReturnValue)',
+  ];
+
+  log(`[update] 交给助手脚本（${mode}，经 WMI）：${script}`);
+  const r = spawnSync('powershell.exe', psArgs, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const out = `${(r && r.stdout) || ''}${(r && r.stderr) || ''}`;
+  const m = out.match(/MBOUT pid=(\d+) rc=(\d+)/);
+  if (!m) {
+    return { ok: false, pid: null, detail: `WMI 调用没返回可识别结果：${out.trim().slice(0, 300)}` };
+  }
+  const pid = Number(m[1]);
+  const rc = Number(m[2]);
+  /* rc=0 才是成功。非 0 时 pid 往往是 0 —— 这种情况**绝不能**当成"已交给助手"。 */
+  if (rc !== 0 || !pid) {
+    return { ok: false, pid: null, detail: `WMI 创建进程失败：ReturnValue=${rc}` };
+  }
+  return { ok: true, pid, detail: `WMI 已创建 pid=${pid}` };
 }
 
 export const helperScriptOf = (resourcesDir, rootDir) =>
@@ -291,7 +335,7 @@ export function applyUpdate({ dataDir, currentVersion, manifest, installerFile, 
   const next = beginUpdate(s, { toVersion: manifest.version, snapshotDir: snapshot ? snap : '' });
   saveState(dataDir, next);
 
-  const pid = spawnHelper({
+  const spawnRes = spawnHelper({
     script: helperScriptOf(resourcesDir, rootDir),
     waitPid: process.pid,
     mode: 'apply',
@@ -301,7 +345,14 @@ export function applyUpdate({ dataDir, currentVersion, manifest, installerFile, 
     resultFile: path.join(updatesDirOf(dataDir), 'last-result.json'),
     log,
   });
-  return { ok: true, helperPid: pid, snapshotDir: snapshot ? snap : '', state: next };
+  /* ⚠️ 交不出去就**如实说**。原来这里无条件返回 ok:true，
+     而 spawn 失败时调用方会打印"已交给助手安装"然后退出 ——
+     用户看到的是一个装着旧版本、却以为在升级的应用。 */
+  if (!spawnRes.ok) {
+    log(`[update] ✗ 交给助手失败：${spawnRes.detail}`);
+    return { ok: false, reason: spawnRes.detail };
+  }
+  return { ok: true, helperPid: spawnRes.pid, snapshotDir: snapshot ? snap : '', state: next };
 }
 
 /** 回退：spawn 助手去把快照镜像回去，调用方退出。 */
@@ -311,7 +362,7 @@ export function rollbackNow({ dataDir, currentVersion, installDir, exePath, reso
     return { ok: false, reason: '没有退路快照，无法回退' };
   }
   const snap = s.pending.snapshotDir;
-  const pid = spawnHelper({
+  const spawnRes = spawnHelper({
     script: helperScriptOf(resourcesDir, rootDir),
     waitPid: process.pid,
     mode: 'rollback',
@@ -321,6 +372,13 @@ export function rollbackNow({ dataDir, currentVersion, installDir, exePath, reso
     resultFile: path.join(updatesDirOf(dataDir), 'last-result.json'),
     log,
   });
+  /* ⚠️ 顺序要紧：**先确认助手真的起来了，再清 pending**。
+     反过来的话，助手没起来而 pending 已经清掉 ⇒ 那个坏版本再也不会被回退，
+     而且下一次启动看到的是"没有待验证的更新"，一切看起来都正常。 */
+  if (!spawnRes.ok) {
+    log(`[update] ✗ 回退助手没起来（${spawnRes.detail}）—— 保留 pending，下次启动再试`);
+    return { ok: false, reason: spawnRes.detail };
+  }
   saveState(dataDir, finishRollback(s, { why }));
-  return { ok: true, helperPid: pid, from: snap };
+  return { ok: true, helperPid: spawnRes.pid, from: snap };
 }
