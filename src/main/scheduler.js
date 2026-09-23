@@ -125,6 +125,93 @@ export function nextRunAt(now, hour = DEFAULT_FETCH_HOUR, minute = DEFAULT_FETCH
   return t;
 }
 
+/* ------------------------------------------------------------------ */
+/* 一轮全失败之后：当天要重试，不能等到明天                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 全失败后的重试间隔（退避）。
+ *
+ * ⚠️⚠️ 这一段补的是一个**产品级的洞**，不是代码洁癖：
+ *
+ *   原来 `scheduleNext()` 永远排"下一个 07:30 墙钟点"，**与成败无关**。
+ *   于是：早上 7:30 路由器正在重启 / 宽带还没拨上来 → 19 个源全失败
+ *   → 程序把下一次排到**明天 7:30** → 网络 7:31 就恢复了，它也不会再试。
+ *
+ *   用户到工位看到的是一屏旧条目（`headline` 照常说"今天共 N 条"，
+ *   因为库里有昨天的数据），**没有任何一句话说"今天还没抓到"**。
+ *   对一个"每天一次"的产品，那等于当天没有产品。
+ *
+ * ⚠️ 为什么退避而不是固定 10 分钟一直试：
+ *   断网一整天时，固定间隔会打 144 轮 × 19 个源 ≈ 2700 次请求 ——
+ *   那是拿用户的路由器出气。退避到 1 小时之后，一天最多 24 轮。
+ *
+ * ⚠️ 为什么有上限而不是指数增长到很大：
+ *   这个产品的价值窗口只有早上那两三个小时。间隔超过 1 小时，
+ *   等于"今天就这样了"，不如让用户中午回来时至少看到一份新的。
+ */
+export const RETRY_STEPS_MS = [10 * 60 * 1000, 30 * 60 * 1000, 60 * 60 * 1000];
+
+/**
+ * 第 `failStreak` 次连续全失败之后该等多久。
+ * @param {number} failStreak 连续"全部源都失败"的轮数（1 表示刚刚失败第一轮）
+ * @returns {number} 毫秒；0 表示不需要重试
+ */
+export function retryDelayMs(failStreak) {
+  const n = Number(failStreak);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return RETRY_STEPS_MS[Math.min(n - 1, RETRY_STEPS_MS.length - 1)];
+}
+
+/**
+ * 决定"下一次抓取在什么时候"——**纯函数**，所以离线考裁判能穷举它。
+ *
+ * 这是本轮修复的核心判据：把所有输入摆出来，输出一个时刻 + 一个理由。
+ * 原来这段逻辑散在 `scheduleNext()` 里、只能靠跑 Electron 才能观察。
+ *
+ * @param {object} o
+ * @param {Date} o.now
+ * @param {number} o.hour
+ * @param {number} o.minute
+ * @param {number} [o.lastOk]       上一轮成功的源数
+ * @param {number} [o.lastFailed]   上一轮失败的源数
+ * @param {number} [o.failStreak]   连续全失败轮数（含上一轮）
+ * @returns {{at:Date, retry:boolean, delayMs:number, reason:string}}
+ */
+export function nextRunPlan(o) {
+  const { now, hour = DEFAULT_FETCH_HOUR, minute = DEFAULT_FETCH_MINUTE } = o;
+  const scheduled = nextRunAt(now, hour, minute);
+  const lastOk = Number(o.lastOk ?? 0);
+  const lastFailed = Number(o.lastFailed ?? 0);
+
+  /* "全失败"的判据：这一轮跑了、有源失败、**且一个源都没成功**。
+     ⚠️ 单个源挂掉是常态，绝不能因此触发重试 —— 那会让正常的机器每 10 分钟
+        打一遍全部源。只有"一个都没成"才说明多半是网络断了。 */
+  const totalFailure = lastFailed > 0 && lastOk === 0;
+  if (!totalFailure) {
+    return { at: scheduled, retry: false, delayMs: 0, reason: '正常：按每天的时刻排下一次' };
+  }
+
+  const delay = retryDelayMs(o.failStreak ?? 1);
+  const retryAt = new Date(now.getTime() + delay);
+  /* 重试时刻越过了下一个定时点就直接等定时 —— 不要为了一次重试把
+     明天 07:30 那一次挤掉（用户最在意的恰恰是那一次）。 */
+  if (retryAt.getTime() >= scheduled.getTime()) {
+    return {
+      at: scheduled,
+      retry: false,
+      delayMs: 0,
+      reason: `重试时刻（${retryAt.toLocaleString()}）已越过下次定时，直接等它`,
+    };
+  }
+  return {
+    at: retryAt,
+    retry: true,
+    delayMs: delay,
+    reason: `上一轮 ${lastFailed} 个源全部失败（连续第 ${o.failStreak ?? 1} 轮），${Math.round(delay / 60000)} 分钟后重试`,
+  };
+}
+
 /**
  * 距上次成功抓取是否已经该再抓一次。
  *
@@ -228,11 +315,27 @@ export function createScheduler(o) {
   let runs = 0;
   let failures = 0;
   let skippedTooSoon = 0;
+  let retries = 0;
   let lastError = null;
   let nextAtIso = null;
+  /** 连续"全部源都失败"的轮数；任何一次有源成功就清零 */
+  let failStreak = 0;
+  /** 上一轮的战绩（用来决定下一轮排什么时候） */
+  let lastRun = { ok: null, failed: null };
 
   function state() {
-    return { stopped, running, runs, failures, skippedTooSoon, lastError, nextAt: nextAtIso, at };
+    return {
+      stopped,
+      running,
+      runs,
+      failures,
+      skippedTooSoon,
+      retries,
+      failStreak,
+      lastError,
+      nextAt: nextAtIso,
+      at,
+    };
   }
 
   /** 跑一轮，并把结果如实记下来 */
@@ -248,18 +351,23 @@ export function createScheduler(o) {
       runs += 1;
       // ⚠️ 抓取"全部失败"与"部分失败"要分开看：
       //    部分失败是常态（某个源挂了），不该让调度器报警；
-      //    全部失败通常意味着断网 —— 那要留痕。
+      //    全部失败通常意味着断网 —— 那要留痕，**而且要重试**。
       if (r && r.ok === 0 && r.failed > 0) {
         failures += 1;
+        failStreak += 1;
         lastError = `全部 ${r.failed} 个源都失败了（通常是断网）`;
-        log(`[scheduler] ⚠️ ${lastError}`);
+        log(`[scheduler] ⚠️ ${lastError}（连续第 ${failStreak} 轮）`);
       } else {
         lastError = null;
+        failStreak = 0; // ★ 有源成功就清零 —— 退避的"连续"口径靠这一句
         log(`[scheduler] 完成：成功 ${r ? r.ok : '?'} / 失败 ${r ? r.failed : '?'}`);
       }
+      lastRun = { ok: r ? (r.ok ?? 0) : 0, failed: r ? (r.failed ?? 0) : 0 };
       return r;
     } catch (err) {
       failures += 1;
+      failStreak += 1;
+      lastRun = { ok: 0, failed: 1 };
       lastError = err && err.message ? err.message : String(err);
       /* ⚠️ **不许因为一次异常就停摆**。这是"常驻程序静默死掉"的典型成因：
          定时器里抛一次、没接住、于是再也不排下一次，而进程还活着。 */
@@ -282,20 +390,39 @@ export function createScheduler(o) {
   function scheduleNext() {
     if (stopped) return;
     const n = now();
-    const next = nextRunAt(n, hour, minute);
+    /* ★ 排什么时候**由战绩决定**（见 nextRunPlan 的说明）：
+       全失败 → 退避重试，而不是等明天 07:30。
+       这一段原来是写死的 `nextRunAt(...)`，与成败无关 ——
+       于是早上断网一次，卡片空一整天。 */
+    const plan = nextRunPlan({
+      now: n,
+      hour,
+      minute,
+      lastOk: lastRun.ok,
+      lastFailed: lastRun.failed,
+      failStreak,
+    });
+    const next = plan.at;
     nextAtIso = next.toISOString();
     const ms = Math.max(1000, next.getTime() - n.getTime());
-    log(`[scheduler] 下次抓取：${next.toLocaleString()}（${Math.round(ms / 60000)} 分钟后）`);
+    if (plan.retry) retries += 1;
+    log(
+      `[scheduler] 下次抓取：${next.toLocaleString()}（${Math.round(ms / 60000)} 分钟后）` +
+        (plan.retry ? '【全失败重试】' : '') +
+        ` —— ${plan.reason}`,
+    );
     timerId = setTimer(async () => {
       /* ⚠️ 到点了也要过一遍防抖闸：7:25 刚开机补抓过、7:30 定时器又到点，
          不该再打一遍 19 个源。这是"防抖只接了一半"的典型形态 ——
-         只拦开机路径、不拦定时路径，等于没拦。 */
+         只拦开机路径、不拦定时路径，等于没拦。
+         ⚠️ 但**重试不经过这道闸**：重试的前提就是"刚刚全失败"，
+            用"距上次成功不足 1 小时"去拦它，正好会把唯一该做的事拦掉。 */
       const gap = sinceLastSuccess();
-      if (Number.isFinite(gap) && gap >= 0 && gap < minGapMs) {
+      if (!plan.retry && Number.isFinite(gap) && gap >= 0 && gap < minGapMs) {
         skippedTooSoon += 1;
         log(`[scheduler] 到点了但 ${Math.round(gap / 60000)} 分钟前刚抓过（不足 ${Math.round(minGapMs / 60000)} 分钟），跳过这一轮`);
       } else {
-        await execute('schedule');
+        await execute(plan.retry ? 'retry' : 'schedule');
       }
       scheduleNext(); // 无论成败（也无论跳没跳）都排下一次
     }, ms);

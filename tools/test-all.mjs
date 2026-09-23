@@ -32,6 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 /** 同步加载 node:sqlite —— 只给同步的变异体用（见 makeSyncTestDb 的说明） */
 const require = createRequire(import.meta.url);
@@ -39,6 +40,23 @@ const require = createRequire(import.meta.url);
    工作目录里带空格（`D:\work Buddy\...`）时 URL 里是 `%20`，
    手写的版本不会解码，于是得到一个**看起来对、打开却 ENOENT** 的路径。 */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * 渲染层的纯函数模块（`view-model.js`），用**与真机完全相同的方式**加载：
+ * 当经典脚本丢进 node:vm，从 `globalThis.MB_VIEW` 取出口。
+ *
+ * ⚠️ 不 import：那个文件是经典脚本（不许有 import/export），
+ *    用 ESM 加载会绕开"它到底能不能作为经典脚本跑起来"这件事 ——
+ *    而这个项目正是栽在"离线用 import 全绿、真机经典 script 全废"上的。
+ */
+const VM = (() => {
+  const sandbox = {};
+  vm.createContext(sandbox);
+  new vm.Script(fs.readFileSync(path.resolve(HERE, '..', 'src', 'renderer', 'view-model.js'), 'utf8'), {
+    filename: 'view-model.js',
+  }).runInContext(sandbox);
+  return sandbox.MB_VIEW;
+})();
 
 import { decodeEntities, unwrapCdata, cleanText, collapseWhitespace, stripHtml } from '../src/ingest/entities.js';
 import { canonicalizeUrl, fnv1a, titleFingerprint, dedupeKey } from '../src/ingest/urls.js';
@@ -51,6 +69,8 @@ import {
   createScheduler,
   formatHm,
   parseFetchTime,
+  nextRunPlan,
+  retryDelayMs,
   DEFAULT_FETCH_HOUR,
   DEFAULT_FETCH_MINUTE,
 } from '../src/main/scheduler.js';
@@ -72,6 +92,7 @@ import {
   clearStopRequest,
   hasStopRequest,
   legacyDataDirOf,
+  probeWritable,
 } from '../src/shared/runtime-state.js';
 import { createBootMark, bootLogPath, teeConsole, createLogSink } from '../src/shared/run-log.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
@@ -1263,6 +1284,42 @@ ok('★★ classifyRun 穷举：六种组合，每一种都必须给对结论', 
   assert.equal(classifyRun({ pidInfo: { pid: 100 }, heartbeat: hb, alive: true, imageName: null }).state, 'running');
   // 边界：心跳文件还没写出来（刚启动的几百毫秒内）也不算 stale
   assert.equal(classifyRun({ pidInfo: { pid: 100 }, heartbeat: null, alive: true, imageName: null }).state, 'running');
+
+  /* ⑦ 打包态 —— 这一条曾经是**必错**的：
+     校验写死成"必须是 electron"，而打包版的进程叫 MorningBrief.exe，
+     于是被判成"pid 被复用" ⇒ `stop` 不但不停，还把 pid 文件删掉、
+     打印"已清理，现在状态是未运行"。**报成功、什么都没做。** */
+  const packaged = classifyRun({
+    pidInfo: { pid: 100, image: 'MorningBrief.exe' }, heartbeat: hb, alive: true,
+    imageName: 'MorningBrief.exe',
+  });
+  assert.equal(packaged.state, 'running',
+    '打包版被判成"没在运行" —— stop 会报成功却什么都不做，而且把 pid 文件删掉');
+  assert.equal(packaged.pid, 100);
+
+  /* ⑧ 换成登记制之后，**pid 复用照样挡得住**：
+     别人程序的映像名不会恰好等于我们登记的名字。这条是 ⑦ 的安全底线，
+     少了它，"认出打包版"就变成了"随便谁都说是我"。 */
+  const reused2 = classifyRun({
+    pidInfo: { pid: 100, image: 'MorningBrief.exe' }, heartbeat: null, alive: true,
+    imageName: 'chrome.exe',
+  });
+  assert.equal(reused2.state, 'stale', '登记制把 pid 复用放过去了 —— safe 变 unsafe');
+  assert.ok(/chrome\.exe/.test(reused2.why) && /MorningBrief\.exe/.test(reused2.why),
+    '要把"现在是谁、登记的又是谁"都说出来：' + reused2.why);
+
+  // ⑨ Windows 的映像名大小写不固定（tasklist 给的是 morningbrief.exe 也有可能）
+  assert.equal(classifyRun({
+    pidInfo: { pid: 100, image: 'MorningBrief.exe' }, heartbeat: null, alive: true,
+    imageName: 'morningbrief.EXE',
+  }).state, 'running', '映像名比对是大小写敏感的 —— 会在真机上随机失效');
+
+  /* ⑩ 老 pid 文件（没登记 image）必须退回原来的启发式，
+     否则升级上来的人会遇到"明明是开发态却说我不是我"。 */
+  assert.equal(classifyRun({ pidInfo: { pid: 100 }, heartbeat: null, alive: true, imageName: 'electron.exe' }).state,
+    'running', '没有 image 字段时没有退回 electron 启发式');
+  assert.equal(classifyRun({ pidInfo: { pid: 100 }, heartbeat: null, alive: true, imageName: 'MorningBrief.exe' }).state,
+    'stale', '没有 image 字段时不该凭空信任 —— 那是老 pid 文件，无法证明归属');
 });
 
 ok('★ pid 文件是"合并"写入：管理命令与应用各写一半，两个字段都要留住', () => {
@@ -1318,6 +1375,66 @@ ok('★ 数据目录默认在**项目内**（用户要求：简报数据跟着�
   assert.ok(pidFilePath('D:\\mb-a').endsWith('morning-brief.pid'));
   assert.ok(heartbeatPath('D:\\mb-a').endsWith('boot-heartbeat.txt'));
   assert.ok(runLogPath('D:\\mb-a').endsWith('run.log'));
+});
+
+/* ★★ 打包态的默认数据目录 —— P0-2 的核心，此前**一条断言都没有**。
+ *
+ * 打包后本模块住在 `…\resources\app.asar\src\shared\`，而 PROJECT_ROOT 是由
+ * "自己所在的位置"算出来的 ⇒ 得到的是 **asar 内部**，那是只读归档：
+ * `mkdir` 必失败，应用在模块求值阶段就退出。
+ * 而 GUI 子系统程序没有控制台、窗口还没建 ⇒ 用户看到的是"双击了，什么都没发生"。
+ * ⇒ 打包态必须改用 Electron 给的 userData。 */
+ok('★★ 打包态的数据目录必须落在 userData，绝不许落进只读的 app.asar', () => {
+  const userData = 'C:\\Users\\x\\AppData\\Roaming\\morning-brief';
+  const packaged = dataDirOf({}, { packagedUserData: userData });
+  assert.ok(!/app\.asar/.test(packaged),
+    '打包态数据目录落进 app.asar 了 —— 建目录必失败，表现是"双击没反应"：' + packaged);
+  assert.equal(packaged, path.join(userData, 'data'));
+
+  /* ⚠️ 两条分支必须**同时**断言：只测打包态的话，把默认值改成 userData
+     会让开发态的数据悄悄搬走 —— 而"简报数据跟着晨报机走"是用户明确要求的。 */
+  const here = path.resolve(HERE, '..');
+  assert.equal(dataDirOf({}, {}), path.join(here, 'data'), '开发态（无 ctx）不再是项目内 data/');
+  assert.equal(dataDirOf({}), path.join(here, 'data'), '开发态默认值漂了');
+  assert.equal(dataDirOf({}, { packagedUserData: null }), path.join(here, 'data'),
+    'packagedUserData 为 null 时必须当"没打包"处理，而不是拼出 null\\data');
+
+  /* 优先级：MB_DATA_DIR > packagedUserData > 项目内。
+     少了这条，打包后想用 MB_DATA_DIR 指定数据目录会**静默失效**
+     （测试与多实例并行全靠它）。 */
+  assert.equal(dataDirOf({ MB_DATA_DIR: 'D:\\mb-b' }, { packagedUserData: userData }),
+    path.resolve('D:\\mb-b'), 'MB_DATA_DIR 被 packagedUserData 盖掉了');
+
+  /* ★ 判据由调用方传进来，本模块不许 import electron ——
+     service.mjs 是纯 Node，一旦它依赖 electron，管理命令直接崩。 */
+  const src = stripJsComments(fs.readFileSync(path.join(here, 'src', 'shared', 'runtime-state.js'), 'utf8'));
+  assert.ok(!/from\s+'electron'|require\(\s*'electron'\s*\)/.test(src),
+    'runtime-state.js 依赖了 electron —— service.mjs 是纯 Node 跑的，加载它会直接崩');
+});
+
+/* ★★ 数据目录可写性探测 —— 同样是 P0-2 的核心，此前零断言。
+ * 不探的后果就是那句话："双击了，什么都没发生"。 */
+ok('★★ 目录不可写必须在**建窗口之前**被翻译成人话', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-probe-'));
+  const good = probeWritable(path.join(dir, 'sub'));
+  assert.equal(good.ok, true, '可写的目录被判成不可写：' + JSON.stringify(good));
+
+  /* 拿一个**已存在的文件**当目录：mkdir 必失败。
+     ⚠️ 只断言 ok===false 是不够的 —— 一个永远返回 {ok:false} 的实现在这里也能过，
+     但那种实现在真机上会让应用**永远起不来**。所以正反两面都要钉。 */
+  const asFile = path.join(dir, 'not-a-dir');
+  fs.writeFileSync(asFile, 'x');
+  const bad = probeWritable(asFile);
+  assert.equal(bad.ok, false, '拿文件当目录竟然判成可写');
+  assert.ok(typeof bad.error === 'string' && bad.error.length > 0,
+    '探测失败却没带原因 —— 错误框里就没法告诉用户该怎么办');
+  assert.ok(/(E|WSA)[A-Z]+/.test(bad.error),
+    '失败原因里没有系统错误码，用户看不懂这是什么毛病：' + bad.error);
+
+  /* 探测不许留下垃圾：它会往目标目录写一个探针文件再删掉。 */
+  assert.ok(!fs.existsSync(path.join(dir, 'sub', '.mb-write-probe')), '探测完没清掉探针文件');
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 ok('★★ 三个入口必须用**同一个**数据目录口径（漂移会让启动器白等 20 秒）', () => {
@@ -1835,13 +1952,56 @@ ok('★★ 上一条检查器本身必须"抓得住真 bug、也不误报"（否
   /* @movability-fixtures:end */
 });
 
-ok('★ 主进程现在解析到的置底脚本路径确实落在项目内', () => {
+/* ★★ 打包态的资源定位 —— 这是"装完之后功能静默失效"的唯一防线。
+ *
+ * 同一个资源牵扯三份互不相干的口径，改一份忘另一份，表现都是**装完不报错、功能不生效**：
+ *   ① index.js 必须走 runtimeAsset，而不是 `path.join(ROOT, ...)` ——
+ *      打包态 ROOT 落在 app.asar 内部，而 PowerShell 的 -File 读不了 asar；
+ *   ② runtimeAsset 在 app.isPackaged 时必须查 process.resourcesPath；
+ *   ③ package.json 的 extraResources 必须把资源铺到**同一个相对位置**。
+ * ②③ 之间没有任何机制保证一致（一个在代码里、一个在 JSON 里），所以在这里钉死。 */
+ok('★★ 打包态资源定位：runtimeAsset ↔ extraResources 两份口径必须对得上', () => {
   const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
-  const m = src.match(/const script = path\.join\(([^)]*)\)/);
-  assert.ok(m, '找不到置底脚本的路径拼接');
-  assert.ok(!/\.\./.test(m[1]), `置底脚本路径里有 .. ：${m[1]}`);
-  assert.ok(/tools/.test(m[1]) && /win/.test(m[1]), `置底脚本路径不含 tools/win：${m[1]}`);
+  const pkg = JSON.parse(fs.readFileSync(path.resolve(HERE, '..', 'package.json'), 'utf8'));
+  const extra = pkg.build && pkg.build.extraResources ? pkg.build.extraResources : [];
+  const extraTo = extra
+    .map((r) => (typeof r === 'string' ? r : r.to))
+    .filter(Boolean)
+    .map((t) => String(t).replace(/\\/g, '/'));
+
+  const ra = src.match(/function runtimeAsset\(rel\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(ra, 'index.js 里找不到 runtimeAsset');
+  assert.ok(/app\.isPackaged/.test(ra[0]), 'runtimeAsset 没判 app.isPackaged —— 打包态会退回 asar 内部路径');
+  assert.ok(/process\.resourcesPath/.test(ra[0]), 'runtimeAsset 没用 process.resourcesPath');
+
+  for (const [rel, what] of [
+    ['tools/win/set-window-level.ps1', '置底脚本'],
+    ['assets/tray-16.png', '托盘图标'],
+  ]) {
+    const seg = rel.split('/');
+    const dir = seg.slice(0, -1).join('/');
+    const call = new RegExp(
+      `runtimeAsset\\(\\s*path\\.join\\(\\s*'${seg.join("'\\s*,\\s*'")}'\\s*\\)\\s*\\)`);
+    assert.ok(call.test(src),
+      `${what}没走 runtimeAsset（打包后 PowerShell / 托盘 API 读不到 asar 里的路径）`);
+    assert.ok(!new RegExp(`path\\.join\\(ROOT,\\s*'${seg[0]}'`).test(src),
+      `${what}还有一处裸 path.join(ROOT, '${seg[0]}', ...) —— 这正是打包后会断的写法`);
+
+    /* ②③ 对得上：extraResources 的 to 必须是这个相对路径按路径段的前缀 */
+    assert.ok(extraTo.some((t) => seg.slice(0, t.split('/').length).join('/') === t),
+      `extraResources 没把 ${rel} 铺到 resources/${dir} —— 打包态 runtimeAsset 会找不到` +
+      `（现有 to：${extraTo.join('、') || '（空）'}）`);
+
+    const row = extra.find((r) => typeof r !== 'string' &&
+      String(r.to).replace(/\\/g, '/') === dir);
+    assert.ok(row, `extraResources 里找不到 to=${dir} 的那一项`);
+    assert.ok(fs.existsSync(path.resolve(HERE, '..', row.from)),
+      `extraResources 的 from 目录不存在：${row.from}`);
+  }
+
+  /* 开发态的源文件本身也得在 —— 打包只是把它们复制出去 */
   assert.ok(fs.existsSync(path.resolve(HERE, '..', 'tools', 'win', 'set-window-level.ps1')));
+  assert.ok(fs.existsSync(path.resolve(HERE, '..', 'src', 'renderer', 'assets', 'tray-16.png')));
 });
 
 ok('★ 三个 .vbs 入口与 service.mjs 都用"自己所在的位置"定位项目（与搬移无关）', () => {
@@ -1939,6 +2099,156 @@ await aok('★★ 端到端：断网那一轮之后，catchUpDecision 仍然判�
   } finally {
     db.close();
   }
+});
+
+/* ==================================================================
+ * 第十层 · 抓取全失败之后，当天必须还会再试
+ * ------------------------------------------------------------------
+ * ⚠️ 这一层补的是一个**产品级的洞**，质检时被审查员逐行走出来的：
+ *
+ *   `scheduleNext()` 原来永远排"下一个 07:30 墙钟点"，**与成败无关**。
+ *   于是：早上 7:30 路由器正在重启 / 宽带还没拨上来 → 19 个源全失败
+ *   → 程序把下一次排到**明天 7:30** → 网络 7:31 就恢复了，它也不会再试。
+ *
+ *   用户到工位看到的是一屏旧条目，而且总览句照常说"今天共 N 条"
+ *   （因为库里有历史数据）—— **没有任何一句话说"今天还没抓到"**。
+ *   对一个"每天一次"的产品，那等于当天没有产品。
+ * ================================================================== */
+say();
+say('--- 第十层 · 全失败之后当天要重试（否则卡片空一整天）---');
+
+ok('★ 退避表：10 分钟 → 30 → 60，之后封顶不再涨', () => {
+  assert.equal(retryDelayMs(0), 0, '没有失败就不该安排重试');
+  assert.equal(retryDelayMs(1), 10 * 60000);
+  assert.equal(retryDelayMs(2), 30 * 60000);
+  assert.equal(retryDelayMs(3), 60 * 60000);
+  /* 封顶：断网一整天时，固定 10 分钟会打 144 轮 × 19 个源 ≈ 2700 次请求 ——
+     那是拿用户的路由器出气。封顶 1 小时后一天最多 24 轮。 */
+  assert.equal(retryDelayMs(4), 60 * 60000);
+  assert.equal(retryDelayMs(99), 60 * 60000);
+  assert.equal(retryDelayMs(NaN), 0);
+});
+
+ok('★★ 全失败 → 排重试；成功或部分失败 → 排明天的 07:30', () => {
+  const now = new Date(2026, 8, 23, 7, 30, 30); // 刚过 7:30
+  const at = (o) => nextRunPlan({ now, hour: 7, minute: 30, ...o });
+  const mins = (p) => Math.round((p.at.getTime() - now.getTime()) / 60000);
+
+  /* ⚠️ "部分失败"必须走正常路径：单个源挂掉是**常态**，
+     绝不能因此每 10 分钟重打一遍全部源。 */
+  for (const [name, o] of [
+    ['从未跑过', { lastOk: null, lastFailed: null, failStreak: 0 }],
+    ['全部成功', { lastOk: 19, lastFailed: 0, failStreak: 0 }],
+    ['部分失败', { lastOk: 17, lastFailed: 2, failStreak: 0 }],
+  ]) {
+    const p = at(o);
+    assert.equal(p.retry, false, name + ' 不该触发重试');
+    assert.equal(mins(p), 1440, name + ' 应当排到下一次 07:30（1440 分钟后）');
+  }
+
+  const f1 = at({ lastOk: 0, lastFailed: 19, failStreak: 1 });
+  assert.equal(f1.retry, true, '全失败却没有重试 —— 卡片会空一整天');
+  assert.ok(mins(f1) < 60, `全失败后下一次要在一小时内，实得 ${mins(f1)} 分钟`);
+  assert.equal(mins(f1), 10);
+  assert.equal(mins(at({ lastOk: 0, lastFailed: 19, failStreak: 2 })), 30);
+  assert.equal(mins(at({ lastOk: 0, lastFailed: 19, failStreak: 5 })), 60);
+});
+
+ok('★ 重试不许挤掉"明天 07:30"那一次（用户最在意的恰恰是它）', () => {
+  // 23:50 全失败：+60 分钟 = 次日 00:50，而下一个定时点是次日 07:30 —— 重试更早，正常
+  const late = new Date(2026, 8, 23, 23, 50, 0);
+  const p1 = nextRunPlan({ now: late, hour: 7, minute: 30, lastOk: 0, lastFailed: 19, failStreak: 3 });
+  assert.equal(p1.retry, true, '23:50 全失败应当重试（次日 00:50 早于 07:30）');
+  assert.ok(p1.at.getTime() < nextRunAt(late, 7, 30).getTime(), '重试时刻越过了下次定时点');
+
+  // 07:00 全失败：+60 分钟 = 08:00，而下一个定时点是**今天** 07:30 —— 定时更早，应当等定时
+  const early = new Date(2026, 8, 23, 7, 0, 0);
+  const p2 = nextRunPlan({ now: early, hour: 7, minute: 30, lastOk: 0, lastFailed: 19, failStreak: 3 });
+  assert.equal(p2.retry, false, '重试时刻晚于下一次定时，应当直接等定时而不是排一个更晚的重试');
+  assert.equal(p2.at.getTime(), nextRunAt(early, 7, 30).getTime());
+});
+
+await aok('★★ 端到端：调度器在"全失败"之后排出的定时器必须短于 1 小时', async () => {
+  /* 这条是审查员点名的判据。它跑的是**真的调度器**，不是纯函数 ——
+     因为洞原来就在调度器的 `scheduleNext()` 里，纯函数测不到它。 */
+  let t = new Date(2026, 8, 23, 7, 30, 30).getTime();
+  const timers = [];
+  const logs = [];
+  const s = createScheduler({
+    run: async () => ({ ok: 0, failed: 19 }),
+    lastSuccessIso: () => null,
+    hour: 7,
+    minute: 30,
+    now: () => new Date(t),
+    setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clearTimer: () => {},
+    log: (m) => logs.push(m),
+  });
+  s.start();
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.ok(timers.length >= 1, '没有排出任何定时器');
+  const first = timers[timers.length - 1];
+  assert.ok(
+    first.ms < 60 * 60 * 1000,
+    `全失败之后排出的定时器是 ${Math.round(first.ms / 60000)} 分钟 —— 等于今天不再重试了`,
+  );
+  assert.ok(logs.some((l) => l.includes('全部') && l.includes('失败')), '没有留下"全部失败"的日志');
+
+  // 跑一轮让 failStreak 前进，下一次应当退避到 30 分钟
+  t += first.ms;
+  await first.fn();
+  const second = timers[timers.length - 1];
+  assert.equal(Math.round(second.ms / 60000), 30, '第二轮全失败没有退避到 30 分钟');
+  assert.equal(s.state().failStreak, 2, 'failStreak 没有累加');
+
+  // 一旦有源成功，必须立刻回到"明天 07:30"
+  const s2 = createScheduler({
+    run: async () => ({ ok: 19, failed: 0 }),
+    lastSuccessIso: () => new Date(t).toISOString(),
+    hour: 7,
+    minute: 30,
+    now: () => new Date(t),
+    setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clearTimer: () => {},
+    log: () => {},
+  });
+  s2.start();
+  await new Promise((r) => setTimeout(r, 20));
+  const afterSuccess = timers[timers.length - 1];
+  assert.ok(
+    afterSuccess.ms > 20 * 60 * 60 * 1000,
+    `成功之后应当回到等明天的 07:30，实得 ${Math.round(afterSuccess.ms / 60000)} 分钟`,
+  );
+  assert.equal(s2.state().failStreak, 0, '成功之后 failStreak 没有清零');
+});
+
+ok('★ 总览句必须如实说"今天还没抓到"（否则用户看到的是旧闻却不知道）', () => {
+  const mk = (fetchedToday) =>
+    VM.reduce(VM.createView(), {
+      type: 'data',
+      seq: 1,
+      payload: {
+        items: [{ id: 1, title: 'a' }, { id: 2, title: 'b' }],
+        hasMore: false,
+        categories: [{ id: 1, name: 'AI' }],
+        todayTotal: 5,
+        filteredTotal: 5,
+        curated: 15,
+        health: { total: 19, ok: 19, bad: 0, never: 0 },
+        lastIngestAt: '2026-09-23T00:00:00Z',
+        lastSuccessAt: fetchedToday ? '2026-09-23T00:00:00Z' : '2026-09-22T00:00:00Z',
+        fetchedToday,
+        sinceIso: '2026-09-22T16:00:00Z',
+      },
+    });
+
+  const bad = VM.derive(mk(false)).headline.text;
+  assert.ok(/今天还没抓到/.test(bad), '全失败那天总览句没有说实话：' + bad);
+  assert.ok(/显示 2 条/.test(bad), '顺带还应当给出条数：' + bad);
+
+  const good = VM.derive(mk(true)).headline.text;
+  assert.ok(!/今天还没抓到/.test(good), '今天抓到了却还在说没抓到：' + good);
 });
 
 /* ---------- 变异测试 ---------- */

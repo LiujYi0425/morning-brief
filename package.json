@@ -2,9 +2,10 @@
   "name": "morning-brief",
   "version": "0.1.0",
   "private": true,
-  "description": "晨报机 · 产品工程（M1）。常驻桌面情报板：定时抓取 → 归一化去重 → AI 筛选与摘要 → 置底玻璃卡片。",
+  "description": "晨报机 · 产品工程（M1）。常驻桌面情报板：定时抓取 → 归一化去重 → 置底玻璃卡片。",
   "type": "module",
   "main": "src/main/index.js",
+  "author": "liujyi0425",
   "scripts": {
     "start": "node tools/launch.mjs",
     "start:bg": "node tools/service.mjs start",
@@ -13,11 +14,15 @@
     "status": "node tools/service.mjs status",
     "logs": "node tools/service.mjs logs",
     "ingest": "node tools/run-ingest.mjs",
+    "icon": "node tools/make-icon.mjs",
+    "dist": "node tools/dist.mjs",
+    "dist:check": "node tools/check-dist.mjs",
     "test": "node tools/test-all.mjs && node tools/test-interaction.mjs",
     "test:data": "node tools/test-all.mjs",
-    "test:ui": "node tools/test-interaction.mjs"
+    "test:ui": "node tools/test-interaction.mjs",
+    "test:mutants": "node tools/test-mutants.mjs"
   },
-  "comment:依赖": "⚠️ 本工程**零运行时依赖**，这是刻意的：① 数据库用 Electron 内嵌 Node 自带的 `node:sqlite`（已实测可用：electron 44.4.2 + node 24.21.0，建表/插入/查询/分页/LIKE 全通）；② RSS/Atom 解析自己写（正则 + 实体解码），不引 xml2js —— 理由是**装包在无网环境下会失败**，而抓取层恰恰是最需要能离线跑测试的部分。",
+  "comment:依赖": "⚠️ 本工程**零运行时依赖**，这是刻意的：① 数据库用 Electron 内嵌 Node 自带的 `node:sqlite`（已实测可用：electron 44 + node 24，建表/插入/查询/分页全通）；② RSS/Atom 解析自己写（正则 + 实体解码），不引 xml2js —— 理由是**装包在无网环境下会失败**，而抓取层恰恰是最需要能离线跑测试的部分。electron-builder 只在 devDependencies 里，仅打包时使用。",
   "comment:scripts": {
     "start": "前台启动（占着一个终端；调试时用这个，日志直接打在屏幕上）",
     "start:bg": "后台启动（脱离终端，关掉终端也不退出）—— 等价于双击「启动晨报机.vbs」",
@@ -26,12 +31,66 @@
     "status": "查询运行状态（进程是否活着、跑了多久、下次抓取、今日条数）",
     "logs": "看后台运行日志的尾巴",
     "ingest": "只跑抓取+入库（纯 Node，不需要 Electron）—— 这是抓取层能被离线验证的关键",
+    "icon": "生成应用图标与托盘图标（纯 Node 手写 PNG/ICO，零依赖）",
+    "dist": "打包成 Windows 安装包（输出到 release/）",
+    "dist:check": "打包后核对产物：隐私文件有没有混进去（data/、日志、.env、数据库）",
     "test": "离线考裁判总入口（纯 Node）：抓取/数据层 + 交互一致性两层",
     "test:data": "抓取、数据层与后台运行（实体解码/URL 归一/解析器/去重/游标分页/定时/状态判定）",
     "test:ui": "交互一致性（四条不变量 + 顺序无关排列 + BFS 可达 + 变异测试）"
   },
+  "comment:build": {
+    "files": "★ 这张排除表是**隐私边界**，不是体积优化。electron-builder **不读 .gitignore**（工具链源码 fileMatcher.js 里 grep gitignore 只命中一处，那是「把 .gitignore 这个文件排除掉」）。不写 files 键时它按 **/* 打包，于是 data/brief.db（真实简报 + 已读标记）、含用户名的日志、.npm-cache(22MB)、.env、*.pem 全部进安装包 —— 而 asar 不是加密归档，一条 asar extract 就取出数据。改完这张表必须跑 npm run dist:check 复核。",
+    "extraResources": "★ 这两项必须**在 asar 之外**：PowerShell 的 -File 读不了 asar 里的路径（它不认识那个「文件里的文件系统」），所以置底脚本必须铺到 resources/ 下、运行时用 process.resourcesPath 找（见 index.js 的 runtimeAsset）。托盘图标同理。",
+    "nsis": "oneClick:false + allowToChangeInstallationDirectory:true —— 默认的 oneClick 会双击直接装、不给选路径，对「发给同事」不友好；perMachine:false 装到用户目录，不需要管理员权限。",
+    "win.icon": "由 npm run icon 生成。不设它的话 electron-builder 用 Electron 的默认原子图标 —— 桌面、任务管理器、属性页全是别人的图标。"
+  },
+  "build": {
+    "appId": "com.liujyi0425.morningbrief",
+    "productName": "MorningBrief",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "**/*",
+      "!data/**",
+      "!report/**",
+      "!release/**",
+      "!.git/**",
+      "!.npm-cache/**",
+      "!tools/**",
+      "!build/**",
+      "!*.log",
+      "!.env",
+      "!.env.*",
+      "!*.pem",
+      "!*.key",
+      "!*.bak",
+      "!*.ps1",
+      "!*.vbs",
+      "!package-lock.json"
+    ],
+    "extraResources": [
+      { "from": "tools/win", "to": "tools/win" },
+      { "from": "src/renderer/assets", "to": "assets" }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "晨报机"
+    }
+  },
+  "comment:devDependencies": "electron 用**精确版本**、不加 ^：node_modules/electron/package.json 里写 44.4.3、而 dist/ 里实际躺着的是 44.4.2 的二进制 —— 于是 electron-builder 去找 44.4.2 的那个 zip（缓存里有），npm 却以为装的是 44.4.3。这种'声明的版本'和'真的在跑的那个二进制'不一致，会让'我测过'和'你装到的'变成两个东西。钉死成 44.4.2：与本机运行/测试过的那个完全一致。",
   "devDependencies": {
-    "electron": "^44.4.2",
+    "electron": "44.4.2",
     "electron-builder": "^26.15.3"
   }
 }

@@ -63,8 +63,23 @@ export const DEFAULT_DATA_DIR_NAME = 'data';
  *    各写一份默认值就一定会漂移，而漂移的表现是"应用写这个目录、
  *    管理命令查那个目录"，两边都觉得自己是对的。
  */
-export function dataDirOf(env = process.env) {
+export function dataDirOf(env = process.env, ctx = {}) {
   if (env.MB_DATA_DIR) return path.resolve(env.MB_DATA_DIR);
+  /* ★ 打包之后**不能**把数据放在项目旁边。
+   *
+   * ⚠️ 打包后本文件住在 `…\resources\app.asar\src\shared\`，而 `PROJECT_ROOT`
+   *    是由"自己所在的位置"算出来的 ⇒ 会得到 `app.asar` 这个**只读归档**，
+   *    于是数据目录变成 `app.asar\data` —— 建目录必失败，应用起不来。
+   *    而失败的样子是"双击没反应"（GUI 程序无控制台、窗口还没建）。
+   *
+   * ⇒ 打包态一律用 Electron 给的 `userData`（`%APPDATA%\晨报机`），
+   *   那里可写、随用户走、卸载时也归它管。
+   *   开发态保持"项目内 ./data"，因为那正是"搬走时数据跟着走"的诉求。
+   *
+   * ⚠️ 判据由**调用方**传进来（`ctx.packagedUserData`），而不是在这里
+   *    `import electron` —— 这个模块是零依赖的，`service.mjs` 也要用它，
+   *    一旦 import 了 electron，管理命令就加载不了它了。 */
+  if (ctx.packagedUserData) return path.join(ctx.packagedUserData, DEFAULT_DATA_DIR_NAME);
   return path.join(PROJECT_ROOT, DEFAULT_DATA_DIR_NAME);
 }
 
@@ -72,6 +87,38 @@ export function dataDirOf(env = process.env) {
 export function legacyDataDirOf(env = process.env) {
   const home = env.USERPROFILE || env.HOME || '';
   return home ? path.join(home, '.morning-brief') : null;
+}
+
+/**
+ * 数据目录到底能不能写。
+ *
+ * ⚠️ 为什么要单独探一次，而不是"写到哪算哪"：
+ *   数据目录不可写是一类**后果极重、表现极轻**的故障 ——
+ *     · 打包后它落在只读的 `app.asar` 里
+ *     · 目录被放在 `C:\Program Files`（非管理员不可写）
+ *     · 磁盘满、被安全软件锁、网盘同步锁着
+ *   这几种情况下应用会**在模块求值阶段就抛异常退出**：
+ *   GUI 子系统程序没有控制台，窗口还没建，于是用户看到的是
+ *   **"双击了，什么都没发生"** —— 最难查、也最让人以为"装坏了"的一种失败。
+ *
+ * ⇒ 在门口探一次，把"目录不可写"翻译成一句人话 + 一个可见的错误框。
+ *
+ * ⚠️ 只有一处实现：主进程与 `service.mjs` 共用。
+ *    各写一份必然漂移（这个工程已经在数据目录口径上栽过一次）。
+ *
+ * @param {string} dir
+ * @returns {{ok:boolean, error?:string}}
+ */
+export function probeWritable(dir) {
+  const probe = path.join(dir, '.mb-write-probe');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(probe, 'ok', 'utf8');
+    fs.rmSync(probe, { force: true });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `${(err && err.code) || ''} ${(err && err.message) || err}`.trim() };
+  }
 }
 
 export function pidFilePath(dataDir) {
@@ -296,8 +343,18 @@ export function classifyRun({ pidInfo, heartbeat, alive, imageName = null }) {
 
   /* ★ 归属校验，两道：
      ① 心跳里的 pid 必须与 pid 文件一致。心跳只有本应用会写，所以这是最可靠的证据。
-     ② 拿得到映像名时，必须是 electron。这一道是为了挡住"pid 被别的程序复用"：
-        那种情况下心跳还是旧的、pid 却已经属于别人了。 */
+     ② 拿得到映像名时，必须与 pid 文件里**登记的那个映像名**一致。
+        这一道是为了挡住"pid 被别的程序复用"：
+        那种情况下心跳还是旧的、pid 却已经属于别人了。
+
+     ⚠️⚠️ 这里原先写死成 `/^electron(\.exe)?$/`：开发态没问题，**打包后必错** ——
+        打包版的进程叫 `MorningBrief.exe`，于是被判成"pid 被复用"，
+        `stop` 不但不停，还把 pid 文件删掉、打印"已清理，现在状态是未运行"。
+        **报成功、什么都没做** —— 这是这套状态机里最坏的一种失败：
+        用户以为停掉了，应用还在跑，而且 status 从此说"没在运行"。
+     改成比对**登记的那个名字**：既认得出打包版，又**一样挡得住 pid 复用**
+     （别人程序的映像名不会恰好等于我们登记的名字），严格强于写死常量。
+     老 pid 文件没有 image 字段时，退回原来的 electron 启发式。 */
   if (heartbeat && heartbeat.pid != null && heartbeat.pid !== pid) {
     return {
       state: 'stale',
@@ -305,12 +362,24 @@ export function classifyRun({ pidInfo, heartbeat, alive, imageName = null }) {
       why: `心跳文件里的 pid 是 ${heartbeat.pid}，与 pid 文件的 ${pid} 不一致 —— 进程号被系统回收后分配给了别的程序`,
     };
   }
-  if (imageName && !/^electron(\.exe)?$/i.test(String(imageName).trim())) {
-    return {
-      state: 'stale',
-      pid,
-      why: `进程 ${pid} 现在是「${imageName}」而不是 electron —— pid 文件过期了（进程号被复用）`,
-    };
+  if (imageName) {
+    const actual = String(imageName).trim();
+    const recorded = pidInfo.image ? String(pidInfo.image).trim() : '';
+    if (recorded) {
+      if (actual.toLowerCase() !== recorded.toLowerCase()) {
+        return {
+          state: 'stale',
+          pid,
+          why: `进程 ${pid} 现在是「${actual}」，而 pid 文件登记的是「${recorded}」—— 进程号被系统回收后分配给了别的程序`,
+        };
+      }
+    } else if (!/^electron(\.exe)?$/i.test(actual)) {
+      return {
+        state: 'stale',
+        pid,
+        why: `进程 ${pid} 现在是「${actual}」而不是 electron —— pid 文件过期了（进程号被复用）`,
+      };
+    }
   }
 
   return { state: 'running', pid, why: '进程存活且归属校验通过' };

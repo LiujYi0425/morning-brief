@@ -70,6 +70,17 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ★ 输出显式设成 UTF-8。
+#   父进程（src/main/index.js）用 `execFile(..., { encoding: 'utf8' })` 读我们的 stdout，
+#   而 PowerShell 5.1 默认按**控制台代码页**（简中机器上是 936/GBK）写出去 ——
+#   于是真机日志里那一行 `[level] applied { … "title":"????" }` 的中文全是乱码。
+#   其余字段都是 ASCII，所以只有它坏 —— 这种"只坏一个字段"的问题最容易被忽略，
+#   而它坏掉的恰好是唯一能让人确认"压的是哪个窗口"的信息。
+#   ⚠️ 用 try/catch 包住：某些宿主（无控制台 / stdout 被重定向）下这个 setter 会抛。
+#      "让日志好看一点"绝不能把置底本身搞失败。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
 $errors = New-Object System.Collections.ArrayList
 
 Add-Type -Namespace MbLevel -Name Native -MemberDefinition @'

@@ -161,6 +161,12 @@
       curated: CURATED_DEFAULT,
       health: null,
       lastIngestAt: null,
+      /** 上次**成功**抓取（有源成功才算）—— 与调度器同一口径 */
+      lastSuccessAt: null,
+      /** 今天成功抓到过没有。
+       *  ❗`false` 且列表非空 = "你看到的其实是旧闻" —— 这种状态**必须让用户知道**，
+       *    否则界面一切正常、只是内容不是今天的，那是最误导人的一种坏法。 */
+      fetchedToday: true,
       /** 服务端算出的"今天 00:00"（本地日）。翻页时**原样带回去**，
        *  否则跨过午夜之后第 2 页会换一个日期边界、与第 1 页接不上。 */
       sinceIso: null,
@@ -271,6 +277,8 @@
         curated: p.curated != null ? p.curated : v.curated,
         health: p.health === undefined ? v.health : p.health,
         lastIngestAt: p.lastIngestAt === undefined ? v.lastIngestAt : p.lastIngestAt,
+        lastSuccessAt: p.lastSuccessAt === undefined ? v.lastSuccessAt : p.lastSuccessAt,
+        fetchedToday: p.fetchedToday === undefined ? v.fetchedToday : !!p.fetchedToday,
         sinceIso: p.sinceIso === undefined ? v.sinceIso : p.sinceIso,
         /* 服务端若知道"用户上次选的类别"而本地还没选，采纳它；否则尊重本地 */
         activeCategory: v.activeCategory == null ? (p.activeCategory == null ? null : p.activeCategory) : v.activeCategory,
@@ -468,6 +476,17 @@
     if (older > 0) parts.push('另含更早 ' + older + ' 条');
     var bad = num(view.health && view.health.bad);
     if (bad > 0) parts.push(bad + ' 个源异常');
+    /* ★★ 今天一次都没抓成功时，**必须说出来**。
+     *
+     * ⚠️ 这一句是"全网断了一天，界面却一切正常"的唯一破绽：
+     *    抓取全失败时库里还有昨天的条目，`todayTotal` 也照常算得出来，
+     *    于是上面那串数字看起来完全正常 —— 用户不会知道内容不是今天的。
+     *    调度器那边已经在退避重试了（见 scheduler.js 的 nextRunPlan），
+     *    界面这边只需要**如实告诉他正在重试**，让他别以为程序坏了。
+     *
+     * ⚠️ 只在"有内容可看"时才挂这一句（空列表的文案已经说了抓取的事），
+     *    否则同一件事会说两遍。 */
+    if (view.fetchedToday === false) parts.push('今天还没抓到，正在自动重试');
     return { text: parts.join(' · ') + '。', empty: false };
   }
 

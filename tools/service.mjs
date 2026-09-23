@@ -52,6 +52,7 @@ import {
   rawLogPath,
   requestStop,
   clearStopRequest,
+  probeWritable,
 } from '../src/shared/runtime-state.js';
 import { nextRunAt, parseFetchTime, formatHm } from '../src/main/scheduler.js';
 
@@ -196,14 +197,13 @@ async function doStart() {
    *          at Object.openSync (node:fs:622)
    *    用户看到的是一串栈 —— 既不知道卡在哪一步，也不知道该怎么办。
    *    ⇒ 在门口先试一下，把"目录不可写"翻译成人话。
-   *      这一步不到 1 毫秒，但它决定了失败时用户是知道原因还是抓瞎。 */
-  const probe = path.join(DATA_DIR, '.mb-write-probe');
-  try {
-    fs.writeFileSync(probe, 'ok', 'utf8');
-    fs.rmSync(probe, { force: true });
-  } catch (err) {
+   *
+   * ⚠️ 探针实现在 `runtime-state.js`，与主进程共用**同一份**。
+   *    两边各写一份的话，会出现"管理命令说能写、应用说不能写"这种最难查的分歧。 */
+  const probe = probeWritable(DATA_DIR);
+  if (!probe.ok) {
     say(`✗ 数据目录不可写：${DATA_DIR}`);
-    say(`  原因：${err.code || ''} ${err.message}`);
+    say(`  原因：${probe.error}`);
     say('  这个目录要放数据库与运行日志，所以它是必需的。可以：');
     say('    ① 换一个目录：node tools/service.mjs start --data-dir <别的路径>');
     say('    ② 检查目录权限，或看杀毒软件有没有拦住它');

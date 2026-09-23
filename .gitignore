@@ -51,3 +51,11 @@ id_ed25519.pub
 dist/
 out/
 release/
+
+# 图标预览图（npm run icon 的 --preview 产物，纯粹给人看的）
+build/icon-preview-*.png
+
+# ⚠️ 但下面这两个**要进仓库**：它们是运行时/打包时的输入，且生成结果是字节稳定的
+#   · build/icon.ico              → package.json 的 win.icon
+#   · src/renderer/assets/*.png   → 托盘图标（没它就 tray-SKIPPED，功能缺一块）
+# 不进仓库的话，clone 下来不跑 npm run icon 就没有图标。

@@ -32,6 +32,7 @@ import {
   clearStopRequest,
   dataDirOf,
   legacyDataDirOf,
+  probeWritable,
 } from '../shared/runtime-state.js';
 import { createBootMark, teeConsole, createLogSink } from '../shared/run-log.js';
 import { runIngest } from '../ingest/fetch-feeds.js';
@@ -40,10 +41,53 @@ import { openDb, queryItems, countItems, sourceHealth, listCategories, getMeta, 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
 
-/* 数据目录：默认 **项目内的 `data/`**，可用 `MB_DATA_DIR` 覆盖。
+/**
+ * 取一个**运行时资源**的真实路径（开发态 / 打包态自动切换）。
+ *
+ * ⚠️⚠️ 为什么不能直接用 `path.join(ROOT, ...)`：
+ *
+ *   打包之后整个应用被塞进 `resources/app.asar` —— 那是**一个文件**，
+ *   只是 Electron 的 fs 补丁让它"看起来像目录"。于是：
+ *     · `fs.readFileSync('app.asar/x')` ✅ 能用（补丁管到）
+ *     · `powershell.exe -File "app.asar\tools\win\set-window-level.ps1"` ❌
+ *       **PowerShell 不认识 asar**，它看到的是一个普通文件路径，
+ *       中间那层"目录"在真实文件系统里不存在 ⇒ 脚本直接报找不到。
+ *
+ *   ⇒ 凡是要**交给外部程序**的资源（置底脚本、托盘图标）都必须放在
+ *     asar 外面 —— 由 electron-builder 的 `extraResources` 铺到
+ *     `resources/` 下，再用 `process.resourcesPath` 找。
+ *
+ *   开发态则仍然从项目里取（`extraResources` 只在打包时生效）。
+ *
+ * @param {string} rel 相对路径（打包态与开发态用同一个相对位置）
+ */
+function runtimeAsset(rel) {
+  if (app.isPackaged && process.resourcesPath) {
+    const packed = path.join(process.resourcesPath, rel);
+    if (fs.existsSync(packed)) return packed;
+    /* 打包态却找不到 ⇒ 这是**打包配置漏了**，不是运行环境问题。
+       如实报出来，别悄悄退回 asar 里那个 PowerShell 读不了的路径。 */
+    console.error(`[main] ⚠️ 打包资源缺失：${packed}（检查 package.json 的 build.extraResources）`);
+  }
+  return path.join(ROOT, rel);
+}
+
+/* 数据目录：开发态在项目内 `data/`，**打包态在 Electron 的 userData 下**，
+ * 可用 `MB_DATA_DIR` 覆盖。
  * ⚠️ 口径来自 `runtime-state.js` 的 `dataDirOf`，**不在这里另写一份** ——
- *    各写一份必然漂移，而漂移的表现是"应用写这个目录、管理命令查那个目录"。 */
-const DATA_DIR = dataDirOf(process.env);
+ *   各写一份必然漂移，而漂移的表现是"应用写这个目录、管理命令查那个目录"。 */
+function resolvePackagedUserData() {
+  if (!app.isPackaged) return null;
+  try {
+    return app.getPath('userData');
+  } catch {
+    /* `app.getPath` 在极少数平台上于 ready 之前会抛。
+       兜底自己拼一个 —— 路径对不对是次要的，**能不能起来**是主要的。 */
+    const base = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(base, 'morning-brief');
+  }
+}
+const DATA_DIR = dataDirOf(process.env, { packagedUserData: resolvePackagedUserData() });
 const DB_FILE = path.join(DATA_DIR, 'brief.db');
 
 /* 迁移提示：旧版把数据放在 `~/.morning-brief`。
@@ -136,18 +180,34 @@ process.on('unhandledRejection', (reason) => {
  *    不能顺手塞进启动路径。启动失败目前靠 `boot.log` 的检查点序列定位，
  *    以及 `tools/launch.mjs` 的心跳守护（超时没心跳就报警）。 */
 
+/** 数据目录不可写时的原因（null = 可写）。见心跳那一块的说明 */
+let dataDirError = null;
+
 /** 心跳：证明"真的起来了"。写在最早，因为后面的步骤都可能崩 */
 {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const line =
-    `booted=${new Date().toISOString()} pid=${process.pid} ` +
-    `electron=${process.versions.electron} node=${process.versions.node} ` +
-    `process.type=${process.type} RUN_AS_NODE=${JSON.stringify(process.env.ELECTRON_RUN_AS_NODE)}\n`;
-  try {
-    fs.writeFileSync(HEARTBEAT, line, 'utf8');
-    mark('heartbeat-written');
-  } catch (err) {
-    mark('heartbeat-FAILED', String(err && err.message));
+  /* ⚠️⚠️ 这一句原来是**裸的** `fs.mkdirSync`（没有 try，且在模块顶层）。
+     数据目录不可写时它会抛 `EPERM`/`ENOTDIR`，模块顶层没有 catch ⇒
+     `uncaughtException` ⇒ `exit(1)`。而此刻窗口还没建、GUI 程序没有控制台、
+     `boot.log` 也写不进去（就是同一个目录）—— 用户看到的是
+     **"双击了，什么都没发生"**。
+     这是交付审计逐行走出来的、打包后必然命中的那一条。
+     ⇒ 现在：探一次可写性，探不通就记下来，并在 `bootstrap` 里弹一个
+        看得见的错误框（`dialog.showErrorBox` 在 ready 之前也能用）。 */
+  const probe = probeWritable(DATA_DIR);
+  if (!probe.ok) {
+    dataDirError = probe.error;
+    mark('datadir-UNWRITABLE', `${DATA_DIR} :: ${probe.error}`);
+  } else {
+    const line =
+      `booted=${new Date().toISOString()} pid=${process.pid} ` +
+      `electron=${process.versions.electron} node=${process.versions.node} ` +
+      `process.type=${process.type} RUN_AS_NODE=${JSON.stringify(process.env.ELECTRON_RUN_AS_NODE)}\n`;
+    try {
+      fs.writeFileSync(HEARTBEAT, line, 'utf8');
+      mark('heartbeat-written');
+    } catch (err) {
+      mark('heartbeat-FAILED', String(err && err.message));
+    }
   }
 }
 
@@ -171,6 +231,12 @@ try {
     bootedAt: new Date().toISOString(),
     electron: process.versions.electron,
     node: process.versions.node,
+    /* ★ 登记**自己的映像名**（开发态 electron.exe / 打包态 MorningBrief.exe）。
+       classifyRun 用它做归属校验：pid 文件说"这个 pid 是我的"，
+       而进程列表里那个 pid 的映像名必须与之相符。
+       ⚠️ 不登记的话，校验只能退回写死的 "electron" ——
+          打包版会被误判成"pid 被复用"，于是 `stop` 报成功却什么都没做。 */
+    image: path.basename(process.execPath),
     root: ROOT,
     dataDir: DATA_DIR,
     log: runLogPath(DATA_DIR),
@@ -266,6 +332,14 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
   const page = queryItems(d, { limit: want, categoryIds, todayOnly: !!todayOnly, sinceIso });
   const health = sourceHealth(d);
   const lastIngest = getMeta(d, 'last_ingest_at');
+  /* ★ "今天到底抓到没有"（本轮修复的另一半）。
+     ⚠️ 为什么需要单独一个布尔量：抓取全失败时**库里还有昨天/更早的数据**，
+        于是总览句照常说"今天共 N 条"，用户完全看不出今天其实一次都没成功。
+        对一个"每天一次"的产品，那是最误导人的一种状态 ——
+        界面上一切正常，只是内容不是今天的。
+     ⇒ 判据用 `last_success_at`（有源成功才算），与调度器同一口径。 */
+  const lastSuccess = getMeta(d, 'last_success_at');
+  const fetchedToday = !!lastSuccess && Date.parse(lastSuccess) >= Date.parse(sinceIso);
 
   /* ★ 两个数必须分开（真机踩过）：
    *   todayTotal    = **不带筛选**的当日总数   → 决定"看今天全部"按钮**存不存在**
@@ -287,6 +361,8 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
     health,
     categories: listCategories(d),
     lastIngestAt: lastIngest,
+    lastSuccessAt: lastSuccess,
+    fetchedToday,
     /* ★★ `curated` 是**服务端口径常量**，不是"本次请求的 limit"（真机第三轮返工）。
      *
      * 旧代码写的是 `curated: limit` —— 一个回显。渲染层拿它去判断
@@ -398,17 +474,17 @@ async function applyBottomLevel(win) {
     console.log(`[level] ✗ ${levelApplied.detail}`);
     return levelApplied;
   }
-  /* ★ 置底脚本必须**在项目内**（第五轮：可搬移 / 可打包）。
+  /* ★ 置底脚本必须**在项目内**，而且打包后必须**在 asar 外**。
    *
-   * ⚠️ 原来这里写的是 `path.join(ROOT, '..', 'm0-probe', 'tools', ...)` ——
-   *    指向项目**外面**的探针目录。在原来的位置能跑（两个目录是兄弟），
-   *    但项目一旦被搬走（比如挪到 D:\morning-brief），这个相对路径就断了：
-   *    `D:\m0-probe\tools\...` 不存在 ⇒ **置底静默失效**，
-   *    卡片从此不再压在其他窗口之下，而日志里只有一行 unavailable。
-   *    对一个"被搬走就该照常能用"的程序来说，这是最不能接受的一种坏法。
-   * ⇒ 脚本随项目走：`tools/win/set-window-level.ps1`。
-   *    这也是"以后要打包给别人用"的前提 —— 打包出去的目录里不能有 `..`。 */
-  const script = path.join(ROOT, 'tools', 'win', 'set-window-level.ps1');
+   * ⚠️ 两个坑叠在一起，缺一条就静默失效：
+   *   ① 原来这里指向项目**外面**的 m0-probe 目录 —— 项目一搬走路径就断了。
+   *   ② 修好 ① 之后，打包又会遇到第二个：脚本进了 asar，
+   *      而 `powershell.exe -File` **读不了 asar 里的路径**
+   *      （PowerShell 不认识那个"文件里的文件系统"）。
+   *      ⇒ 所以走 `runtimeAsset`，它在打包态指向 `resources/` 下的真实文件。
+   *      这一条不补的话，打包版**置底会静默失效**：
+   *      卡片浮在所有窗口上面，而日志里只有一行 unavailable。 */
+  const script = runtimeAsset(path.join('tools', 'win', 'set-window-level.ps1'));
   if (!fs.existsSync(script)) {
     levelApplied = { ok: false, status: 'unavailable', detail: `找不到置底脚本：${script}` };
     console.log(`[level] ✗ ${levelApplied.detail}`);
@@ -440,6 +516,8 @@ let cardWin = null;
 let scheduler = null;
 /** 停止请求的轮询器（见 bootstrap 里的说明） */
 let stopWatcher = null;
+/** 托盘。⚠️ 必须是模块级引用 —— 局部变量会被 GC 掉，托盘图标随即消失 */
+let tray = null;
 
 /**
  * 启动序列。
@@ -452,6 +530,30 @@ let stopWatcher = null;
  */
 async function bootstrap() {
   mark('bootstrap-enter');
+
+  /* ★ 数据目录不可写 → **必须让用户看见**。
+     这是"双击没反应"的唯一解药：GUI 程序没有控制台，光退出等于什么都没说。
+     `dialog.showErrorBox` 在 `ready` 之前也能用，而且它是**原生**消息框 ——
+     不依赖我们自己的窗口，所以在我们连窗口都建不起来时它照样能弹出来。 */
+  if (dataDirError) {
+    const msg =
+      `晨报机需要一个可写的数据目录，但下面这个位置写不进去：\n\n${DATA_DIR}\n\n` +
+      `原因：${dataDirError}\n\n` +
+      `它要放数据库与运行日志。可以：\n` +
+      `  · 检查该目录的权限，或看杀毒软件有没有拦住它\n` +
+      `  · 若它落在网盘同步目录里，先暂停同步\n` +
+      `  · 或者设置环境变量 MB_DATA_DIR 指到别处`;
+    console.error('[main] ✗ ' + msg.replace(/\n+/g, ' '));
+    try {
+      const { dialog } = await import('electron');
+      dialog.showErrorBox('晨报机 · 无法启动', msg);
+    } catch {
+      /* 弹不出来就只能靠日志了 */
+    }
+    app.quit();
+    return;
+  }
+
   try {
     // ★ 必须 await：驱动是延迟加载的（见 getDb 上方的说明）
     db = await openDb(DB_FILE);
@@ -488,6 +590,24 @@ async function bootstrap() {
 
   const drag = makeDragHandler(cardWin);
 
+  /* ★ 抓取动作**只定义一次**，界面按钮与托盘菜单共用。
+     ⚠️ 不这么做的后果是"两份口径"：托盘那份漏了 `serialize`、
+     或者漏了推 `brief:updated`，于是从托盘刷新时界面不更新，
+     而用户会以为"托盘的刷新不管用"。 */
+  const doIngest = (trigger) =>
+    serialize(async () => {
+      const r = await runIngest({ dbFile: DB_FILE, trigger, log: (m) => console.log('[ingest]', m) });
+      // 抓完通知界面刷新
+      if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
+      return { ok: r.ok, failed: r.failed, newItems: r.newItems, health: r.health };
+    });
+
+  const setCardExpanded = (on) => {
+    cardState.value = on ? 'expanded' : 'collapsed';
+    setCardState(cardWin, cardState.value);
+    return cardState.value;
+  };
+
   registerIpc({
     getBrief: (opts) => buildBrief(opts),
     /* ⚠️ 翻页必须**带上筛选条件**（真机踩过）：
@@ -517,21 +637,13 @@ async function bootstrap() {
       console.log(`[category] 新增「${clean}」`);
       return { ok: true, name: clean, categories: listCategories(d) };
     },
-    runIngest: (trigger) =>
-      serialize(async () => {
-        const r = await runIngest({ dbFile: DB_FILE, trigger, log: (m) => console.log('[ingest]', m) });
-        // 抓完通知界面刷新
-        if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
-        return { ok: r.ok, failed: r.failed, newItems: r.newItems, health: r.health };
-      }),
+    runIngest: doIngest,
     listCategories: () => listCategories(getDb()),
     setCardState: (next) => {
-      cardState.value = next === 'expanded' ? 'expanded' : 'collapsed';
-      setCardState(cardWin, cardState.value);
+      setCardExpanded(next === 'expanded');
     },
     minimize: () => {
-      cardState.value = 'collapsed';
-      setCardState(cardWin, 'collapsed');
+      setCardExpanded(false);
     },
     drag,
     applyLevel: (mode) => (mode === 'bottom' ? applyBottomLevel(cardWin) : Promise.resolve(levelApplied)),
@@ -549,6 +661,78 @@ async function bootstrap() {
   });
 
   mark('ipc-registered');
+
+  /* ---------------- 托盘：收包的人唯一的退出方式 ----------------
+   *
+   * ⚠️⚠️ 为什么这一块是**打包分发的必需品**，而不是"锦上添花"：
+   *
+   *   卡片窗口是 `frame:false` + `skipTaskbar:true` + 不可缩放，界面上也**没有
+   *   退出按钮**（那是刻意的：关闭按钮会和"点击即展开/收起"打架）。
+   *   在开发机上这没问题 —— 有 `tools/service.mjs stop`、有三个 .vbs。
+   *   但打包之后那三样**全都不存在**（.vbs 要 node，service.mjs 要 node +
+   *   `node_modules/electron/dist/electron.exe`）。
+   *
+   *   ⇒ 没有托盘的话，收包的人**只能去任务管理器结束进程**。
+   *     这比工程自己写的原则（"一个用户装了就该能关掉的程序，不能要求
+   *     管理员权限才能关"）更糟：**没有任何路径**。
+   *
+   * ⚠️ 托盘图标必须**显式进包**：electron-builder 的 `buildResources`（默认
+   *   `build/`）不会被打进 asar，所以托盘图标走的是 `src/renderer/assets/`
+   *   （它在 asar 里，Electron 的 fs 补丁能读到）。
+   */
+  try {
+    const iconFile = runtimeAsset(path.join('assets', 'tray-16.png'));
+    if (!fs.existsSync(iconFile)) {
+      mark('tray-SKIPPED', `找不到托盘图标：${iconFile}（跑 node tools/make-icon.mjs 生成）`);
+      console.log(`[tray] ✗ 找不到托盘图标，跳过：${iconFile}`);
+    } else {
+      const { Tray, Menu, nativeImage, shell } = await import('electron');
+      const img = nativeImage.createFromPath(iconFile);
+      if (img.isEmpty()) {
+        mark('tray-FAILED', '托盘图标解不开（文件在，但不是合法 PNG）');
+        console.log('[tray] ✗ 托盘图标解不开，跳过');
+      } else {
+        tray = new Tray(img);
+        tray.setToolTip('晨报机');
+        const rebuildMenu = () => {
+          if (!tray || tray.isDestroyed()) return;
+          const last = getMeta(getDb(), 'last_success_at');
+          tray.setContextMenu(
+            Menu.buildFromTemplate([
+              { label: cardState.value === 'expanded' ? '收起卡片' : '展开卡片', click: () => setCardExpanded(cardState.value !== 'expanded') },
+              { type: 'separator' },
+              { label: '立即刷新（抓一遍全部源）', click: () => { doIngest('tray'); } },
+              { label: '打开数据目录', click: () => { shell.openPath(DATA_DIR); } },
+              { type: 'separator' },
+              {
+                label: last ? `上次成功抓取：${new Date(last).toLocaleString()}` : '还没有成功抓取过',
+                enabled: false,
+              },
+              { label: `下次抓取：${nextRunAt(new Date(), FETCH_TIME.hour, FETCH_TIME.minute).toLocaleString()}`, enabled: false },
+              { type: 'separator' },
+              /* ★ 收包的人要的就是这一项。它走 `app.quit()`，于是
+                 `will-quit` 会把 pid 文件与停止请求一并清掉 —— 与
+                 `service.mjs stop` 走的是同一条退出路径。 */
+              { label: '退出晨报机', click: () => app.quit() },
+            ]),
+          );
+        };
+        rebuildMenu();
+        // 菜单里的"上次抓取/下次抓取"是会变的，展开/收起也是 —— 每次弹出前重算一次
+        tray.on('click', () => {
+          setCardExpanded(cardState.value !== 'expanded');
+          rebuildMenu();
+        });
+        mark('tray-created');
+        console.log('[tray] 已创建（右键菜单：展开/刷新/打开数据目录/退出）');
+      }
+    }
+  } catch (err) {
+    /* ⚠️ 托盘建不起来**不该拖垮启动** —— 它是一个便利入口，
+       而不是主功能。但必须留痕（`mark` + stderr），否则就成了静默缺失。 */
+    mark('tray-FAILED', String(err && err.message));
+    console.log(`[tray] ✗ 创建失败（不影响主功能）：${err && err.message}`);
+  }
 
   // 置底（窗口已建、尺寸已校正，此刻 hwnd 定了）
   try {
@@ -664,6 +848,10 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   try {
     if (stopWatcher) clearInterval(stopWatcher);
+    /* 托盘要显式销毁：否则退出后图标可能残留在通知区域，
+       一直到用户把鼠标划过那里才消失（Windows 上的经典现象）。 */
+    if (tray && !tray.isDestroyed()) tray.destroy();
+    tray = null;
     removePidFile(DATA_DIR);
     clearStopRequest(DATA_DIR);
     mark('pidfile-removed');
