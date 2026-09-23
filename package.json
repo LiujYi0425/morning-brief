@@ -41,7 +41,7 @@
     "test:ui": "交互一致性（四条不变量 + 顺序无关排列 + BFS 可达 + 变异测试）"
   },
   "comment:build": {
-    "files": "★ 这张排除表是**隐私边界**，不是体积优化。electron-builder **不读 .gitignore**（工具链源码 fileMatcher.js 里 grep gitignore 只命中一处，那是「把 .gitignore 这个文件排除掉」）。不写 files 键时它按 **/* 打包，于是 data/brief.db（真实简报 + 已读标记）、含用户名的日志、.npm-cache(22MB)、.env、*.pem 全部进安装包 —— 而 asar 不是加密归档，一条 asar extract 就取出数据。改完这张表必须跑 npm run dist:check 复核。",
+    "files": "★ 这张表是**白名单**，而且它是隐私边界，不是体积优化。① electron-builder **不读 .gitignore**（工具链里 grep gitignore 只命中「把 .gitignore 这个文件排除掉」那一处）；② 原来写的是**黑名单**（全匹配 + 一串 `!` 排除），它的失败方式是「漏了谁」—— 实测：合并 M0 仓库后 m0-probe/、docs/、agents/、项目规则.md 都没被提到，于是 asar 从 26 个文件 / 0.32 MB 涨到 107 个 / 1.49 MB，整个 M0 文档与探针工程被塞进了要发给别人的应用里，而 20MB 的体积闸门根本拦不住（1.49MB 远在闸门内）。⇒ 改成白名单：失败方式变成「少了谁」，会立刻报错。改完必须跑 npm run dist:check 复核（它有一条断言：asar 内容必须严格等于 src/ + package.json）。",
     "extraResources": "★ 这两项必须**在 asar 之外**：PowerShell 的 -File 读不了 asar 里的路径（它不认识那个「文件里的文件系统」），所以置底脚本必须铺到 resources/ 下、运行时用 process.resourcesPath 找（见 index.js 的 runtimeAsset）。托盘图标同理。",
     "nsis": "oneClick:false + allowToChangeInstallationDirectory:true —— 默认的 oneClick 会双击直接装、不给选路径，对「发给同事」不友好；perMachine:false 装到用户目录，不需要管理员权限。",
     "win.icon": "由 npm run icon 生成。不设它的话 electron-builder 用 Electron 的默认原子图标 —— 桌面、任务管理器、属性页全是别人的图标。"
@@ -54,24 +54,8 @@
       "buildResources": "build"
     },
     "files": [
-      "**/*",
-      "!data/**",
-      "!report/**",
-      "!release/**",
-      "!.git/**",
-      "!.npm-cache/**",
-      "!tools/**",
-      "!build/**",
-      "!MorningBrief/**",
-      "!*.log",
-      "!.env",
-      "!.env.*",
-      "!*.pem",
-      "!*.key",
-      "!*.bak",
-      "!*.ps1",
-      "!*.vbs",
-      "!package-lock.json"
+      "src/**",
+      "package.json"
     ],
     "extraResources": [
       { "from": "tools/win", "to": "tools/win" },

@@ -57,24 +57,30 @@ if (!b) {
 } else {
   ok('build.appId = ' + b.appId + ' · productName = ' + b.productName)
 
-  /* 排除表必须覆盖的目录：漏掉任何一个，真实数据就会被打进安装包发给别人。 */
-  const MUST_EXCLUDE = [
-    ['data/', '真实简报数据库（brief.db）+ 运行日志 + pidfile'],
-    ['report/', '审计报告等过程产物'],
-    ['release/', '上一次的打包输出（会自我嵌套）'],
-    ['.git/', '完整仓库历史'],
-    ['.npm-cache/', 'electron 下载缓存（几十 MB）'],
-    ['tools/', '开发脚本（打包态用不到，且 .ps1 必须走 extraResources）'],
-  ]
-  const list = (b.files || []).join('\n')
-  if (!Array.isArray(b.files) || b.files.length === 0) {
-    bad('build.files 为空 ⇒ 退化成 `**/*`，data/ 会进安装包')
+  /* ★★ `files` 必须是**白名单**，不能是全匹配 + 一串 `!` 的黑名单。
+   *
+   * 黑名单的失败方式是"漏了谁"，而漏了是**静默**的：实测合并 M0 仓库之后，
+   * `m0-probe/`、`docs/`、`agents/`、`项目规则.md` 都没被那张黑名单提到，
+   * 于是 asar 从 26 个文件 / 0.32 MB 涨到 **107 个 / 1.49 MB**，
+   * 整个 M0 文档与探针工程被塞进了要发给别人的应用里。
+   * ⚠️ 而 20 MB 的体积闸门**拦不住**它 —— 体积挡不住"混进来一堆小文件"。
+   *
+   * 白名单的失败方式是"少了谁"，会立刻报错。所以：
+   *   · 这里只查**配置形状**（有没有退化成全匹配、必需项在不在）
+   *   · 真正的内容保证由 B3b 拿**真实产物**断言（那才是权威检查） */
+  const list = Array.isArray(b.files) ? b.files : []
+  const CATCH_ALL = ['**/*', '**', '*', './**/*']
+  if (list.length === 0) {
+    bad('build.files 为空 ⇒ 退化成全匹配打包，data/ 等会进安装包')
+  } else if (list.some((p) => CATCH_ALL.includes(String(p)))) {
+    bad(`build.files 里有全匹配通配（${list.filter((p) => CATCH_ALL.includes(String(p))).join('、')}）` +
+        `⇒ 这是黑名单，漏一个就静默打包进去。改成白名单，例如 ["src/**", "package.json"]`)
   } else {
-    for (const [dir, why] of MUST_EXCLUDE) {
-      const re = new RegExp('^!' + dir.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '', 'm')
-      if (re.test(list)) ok('排除 ' + dir + '（' + why + '）')
-      else bad('排除表漏了 ' + dir + ' —— ' + why)
-    }
+    ok(`build.files 是白名单（${list.join(' + ')}），不含全匹配通配`)
+    if (!list.includes('package.json')) bad('白名单里没有 package.json —— 打包后应用起不来')
+    else ok('白名单含 package.json')
+    if (!list.some((p) => String(p).startsWith('src/'))) bad('白名单里没有 src/ —— 打包后应用起不来')
+    else ok('白名单含 src/')
   }
 
   /* extraResources：必须在 asar 之外的两个东西。少一个，打包态就残。 */
@@ -262,6 +268,30 @@ if (!fs.existsSync(RELEASE)) {
       ]) {
         if (have.has(need)) ok('asar 含 ' + need)
         else bad('asar 缺 ' + need + ' —— 打包后应用会启动失败')
+      }
+
+      /* ── B3b. 白名单断言：asar 里**只允许**出现 src/ 与 package.json ──
+       *
+       * 起因是一次实测：把 M0 仓库合并进来之后，`m0-probe/`、`docs/`、`agents/`
+       * 进了仓库，而 `build.files` 当时是**黑名单**（全匹配 + 一串 `!` 排除），
+       * 里面没提到它们 ⇒ asar 从 26 个文件 / 0.32 MB 变成
+       * **107 个文件 / 1.49 MB**，整个 M0 文档与探针工程、连"项目规则.md"
+       * 一起被塞进了要发给别人的应用里。
+       *
+       * ⚠️ 而 20 MB 的体积闸门**拦不住它** —— 1.49 MB 远在闸门之内。
+       *    体积是"粗粒度兜底"，挡不住"混进来一堆小文件"。
+       *
+       * ⇒ 黑名单的失败方式是"漏了谁"（静默），白名单的失败方式是"少了谁"（立刻报错）。
+       *   对"要发给别人的东西"来说，后者安全得多。 */
+      const ALLOWED = /^(src\/|package\.json$)/
+      const extra = files.filter((f) => !ALLOWED.test(f.path)).map((f) => f.path)
+      if (extra.length) {
+        bad(`★ asar 里有 ${extra.length} 个文件不在白名单内（只允许 src/ 与 package.json）—— ` +
+            `它们会被一起发给收件人：`)
+        for (const p of extra.slice(0, 25)) console.log('        ' + p)
+        if (extra.length > 25) console.log(`        ...（还有 ${extra.length - 25} 个）`)
+      } else {
+        ok('asar 内容严格等于白名单（src/ + package.json），没有任何多余目录')
       }
 
       fs.closeSync(asar.fd)
