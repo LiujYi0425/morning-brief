@@ -18,6 +18,7 @@
     "migrate-data": "node tools/migrate-data.mjs",
     "dist": "node tools/dist.mjs",
     "dist:check": "node tools/check-dist.mjs",
+    "release": "node tools/release.mjs",
     "test": "node tools/test-all.mjs && node tools/test-interaction.mjs",
     "test:data": "node tools/test-all.mjs",
     "test:ui": "node tools/test-interaction.mjs",

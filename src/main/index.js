@@ -35,6 +35,8 @@ import {
   probeWritable,
 } from '../shared/runtime-state.js';
 import { createBootMark, teeConsole, createLogSink } from '../shared/run-log.js';
+import { bootWatchdog, markHealthy, rollbackNow, checkForUpdate, downloadUpdate, applyUpdate } from './updater.js';
+import { formatBytes } from '../shared/update.js';
 import { runIngest } from '../ingest/fetch-feeds.js';
 import { openDb, queryItems, countItems, sourceHealth, listCategories, getMeta, setMeta, upsertCategory, upsertSources } from '../store/db.js';
 
@@ -208,6 +210,55 @@ let dataDirError = null;
     } catch (err) {
       mark('heartbeat-FAILED', String(err && err.message));
     }
+  }
+}
+
+/* ---------------- 更新看门狗（位置是刻意的） ----------------
+ *
+ * ⚠️⚠️ 必须在**建窗口之前、而且是尽可能早**的地方跑，理由只有一个：
+ *    坏更新的典型表现就是**崩在启动路径上** —— 那种情况下窗口根本没建起来，
+ *    日志也可能写不出去（数据目录不可写时正是如此）。
+ *    如果把计数放在"窗口建好之后"，那么"窗口建不起来"这种最需要回退的故障
+ *    恰恰是**永远不会累加计数**的那种 ⇒ 回退机制会在它唯一该起作用的场景里静默失效。
+ *
+ *     计数之所以在那种极端情况下仍然可靠，是因为它由**上一个好版本**
+ *     写下的 `update-state.json` 承载，不依赖本次启动能活多久。
+ *
+ * 开发态**不参与**：项目目录不是安装出来的，没有"装回去"这回事，
+ * 误触发只会把源码树搅乱。 */
+const updateGuard = { rollback: false, why: '未检查' };
+if (app.isPackaged && !dataDirError) {
+  try {
+    const r = bootWatchdog({
+      dataDir: DATA_DIR,
+      currentVersion: app.getVersion(),
+      log: (m) => console.log(m),
+    });
+    updateGuard.rollback = r.rollback;
+    updateGuard.why = r.why;
+    mark('update-watchdog', r.rollback ? 'ROLLBACK' : 'ok');
+    if (r.rollback) {
+      const res = rollbackNow({
+        dataDir: DATA_DIR,
+        currentVersion: app.getVersion(),
+        installDir: path.dirname(app.getPath('exe')),
+        exePath: app.getPath('exe'),
+        resourcesDir: process.resourcesPath,
+        rootDir: ROOT,
+        why: r.why,
+        log: (m) => console.log(m),
+      });
+      mark('update-rollback', res.ok ? 'spawned' : `FAILED ${res.reason}`);
+      /* 助手会等我们退出再把旧版本镜像回去；这里必须立刻退，
+         否则我们占着安装目录，它永远拷不动。 */
+      if (res.ok) {
+        console.log('[update] 已判定这次更新是坏的，交给助手回退并重启');
+        app.quit();
+      }
+    }
+  } catch (err) {
+    /* 看门狗自己出错**绝不能**影响启动 —— 它是附加保护，不是启动路径 */
+    mark('update-watchdog-FAILED', String(err && err.message));
   }
 }
 
@@ -608,6 +659,100 @@ async function bootstrap() {
     return cardState.value;
   };
 
+  /* ---------------- 更新：检查与安装 ----------------
+   *
+   * 口径（用户定的）：**只提示，用户点了才装**，不静默更新。
+   *   理由：这是个常驻桌面的挂件 —— 静默装完重启，等于在用户正看简报时
+   *   把卡片抽走再放回来，而且他不会知道发生过什么。
+   *
+   * 两段式：第一次点 = 查；查到之后菜单变成"更新到 x.y.z"，第二次点 = 装。
+   *   把"查"和"装"分开，是为了让"我点了它却什么都没发生"这种情况不存在 ——
+   *   每一次点击都会让菜单文字或日志发生变化。
+   */
+  let updateBusy = false;
+  let updateReady = null;   // 已确认可用、等用户点第二次的清单
+  let updateNote = '';      // 上一次检查的结论（显示在菜单里）
+
+  const updateMenuLabel = () => {
+    if (updateBusy) return '正在处理更新…';
+    if (updateReady) return `✅ 更新到 ${updateReady.version}（点击安装并重启）`;
+    return updateNote ? `检查更新（${updateNote}）` : '检查更新';
+  };
+
+  const runUpdateCheck = async ({ interactive = false } = {}) => {
+    if (updateBusy) return;
+    /* 开发态不参与自更新：项目目录不是"装"出来的，没有装回去这回事。
+       误触发只会把源码树搅乱，所以这里明确拒绝而不是"试试看"。 */
+    if (!app.isPackaged) {
+      updateNote = '开发态不支持';
+      if (interactive) console.log('[update] 开发态不参与自更新');
+      return;
+    }
+    if (!updateReady) {
+      updateBusy = true;
+      try {
+        const r = await checkForUpdate({
+          dataDir: DATA_DIR,
+          currentVersion: app.getVersion(),
+          log: (m) => console.log(m),
+        });
+        if (r.action === 'available') {
+          updateReady = r.manifest;
+          updateNote = '';
+          if (interactive) console.log(`[update] 发现新版本 ${r.manifest.version}，再点一次即安装`);
+        } else {
+          updateNote = r.action === 'none' ? '已是最新' : '检查失败';
+        }
+      } catch (err) {
+        updateNote = '检查失败';
+        console.log('[update] 检查异常：' + (err && err.message));
+      } finally {
+        updateBusy = false;
+      }
+      if (!updateReady) return;
+      if (!interactive) return;   // 自动检查只负责把菜单点亮
+    }
+
+    /* 第二次点击（或用户在已知有新版时点击）⇒ 下载 + 装 */
+    updateBusy = true;
+    try {
+      console.log(`[update] 开始下载 ${updateReady.version} …`);
+      const dl = await downloadUpdate({
+        manifest: updateReady,
+        dataDir: DATA_DIR,
+        log: (m) => console.log(m),
+        onProgress: (got, total) => {
+          if (total && got % (8 * 1024 * 1024) < 65536) {
+            console.log(`[update] 下载中 ${formatBytes(got)} / ${formatBytes(total)}`);
+          }
+        },
+      });
+      const res = applyUpdate({
+        dataDir: DATA_DIR,
+        currentVersion: app.getVersion(),
+        manifest: updateReady,
+        installerFile: dl.file,
+        installDir: path.dirname(app.getPath('exe')),
+        exePath: app.getPath('exe'),
+        resourcesDir: process.resourcesPath,
+        rootDir: ROOT,
+        log: (m) => console.log(m),
+      });
+      if (!res.ok) {
+        updateNote = '安装准备失败';
+        updateBusy = false;
+        return;
+      }
+      console.log('[update] 已交给助手安装，本进程即将退出以便替换文件');
+      /* 必须退：Windows 锁着我们正在运行的那些文件，助手在等我们消失。 */
+      app.quit();
+    } catch (err) {
+      console.log('[update] 下载/安装失败：' + (err && err.message));
+      updateNote = '下载失败';
+      updateBusy = false;
+    }
+  };
+
   registerIpc({
     getBrief: (opts) => buildBrief(opts),
     /* ⚠️ 翻页必须**带上筛选条件**（真机踩过）：
@@ -710,6 +855,12 @@ async function bootstrap() {
               },
               { label: `下次抓取：${nextRunAt(new Date(), FETCH_TIME.hour, FETCH_TIME.minute).toLocaleString()}`, enabled: false },
               { type: 'separator' },
+              {
+                label: updateMenuLabel(),
+                enabled: !updateBusy,
+                click: () => { void runUpdateCheck({ interactive: true }); },
+              },
+              { type: 'separator' },
               /* ★ 收包的人要的就是这一项。它走 `app.quit()`，于是
                  `will-quit` 会把 pid 文件与停止请求一并清掉 —— 与
                  `service.mjs stop` 走的是同一条退出路径。 */
@@ -724,7 +875,25 @@ async function bootstrap() {
           rebuildMenu();
         });
         mark('tray-created');
-        console.log('[tray] 已创建（右键菜单：展开/刷新/打开数据目录/退出）');
+        console.log('[tray] 已创建（右键菜单：展开/刷新/打开数据目录/检查更新/退出）');
+
+        /* ★★ 走到这里才算"这次启动真的健康" —— 窗口建起来了、托盘也起来了。
+           更新看门狗就是拿这一句当作"新版本没问题"的证据；
+           少了它，装了新版之后每次启动都会被计入失败次数，最后无辜地自动回退。
+           （所以它必须放在托盘创建**成功之后**，不能提前到 bootstrap 开头。） */
+        try {
+          const h = markHealthy({
+            dataDir: DATA_DIR,
+            currentVersion: app.getVersion(),
+            log: (m) => console.log(m),
+          });
+          if (h.changed) mark('update-healthy', h.state.current);
+        } catch (err) {
+          mark('update-healthy-FAILED', String(err && err.message));
+        }
+
+        /* 启动后延迟查一次更新。失败只记日志，绝不打扰用户。 */
+        setTimeout(() => { void runUpdateCheck({ interactive: false }); }, 8000);
       }
     }
   } catch (err) {
