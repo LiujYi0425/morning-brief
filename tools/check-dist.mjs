@@ -200,6 +200,26 @@ if (!fs.existsSync(RELEASE)) {
       const total = files.reduce((s, f) => s + f.size, 0)
       ok(`asar 内 ${files.length} 个文件，解包后约 ${(total / 1048576).toFixed(2)} MB`)
 
+      /* ★★ 体积闸门 —— 这条不是"优化建议"，是**兜底**。
+       *
+       * 起因是一次真事故：安装器有一次把应用装到了 `D:\morning-brief\MorningBrief\`
+       * （项目**内部**）。那个目录有 235 MB，而排除表里原本没有它 ⇒
+       * 下一次 `npm run dist` 会**把装好的应用再打包进安装包**，体积翻倍，
+       * 而违禁文件清单里一条都匹配不上 —— 所有检查照样全绿。
+       *
+       * 这套源码只有 25 个文件、0.3 MB。**只有当别的东西混进来时才会大。**
+       * 所以拿体积当闸门刚好：它不需要事先知道"混进来的是什么"。 */
+      const SIZE_LIMIT_MB = 20
+      if (total > SIZE_LIMIT_MB * 1048576) {
+        bad(`★ asar 解包后有 ${(total / 1048576).toFixed(1)} MB，超过 ${SIZE_LIMIT_MB} MB 的闸门 —— ` +
+            `这套源码本身只有约 0.3 MB，超这么多说明**有大东西混进去了**。按体积倒序：`)
+        for (const f of [...files].sort((a, b) => b.size - a.size).slice(0, 10)) {
+          console.log(`        ${(f.size / 1048576).toFixed(2)} MB  ${f.path}`)
+        }
+      } else {
+        ok(`体积在闸门内（${(total / 1048576).toFixed(2)} MB < ${SIZE_LIMIT_MB} MB）`)
+      }
+
       /* ── B2. 违禁文件 ── */
       const FORBIDDEN = [
         [/^data\//, '项目数据目录（真实简报数据库！）'],
