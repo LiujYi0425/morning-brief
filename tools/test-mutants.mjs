@@ -36,8 +36,14 @@ const MUTANTS = [
   },
   {
     why: 'probeWritable 失败时不带系统错误码 ⇒ 错误框里说不出所以然',
-    from: '    return { ok: false, error: `${(err && err.code) || \'\'} ${(err && err.message) || err}`.trim() };',
+    from: '    return { ok: false, error: (code && !msg.startsWith(code) ? `${code} ${msg}` : msg).trim() };',
     to: '    return { ok: false, error: \'写不进去\' };',
+    expect: '目录不可写必须在',
+  },
+  {
+    why: '错误提示无脑拼 code ⇒ "EEXIST EEXIST: …"，用户以为出了两个错',
+    from: '    return { ok: false, error: (code && !msg.startsWith(code) ? `${code} ${msg}` : msg).trim() };',
+    to: '    return { ok: false, error: `${code} ${msg}`.trim() };',
     expect: '目录不可写必须在',
   },
   {

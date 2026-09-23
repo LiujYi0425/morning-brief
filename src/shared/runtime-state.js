@@ -117,7 +117,15 @@ export function probeWritable(dir) {
     fs.rmSync(probe, { force: true });
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: `${(err && err.code) || ''} ${(err && err.message) || err}`.trim() };
+    /* ⚠️ 不要无脑拼 `${code} ${message}`：Node 的 `err.message` **本来就已经**
+       以 `CODE:` 开头（`"EEXIST: file already exists, mkdir 'D:\\...'"`），
+       再前缀一次就成了 `"EEXIST EEXIST: file already exists, …"` ——
+       在一个专门"告诉用户出了什么事"的对话框里，这会让人以为出了**两个**错。
+       （这是把真实对话框截图看了一眼才发现的：原有断言只查"含错误码"，
+         而**重复的**错误码同样含错误码，所以它一直是绿的。） */
+    const code = (err && err.code) || '';
+    const msg = (err && err.message) || String(err);
+    return { ok: false, error: (code && !msg.startsWith(code) ? `${code} ${msg}` : msg).trim() };
   }
 }
 

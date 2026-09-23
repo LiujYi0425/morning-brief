@@ -1431,6 +1431,15 @@ ok('★★ 目录不可写必须在**建窗口之前**被翻译成人话', () =>
   assert.ok(/(E|WSA)[A-Z]+/.test(bad.error),
     '失败原因里没有系统错误码，用户看不懂这是什么毛病：' + bad.error);
 
+  /* ★ 错误码**只许出现一次**。
+     Node 的 `err.message` 本来就是 `"EEXIST: file already exists, …"`，
+     再前缀一次 code 就成了 `"EEXIST EEXIST: …"` —— 在专门解释故障的对话框里，
+     用户会以为出了**两个**错。原来只断言"含错误码"，而**重复的**错误码
+     同样含错误码，所以那条一直是绿的：是靠**把真实对话框截图看一眼**才发现的。
+     ⇒ 这里改成数出现次数，而不是只查存在。 */
+  const times = (bad.error.match(/\b(E|WSA)[A-Z]+\b/g) || []).length;
+  assert.equal(times, 1, `系统错误码在提示里出现了 ${times} 次（应恰好 1 次）：${bad.error}`);
+
   /* 探测不许留下垃圾：它会往目标目录写一个探针文件再删掉。 */
   assert.ok(!fs.existsSync(path.join(dir, 'sub', '.mb-write-probe')), '探测完没清掉探针文件');
 
