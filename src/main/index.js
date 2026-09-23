@@ -28,12 +28,12 @@ import {
   writePidFile,
   removePidFile,
   runLogPath,
-  createLogSink,
   hasStopRequest,
   clearStopRequest,
   dataDirOf,
   legacyDataDirOf,
 } from '../shared/runtime-state.js';
+import { createBootMark, teeConsole, createLogSink } from '../shared/run-log.js';
 import { runIngest } from '../ingest/fetch-feeds.js';
 import { openDb, queryItems, countItems, sourceHealth, listCategories, getMeta, setMeta, upsertCategory, upsertSources } from '../store/db.js';
 
@@ -82,59 +82,30 @@ const HEARTBEAT = path.join(DATA_DIR, 'boot-heartbeat.txt');
  *   ⇒ 结论写死在这里：**日志必须由应用自己写**。重定向只能当兜底。
  */
 const RUN_LOG = runLogPath(DATA_DIR);
-const writeRunLog = createLogSink(RUN_LOG, 4 * 1024 * 1024);
+const writeRunLog = createLogSink(RUN_LOG, { maxBytes: 4 * 1024 * 1024 });
 
-/**
- * 把 `console.log / info / warn / error` 接到落盘上。
+/* ⚠️⚠️ 这里曾经是 `teeConsole()` / `safeInspect()` / `mark()` 三个函数体，
+ *    它们搬去了 `src/shared/run-log.js`。搬家的理由是一次真事故：
+ *    本文件 import 了 electron ⇒ 离线考裁判**加载不了它** ⇒ 这三段逻辑
+ *    没有任何测试能碰到 ⇒ 有一次重构删掉了它们依赖的 `BOOT_LOG` 常量，
+ *    而 `mark()` 里的 `catch {}` 把 `ReferenceError` 静静吞掉 ——
+ *    整条启动取证通道死了两天，应用照常启动，谁都没发现。
  *
- * ⚠️ 三个细节：
- *   ① **保留原输出**（先调原来的 console）—— 前台调试时终端里照样要看得到。
- *   ② **必须能扛住 console 自己的异常**：某些环境下 stdout 已断开，
- *      原 console 会抛 EPIPE，不能因此让应用崩掉。
- *   ③ 不做递归：写入器是纯同步 fs，不会再触发 console。
- */
-function teeConsole() {
-  const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error };
-  const wrap = (fn, tag) => (...args) => {
-    try {
-      fn.apply(console, args);
-    } catch {
-      /* stdout 断了也不该影响功能 */
-    }
-    writeRunLog(tag + args.map((a) => (typeof a === 'string' ? a : safeInspect(a))).join(' '));
-  };
-  console.log = wrap(orig.log, '');
-  console.info = wrap(orig.info, '');
-  console.warn = wrap(orig.warn, '[warn] ');
-  console.error = wrap(orig.error, '[error] ');
-}
-
-/** 把任意值变成一行可读文本；**不递归展开对象**（避免把活对象序列化炸掉） */
-function safeInspect(v) {
-  if (v instanceof Error) return String(v.stack || v.message || v);
-  if (v === null || v === undefined) return String(v);
-  if (typeof v === 'object') return '[object]';
-  return String(v);
-}
-
-function mark(step, extra) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const line = `${new Date().toISOString()} ${step}${extra ? ' ' + extra : ''}`;
-    fs.appendFileSync(BOOT_LOG, line + '\n', 'utf8');
-    writeRunLog('[boot] ' + line);
-  } catch {
-    /* 落盘失败不该阻止启动 */
-  }
-}
+ * ⇒ 现在它们住在零依赖模块里，测试可以**真的调用**并断言"确实写出了东西"，
+ *   而不是像原来那样只能断言"调用没抛异常"（那条断言在事故期间一直是绿的）。 */
+const mark = createBootMark(DATA_DIR, writeRunLog);
 
 /* ---------------- 最早的一批检查点 ----------------
  * 这些在模块求值阶段就跑 —— 若"连第一条都没有"，说明 import 阶段就出事了。
  *
  * ⚠️ 顺序：**先接上 console，再打第一条检查点**。
  *    反过来的话，最早那几行（恰恰是"崩在 import 阶段"时唯一能拿到的信息）
- *    只会出现在 stdout 上 —— 而后台运行时 stdout 是收不到的。 */
-teeConsole();
+ *    只会出现在 stdout 上 —— 而后台运行时 stdout 是收不到的。
+ *
+ * ⚠️ 这里**不 catch**：`mark` 对"代码错误"是抛的（见 run-log.js 的说明），
+ *    而模块求值期抛错会让 Electron 直接把栈打到 stderr + 进程退出 ——
+ *    这正是我们想要的：**宁可启动失败并留下栈，也不要"起来了但取证通道是坏的"。** */
+teeConsole(writeRunLog);
 mark('module-evaluated', `pid=${process.pid} type=${process.type} node=${process.versions.node}`);
 
 /** 进程级兜底：任何未捕获异常都要落盘（否则崩溃是静默的） */
@@ -231,19 +202,26 @@ const ALL_LIMIT = Number(process.env.MB_ALL_LIMIT || 120);
 const FETCH_TIME = parseFetchTime(process.env);
 const FETCH_AT = formatHm(FETCH_TIME.hour, FETCH_TIME.minute);
 
-/* ---------------- 心跳 ---------------- */
-{
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const line =
-    `booted=${new Date().toISOString()} pid=${process.pid} ` +
-    `electron=${process.versions.electron} node=${process.versions.node} ` +
-    `process.type=${process.type} RUN_AS_NODE=${JSON.stringify(process.env.ELECTRON_RUN_AS_NODE)}\n`;
-  try {
-    fs.writeFileSync(HEARTBEAT, line, 'utf8');
-  } catch {
-    /* 写不进去不该阻止启动 */
-  }
-}
+/* ---------------- 心跳：**第二个副本已删除** ----------------
+ *
+ * ⚠️ 这里原本还有第二段一模一样的心跳写入（`mkdirSync` + `writeFileSync(HEARTBEAT)`
+ *    + 一句 `catch {}`）。删掉它有三个理由，第三个才是关键：
+ *
+ *   ① **重复**：上一段（见 `heartbeat-written` 那一块）已经写过同一个文件、
+ *      同样内容，第二段纯属白写。
+ *   ② **它的失败是静默的**：第一段失败会 `mark('heartbeat-FAILED')` 把原因记进
+ *      检查点；第二段只有 `catch {}`。于是同一个故障在两段里表现不一致 ——
+ *      看日志的人会以为只有一处会失败。
+ *   ③ ★ **它的 `mkdirSync` 没有被 try 包住**（在 `try` 外面）。
+ *      这是审查员逐行走出来的真问题：一旦数据目录不可写（打包进 asar、
+ *      放在 Program Files、磁盘满），这一句会抛 `ENOTDIR`/`EPERM/`EACCES`，
+ *      而模块顶层没有 catch ⇒ `uncaughtException` ⇒ `exit(1)`。
+ *      启动检查点全在它**之前**，所以顺序上还留下了一串"看起来正常"的检查点，
+ *      然后进程无声退出 —— 对 GUI 子系统程序来说就是**双击没反应**。
+ *      （`run-log.js` 的 `createBootMark` 自带 try，裸奔的只有这一处。）
+ *
+ * ⇒ 心跳只写一次，且写在唯一那个有 try、有失败留痕的地方。
+ */
 
 /* ---------------- 数据库（单例连接，**异步打开一次**） ----------------
  *

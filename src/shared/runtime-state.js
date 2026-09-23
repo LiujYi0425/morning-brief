@@ -141,73 +141,31 @@ export function hasStopRequest(dataDir) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 日志落盘                                                            */
+/* 日志落盘 —— **实现已搬到 run-log.js，这里不再保留副本**                */
 /* ------------------------------------------------------------------ */
-
-/**
- * 造一个"追加写 + 有大小上限"的日志写入器。
+/*
+ * ⚠️⚠️ 这段原本是 `createLogSink(file, maxBytes)` 的实现，现在**删掉了**。
+ *    删的理由不是"整理代码"，而是一次真实的、差点漏掉的缺陷：
  *
- * ⚠️⚠️ 为什么**必须**由应用自己写文件，而不是把 stdout 重定向到文件就完事：
+ *     我加了 `src/shared/run-log.js`（把日志与启动检查点从主进程里搬出来，
+ *     好让离线考裁判能真的调用它们），其中也导出了一个 `createLogSink` ——
+ *     签名升级成了 `{ maxBytes, retryCooldownMs }`，并且加了"失败后能自愈"。
+ *     而**这一个副本忘了删**。
  *
- *    实测（就在本机）：`service.mjs` 用 `stdio: [..., fd, fd]` 把子进程的
- *    stdout 指到 `run.log`，应用也**确实**正常启动了（心跳、数据库、
- *    定时器全都跑了），可是 **`run.log` 是 0 字节**。
- *    Electron/Chromium 在 Windows 上不保证把主进程的 `console.log`
- *    送到继承来的 stdout 句柄 —— 尤其是脱离终端（detached）的时候。
+ *     于是 `index.js` 仍然 import 的是旧版（`(file, maxBytes)` 数字签名），
+ *     却按新签名调用 `createLogSink(RUN_LOG, { maxBytes: 4MB })`：
+ *        · `maxBytes` 变成了一个**对象**
+ *        · `sizeOf() > maxBytes` 里发生对象比较 ⇒ 恒为 false
+ *        · **截断永远不会触发 ⇒ run.log 无限增长**
+ *     而两边的单元测试各自都是绿的 —— 因为测试 import 的是哪一个副本，
+ *     就只验证了那一个副本的行为。
  *
- *    后果分两层，第二层更严重：
- *      ① `logs` 命令永远显示"还没有日志文件"，形同虚设；
- *      ② 更糟的是**启动失败时的诊断全都失效** —— 我专门写了
- *         "失败就把日志末尾打出来"，而那个文件永远是空的，
- *         于是用户看到的还是那句最没用的话："连第一行都没写出来"。
- *    ⇒ 结论：日志必须由**应用自己**写。重定向只能当兜底，不能当主路径。
+ *     ⇒ 这就是本项目反复出现的"两份口径"形态（数据目录、CARD_SIZE、
+ *       --win-pad 都栽过）。**同一件事只允许一个实现，其余地方一律 import。**
+ *       离线考裁判里有一条断言专门数这个函数在整个仓库里出现了几次。
  *
- * ⚠️ 三条约束（与 `boot.log` 同源的理由）：
- *   ① **同步追加**：崩溃可能发生在下一个事件循环之前，异步写会被丢掉。
- *   ② **有上限**：这是常驻应用，日志会一直涨。超了就截断成"保留最后一段"。
- *   ③ **写失败绝不影响功能**：磁盘满、权限不足都只是少一份日志。
- *
- * @param {string} file
- * @param {number} [maxBytes]
+ *     现在 `createLogSink` 的唯一实现在 `src/shared/run-log.js`。
  */
-export function createLogSink(file, maxBytes = 4 * 1024 * 1024) {
-  let bytes = null;
-  let broken = false;
-
-  const sizeOf = () => {
-    if (bytes === null) {
-      try {
-        bytes = fs.statSync(file).size;
-      } catch {
-        bytes = 0;
-      }
-    }
-    return bytes;
-  };
-
-  return function write(line) {
-    if (broken) return;
-    try {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const text = String(line) + '\n';
-      if (sizeOf() > maxBytes) {
-        const keep = Math.floor(maxBytes / 16);
-        const old = fs.readFileSync(file, 'utf8');
-        const tail = old.slice(Math.max(0, old.length - keep));
-        fs.writeFileSync(
-          file,
-          `--- 日志超过 ${Math.round(maxBytes / 1024)}KB，已截断（保留最后 ${Math.round(keep / 1024)}KB）---\n${tail}`,
-          'utf8',
-        );
-        bytes = Buffer.byteLength(tail, 'utf8');
-      }
-      fs.appendFileSync(file, text, 'utf8');
-      bytes += Buffer.byteLength(text, 'utf8');
-    } catch {
-      broken = true; // 写不进去就别每次日志都再试一遍
-    }
-  };
-}
 
 /* ------------------------------------------------------------------ */
 /* pid 文件                                                            */

@@ -71,9 +71,9 @@ import {
   requestStop,
   clearStopRequest,
   hasStopRequest,
-  createLogSink,
   legacyDataDirOf,
 } from '../src/shared/runtime-state.js';
+import { createBootMark, bootLogPath, teeConsole, createLogSink } from '../src/shared/run-log.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
 
 const lines = [];
@@ -1421,12 +1421,12 @@ ok('★★ 应用必须真的去查停止请求并退出（只写文件没人看
   assert.ok(/app\.quit\(\)/.test(loop[0]), '查到停止请求却没有调用 app.quit() —— 文件放进去也不会退出');
 });
 
-ok('★ 日志写入器：能追加、能截断、写不进去也不抛', () => {
+ok('★ 日志写入器：能追加、能截断、写不进去返回原因（而不是抛）', () => {
   const dir = tmpDbFile('logsink');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'x.log');
 
-  const write = createLogSink(file, 4096);
+  const write = createLogSink(file, { maxBytes: 4096 });
   write('第一行');
   write('第二行');
   let text = fs.readFileSync(file, 'utf8');
@@ -1439,10 +1439,174 @@ ok('★ 日志写入器：能追加、能截断、写不进去也不抛', () => 
   assert.ok(after < 4096 * 4, `截断没生效，文件涨到 ${after} 字节`);
   assert.ok(fs.readFileSync(file, 'utf8').includes('已截断'), '截断时应当留一句说明');
 
-  // 写不进去（目录被删掉且无法重建）不许抛
-  const bad = createLogSink(path.join(dir, 'no', 'such', 'deep', 'y.log'));
-  assert.doesNotThrow(() => bad('x'));
+  /* ⚠️ 这一段原来只写了 `assert.doesNotThrow(() => bad('x'))` —— 一条**弱断言**：
+     它只证明"没抛"，不证明"失败被记下来了"。而审查员实测抓到过真问题：
+     老实现一旦写失败就 `broken = true` **永久不再尝试**，
+     于是"磁盘暂时满 → 腾出空间"之后日志再也不会恢复，而用户以为一切正常。
+     ⇒ 现在断言三件事：失败有原因、冷却期内不反复试、冷却结束后**会再试**。 */
+  const blocked = path.join(dir, 'blocked');
+  fs.writeFileSync(blocked, 'iamafile'); // 父路径是个文件 ⇒ mkdir 必失败
+  let t = 1000;
+  const bad = createLogSink(path.join(blocked, 'y.log'), { retryCooldownMs: 1000, now: () => t });
+  const r1 = bad('x');
+  assert.equal(r1.ok, false, '写不进去却报成功');
+  assert.ok(r1.error, '失败了却没说原因 —— 这正是"失败要有嘴"的反面');
+  assert.ok(bad.state().failures >= 1 && bad.state().lastError, '失败没被记进 state（status 就报不出来）');
+  assert.equal(bad('x').skipped, true, '冷却期内还在反复尝试，白耗 IO');
+  t += 2000;
+  assert.notEqual(bad('x').skipped, true, '冷却结束后也不再尝试了 —— 一次瞬时故障会变成永久静默');
 
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+ok('★★ 同一个能力只许有一个实现（两份副本 = 测试各测各的，谁都没盖住）', () => {
+  /* ⚠️ 这条是**实测抓到**的：我加了 run-log.js 之后忘了删 runtime-state.js 里的
+     旧副本。index.js 仍然 import 旧的（数字签名），却按新签名传了对象 ⇒
+     maxBytes 变成对象 ⇒ 截断恒不触发 ⇒ run.log 无限增长。
+     而两边的测试各自都是绿的 —— 因为各自 import 的是各自的副本。
+     这是本项目反复出现的形态：数据目录、CARD_SIZE、--win-pad 都栽过。
+     ⇒ 数一遍：这几个名字在整个仓库里只允许出现**一次** `export function`。 */
+  const here = path.resolve(HERE, '..');
+  const files = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (['node_modules', '.npm-cache', '.git', 'data', 'report'].includes(e.name)) continue;
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.(js|mjs|cjs)$/.test(e.name)) files.push(p);
+    }
+  };
+  walk(here);
+
+  const singles = ['createLogSink', 'createBootMark', 'teeConsole', 'dataDirOf', 'classifyRun', 'parseFetchTime', 'createScheduler'];
+  const dupes = [];
+  for (const name of singles) {
+    const defs = [];
+    for (const f of files) {
+      /* ⚠️ **必须先剥注释**。这一轮里同一个坑我踩了四次：
+         扫描器把自己**说明性的注释文字**当成了代码（注释里那句
+         "正则字面量 export function createBootMark 会把本文件算成第二个实现"
+         本身就把本文件算成了第二个实现）。
+         剥注释是对的做法；把注释改写成不含关键字的绕法只会让下一个人再踩一次。 */
+      const src = stripJsComments(fs.readFileSync(f, 'utf8'));
+      if (new RegExp('export\\s+function\\s+' + name + '\\b').test(src)) defs.push(path.relative(here, f));
+    }
+    if (defs.length !== 1) dupes.push(`${name} 有 ${defs.length} 个实现：${defs.join(' / ')}`);
+  }
+  assert.deepEqual(dupes, [], '同一能力出现了多份实现（测试会各测各的，谁都没盖住）：\n      ' + dupes.join('\n      '));
+
+  /* 反向：确认 index.js 引用的日志能力都来自 run-log.js 这一个地方 */
+  const idx = fs.readFileSync(path.join(here, 'src', 'main', 'index.js'), 'utf8');
+  const runtimeImport = idx.match(/import\s*\{([\s\S]*?)\}\s*from\s*'\.\.\/shared\/runtime-state\.js'/);
+  assert.ok(runtimeImport, '找不到 index.js 对 runtime-state.js 的 import');
+  assert.ok(!/createLogSink/.test(runtimeImport[1]), 'index.js 又从 runtime-state.js 拿 createLogSink —— 那个副本已经删了');
+});
+
+/* ==================================================================
+ * 第九层 · 启动取证通道必须真的能写
+ * ------------------------------------------------------------------
+ * ⚠️ 这一层是一次**真事故**换来的，而且这些断言本来能拦住它：
+ *
+ *   原来 `mark()`（写启动检查点）与 `teeConsole()` 都写在 `src/main/index.js`
+ *   里。那个文件 import 了 electron ⇒ **离线侧加载不了** ⇒ 这两段逻辑
+ *   没有任何测试能碰到。有一次重构删掉了它们依赖的 `const BOOT_LOG = ...`
+ *   常量，而 `mark()` 里还留着对 `BOOT_LOG` 的引用：
+ *
+ *     ① 它是未声明的自由变量 ⇒ 每次 mark() 抛 ReferenceError
+ *     ② catch {} 是**故意**为"落盘失败不该阻止启动"写的 ⇒ 异常被静默吞掉
+ *     ③ 生产现场：boot.log 的 mtime 停在两天前、run.log 里 [boot] 行数为 0，
+ *        而应用在那两天里**正常启动过好几次**
+ *
+ *   ⇒ 教训不是"下次记得定义变量"，而是两件事：
+ *     · 不需要 Electron 的逻辑必须放进零依赖模块，否则它**不可能被测试**；
+ *     · **"故意吞异常的兜底"必须与"证明它没在吞真问题"的断言成对出现**。
+ *       只吞不报的 catch 会把代码错误伪装成环境问题。
+ * ================================================================== */
+say();
+say('--- 第九层 · 启动取证通道（一次真事故换来的断言）---');
+
+ok('★★ mark() 必须真的写出 boot.log，而不只是"没抛异常"', () => {
+  const dir = tmpDbFile('bootmark');
+  fs.mkdirSync(dir, { recursive: true });
+  const toRunLog = [];
+  const mark = createBootMark(dir, (l) => toRunLog.push(l));
+
+  const steps = [
+    'module-evaluated',
+    'heartbeat-written',
+    'pidfile-written',
+    'bootstrap-enter',
+    'db-opened',
+    'card-window-created',
+    'ipc-registered',
+    'level-applied',
+    'scheduler-started',
+  ];
+  const results = steps.map((s) => mark(s, 'pid=1'));
+
+  /* ⚠️ 判据是"返回 ok" + "文件里真的有这些行"，**不是** "调用没抛异常"。
+     事故期间那种"没抛异常"的断言一直是绿的。 */
+  assert.ok(
+    results.every((r) => r.ok === true),
+    '有检查点没写成功：' + JSON.stringify(results.filter((r) => !r.ok)),
+  );
+  const text = fs.readFileSync(bootLogPath(dir), 'utf8');
+  for (const s of steps) assert.ok(text.includes(s), `boot.log 里没有检查点 ${s}`);
+  assert.equal(text.trim().split('\n').length, steps.length, 'boot.log 行数与检查点数不符');
+  assert.equal(
+    toRunLog.filter((l) => l.startsWith('[boot] ')).length,
+    steps.length,
+    'run.log 没收到对应的 [boot] 行 —— 出问题时只能去翻 boot.log 一个文件',
+  );
+  assert.equal(mark.codeError(), null, '有代码错误被吞掉了：' + mark.codeError());
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+ok('★★ 代码错误不许被"落盘失败"的兜底吞掉（事故的根因）', () => {
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'shared', 'run-log.js'), 'utf8');
+  /* ⚠️ 这里用拼出来的正则，而不是写一个正则字面量。
+     原因：上面那条"同一能力只许有一个实现"会扫描**本文件**，
+     而正则字面量 `export function createBootMark` 会把本文件自己算成
+     第二个实现 —— 这个假阳性我已经在这一轮踩过三次了
+     （注释里的坏路径、自检样本、以及这里）。 */
+  const fn = src.match(new RegExp('export\\s+function\\s+' + 'createBootMark' + '[\\s\\S]*?\\n\\}'));
+  assert.ok(fn, '找不到 createBootMark');
+  assert.ok(/isEnv/.test(fn[0]), 'createBootMark 没有区分环境错误与代码错误 —— 两者共用一句 catch 就是事故的根因');
+  assert.ok(/throw err/.test(fn[0]), '代码错误被吞掉了（应当抛出：它重复一万次也不会自己好）');
+  assert.ok(/ok: false/.test(fn[0]) && /error:/.test(fn[0]), '环境错误既没抛也没记原因');
+
+  /* 主进程不许再自己写 boot.log —— 那意味着又绕开了这层保护 */
+  const idx = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  assert.ok(!/appendFileSync\(\s*BOOT_LOG/.test(idx), 'index.js 里又出现了裸的 BOOT_LOG 用法');
+  assert.ok(/createBootMark\(/.test(idx), 'index.js 没有用 createBootMark');
+  assert.ok(/teeConsole\(/.test(idx), 'index.js 没有用 teeConsole');
+});
+
+ok('★ teeConsole 转写落盘且能恢复', () => {
+  const written = [];
+  const fake = { log: () => {}, info: () => {}, warn: () => {}, error: () => {} };
+  const restore = teeConsole((l) => written.push(l), fake);
+  fake.log('hello', 42);
+  assert.equal(written.length, 1, 'console.log 没有落盘');
+  assert.ok(written[0].includes('hello') && written[0].includes('42'), '落在盘上的内容不对：' + written[0]);
+  fake.error(new Error('boom'));
+  assert.ok(written.some((l) => l.startsWith('[error] ')), 'error 级别没有前缀标记');
+  restore();
+  const n = written.length;
+  fake.log('again');
+  assert.equal(written.length, n, 'restore 之后还在往盘上写');
+});
+
+ok('★ 写不进去时 mark 返回失败并带原因（不许静默）', () => {
+  const dir = tmpDbFile('bootmark-fail');
+  fs.mkdirSync(dir, { recursive: true });
+  const blocked = path.join(dir, 'blocked');
+  fs.writeFileSync(blocked, 'iamafile');
+  const mark = createBootMark(path.join(blocked, 'sub'), () => {});
+  const r = mark('probe');
+  assert.equal(r.ok, false, '写不进去却报成功');
+  assert.ok(r.error, '失败没有原因');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
