@@ -1,6 +1,6 @@
 {
   "name": "morning-brief",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "晨报机 · 产品工程（M1）。常驻桌面情报板：定时抓取 → 归一化去重 → 置底玻璃卡片。",
   "type": "module",
@@ -59,11 +59,24 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "tools/win", "to": "tools/win" },
-      { "from": "src/renderer/assets", "to": "assets" }
+      {
+        "from": "tools/win",
+        "to": "tools/win"
+      },
+      {
+        "from": "src/renderer/assets",
+        "to": "assets"
+      }
     ],
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.ico"
     },
     "nsis": {
