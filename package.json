@@ -31,6 +31,7 @@
     "test:ui": "交互一致性（四条不变量 + 顺序无关排列 + BFS 可达 + 变异测试）"
   },
   "devDependencies": {
-    "electron": "^44.4.2"
+    "electron": "^44.4.2",
+    "electron-builder": "^26.15.3"
   }
 }
