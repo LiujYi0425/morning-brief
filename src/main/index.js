@@ -1,0 +1,695 @@
+/**
+ * src/main/index.js —— 产品入口
+ * =====================================================================
+ * ⚠️ 两条 Electron 环境陷阱，照搬 M0 的结论（见 m0-probe/README.md B10 / B11）：
+ *   1) 本机环境的 `ELECTRON_RUN_AS_NODE=1` 会让 electron.exe 静默退化成普通 Node
+ *      （不开窗口、报错还指向别处）。它只能在 spawn 之前删 —— 由启动器负责。
+ *   2) ESM 主进程里**不能**顶层 `await app.whenReady()`（死锁，且不报错）。
+ *      ⇒ 一律 `app.whenReady().then(...)`。
+ * =====================================================================
+ */
+
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { app, screen, powerMonitor } from 'electron';
+
+import { createCardWindow, setCardState, nativeHwnd, CARD_SIZE, alignToPhysicalGrid } from './window.js';
+import { registerIpc } from './ipc.js';
+import {
+  createScheduler,
+  catchUpDecision,
+  nextRunAt,
+  formatHm,
+  parseFetchTime,
+} from './scheduler.js';
+import {
+  writePidFile,
+  removePidFile,
+  runLogPath,
+  createLogSink,
+  hasStopRequest,
+  clearStopRequest,
+  dataDirOf,
+  legacyDataDirOf,
+} from '../shared/runtime-state.js';
+import { runIngest } from '../ingest/fetch-feeds.js';
+import { openDb, queryItems, countItems, sourceHealth, listCategories, getMeta, setMeta, upsertCategory, upsertSources } from '../store/db.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, '..', '..');
+
+/* 数据目录：默认 **项目内的 `data/`**，可用 `MB_DATA_DIR` 覆盖。
+ * ⚠️ 口径来自 `runtime-state.js` 的 `dataDirOf`，**不在这里另写一份** ——
+ *    各写一份必然漂移，而漂移的表现是"应用写这个目录、管理命令查那个目录"。 */
+const DATA_DIR = dataDirOf(process.env);
+const DB_FILE = path.join(DATA_DIR, 'brief.db');
+
+/* 迁移提示：旧版把数据放在 `~/.morning-brief`。
+ * ⚠️ 为什么不自动搬：那会在用户不知情的情况下动他的数据文件。
+ *    但**必须说一声** —— 否则升级之后看到空卡片，第一反应是"我的简报丢了"。 */
+{
+  const legacy = legacyDataDirOf(process.env);
+  if (legacy && legacy !== DATA_DIR && !fs.existsSync(DB_FILE) && fs.existsSync(path.join(legacy, 'brief.db'))) {
+    console.log('[main] ⚠️ 现在的数据目录是 ' + DATA_DIR + '，但那里还没有数据库。');
+    console.log('[main]    在旧位置发现了数据：' + legacy);
+    console.log('[main]    想搬过来：把该目录下的文件拷到 ' + DATA_DIR + ' 即可（或设 MB_DATA_DIR 指回旧位置）。');
+  }
+}
+
+/** 心跳文件：证明"真的起来了"。不带它的话，静默失败会看起来像"正在启动" */
+const HEARTBEAT = path.join(DATA_DIR, 'boot-heartbeat.txt');
+
+/**
+ * 统一日志落盘（**主进程与渲染层都进同一个文件**）。
+ *
+ * ⚠️ 为什么必须有（两次踩坑，第二次是后台运行引入的）：
+ *
+ *   第一次：渲染层每一条日志都要经 IPC 回到主进程，而主进程原来只
+ *   `console.log` —— **不通过终端启动就一条都拿不到**。
+ *   界面问题只能靠真机日志定位（我在离线侧看不到界面），而"必须先开个终端"
+ *   把取证成本抬得太高：用户双击一下图标就再也拿不到证据了。
+ *
+ *   第二次（**更严重**）：加了后台运行之后，`service.mjs` 用
+ *   `stdio: [..., fd, fd]` 把子进程 stdout 指向 `run.log`。
+ *   实测结果是 —— 应用**确实**正常启动了（心跳、数据库、定时器全跑了），
+ *   而 **`run.log` 是 0 字节**。Electron/Chromium 在 Windows 上不保证
+ *   把主进程的 `console.log` 送到继承来的句柄，脱离终端时尤其如此。
+ *   于是 `logs` 形同虚设，而且**启动失败时的诊断全部失效**：
+ *   我专门写了"失败就把日志末尾打出来"，那个文件却永远是空的。
+ *
+ *   ⇒ 结论写死在这里：**日志必须由应用自己写**。重定向只能当兜底。
+ */
+const RUN_LOG = runLogPath(DATA_DIR);
+const writeRunLog = createLogSink(RUN_LOG, 4 * 1024 * 1024);
+
+/**
+ * 把 `console.log / info / warn / error` 接到落盘上。
+ *
+ * ⚠️ 三个细节：
+ *   ① **保留原输出**（先调原来的 console）—— 前台调试时终端里照样要看得到。
+ *   ② **必须能扛住 console 自己的异常**：某些环境下 stdout 已断开，
+ *      原 console 会抛 EPIPE，不能因此让应用崩掉。
+ *   ③ 不做递归：写入器是纯同步 fs，不会再触发 console。
+ */
+function teeConsole() {
+  const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+  const wrap = (fn, tag) => (...args) => {
+    try {
+      fn.apply(console, args);
+    } catch {
+      /* stdout 断了也不该影响功能 */
+    }
+    writeRunLog(tag + args.map((a) => (typeof a === 'string' ? a : safeInspect(a))).join(' '));
+  };
+  console.log = wrap(orig.log, '');
+  console.info = wrap(orig.info, '');
+  console.warn = wrap(orig.warn, '[warn] ');
+  console.error = wrap(orig.error, '[error] ');
+}
+
+/** 把任意值变成一行可读文本；**不递归展开对象**（避免把活对象序列化炸掉） */
+function safeInspect(v) {
+  if (v instanceof Error) return String(v.stack || v.message || v);
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === 'object') return '[object]';
+  return String(v);
+}
+
+function mark(step, extra) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const line = `${new Date().toISOString()} ${step}${extra ? ' ' + extra : ''}`;
+    fs.appendFileSync(BOOT_LOG, line + '\n', 'utf8');
+    writeRunLog('[boot] ' + line);
+  } catch {
+    /* 落盘失败不该阻止启动 */
+  }
+}
+
+/* ---------------- 最早的一批检查点 ----------------
+ * 这些在模块求值阶段就跑 —— 若"连第一条都没有"，说明 import 阶段就出事了。
+ *
+ * ⚠️ 顺序：**先接上 console，再打第一条检查点**。
+ *    反过来的话，最早那几行（恰恰是"崩在 import 阶段"时唯一能拿到的信息）
+ *    只会出现在 stdout 上 —— 而后台运行时 stdout 是收不到的。 */
+teeConsole();
+mark('module-evaluated', `pid=${process.pid} type=${process.type} node=${process.versions.node}`);
+
+/** 进程级兜底：任何未捕获异常都要落盘（否则崩溃是静默的） */
+process.on('uncaughtException', (err) => {
+  mark('uncaughtException', `${err && err.stack ? err.stack.split('\n').slice(0, 4).join(' | ') : err}`);
+  try {
+    fs.writeFileSync(path.join(DATA_DIR, 'crash-last.txt'), String((err && err.stack) || err), 'utf8');
+  } catch {
+    /* 已经要退了，尽力而为 */
+  }
+  /* ⚠️ 崩溃退出前注销 pid 文件。少了这一步，下一次 `service status` 会说
+     "运行中"（pid 文件还在、进程号又碰巧被别人用上），而实际上早就崩了 ——
+     这正是"状态查询撒谎"最典型的一种。 */
+  try {
+    removePidFile(DATA_DIR);
+  } catch {
+    /* 尽力而为 */
+  }
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  mark('unhandledRejection', String((reason && reason.stack) || reason).split('\n').slice(0, 3).join(' | '));
+});
+
+/* ---------------- Electron 自身的启动失败也要落盘 ----------------
+ * ⚠️ 这两条监听器**暂时不注册**（真机踩过：加上它们之后应用从能跑变成 0xC0000005 崩溃）。
+ *    它们本身是好的诊断手段，但要**单独验一次**再加回来 ——
+ *    不能顺手塞进启动路径。启动失败目前靠 `boot.log` 的检查点序列定位，
+ *    以及 `tools/launch.mjs` 的心跳守护（超时没心跳就报警）。 */
+
+/** 心跳：证明"真的起来了"。写在最早，因为后面的步骤都可能崩 */
+{
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const line =
+    `booted=${new Date().toISOString()} pid=${process.pid} ` +
+    `electron=${process.versions.electron} node=${process.versions.node} ` +
+    `process.type=${process.type} RUN_AS_NODE=${JSON.stringify(process.env.ELECTRON_RUN_AS_NODE)}\n`;
+  try {
+    fs.writeFileSync(HEARTBEAT, line, 'utf8');
+    mark('heartbeat-written');
+  } catch (err) {
+    mark('heartbeat-FAILED', String(err && err.message));
+  }
+}
+
+/* ---------------- 登记自己（后台运行管理用） ----------------
+ *
+ * ⚠️ 写在**心跳之后、bootstrap 之前**，位置是刻意的：
+ *    `service.mjs start` 会在 spawn 之后等这一份登记。若等到窗口建好才写，
+ *    它会白等几秒；若写在模块最前面，那么"import 阶段就崩"的实例也会留下
+ *    pid 文件 —— 而那种实例恰恰最需要被识别成"没起来"。
+ *    心跳已经是"真的起来了"的最早证据，pid 文件跟着它走最合适。
+ *
+ * ⚠️ **合并写入**：`service.mjs` 在 spawn 那一刻已经用它知道的 pid 登记过一次，
+ *    这里补上应用自己才知道的（启动时刻、版本、日志路径）。直接覆盖会把
+ *    `source` 等字段抹掉，而 status 要用它们区分"谁启动的"。
+ */
+try {
+  writePidFile(DATA_DIR, {
+    pid: process.pid,
+    source: 'app',
+    booted: true,
+    bootedAt: new Date().toISOString(),
+    electron: process.versions.electron,
+    node: process.versions.node,
+    root: ROOT,
+    dataDir: DATA_DIR,
+    log: runLogPath(DATA_DIR),
+  });
+  mark('pidfile-written', `pid=${process.pid}`);
+} catch (err) {
+  mark('pidfile-FAILED', String(err && err.message));
+}
+
+/** 默认精选条数（需求 2 的口径：默认只给精选，更多由用户主动展开） */
+const CURATED = Number(process.env.MB_CURATED || 15);
+
+/** 翻页每页条数 */
+const PAGE = Number(process.env.MB_PAGE || 15);
+
+/** "看今天全部"模式一次最多取多少条（上限 200 由 db.queryItems 夹取） */
+const ALL_LIMIT = Number(process.env.MB_ALL_LIMIT || 120);
+
+/* ---------------- 抓取时刻（默认 07:30，可用环境变量覆盖） ----------------
+ *
+ * ⚠️ 解析逻辑在 `scheduler.js` 的 `parseFetchTime` 里，**不在这里** ——
+ *    因为 `index.js` import 了 electron，离线侧根本加载不了它，
+ *    留在这儿就等于那段逻辑永远不可能被测试。
+ *    这里是"读环境变量 + 把结果说出来"，一步不多。
+ *
+ *   MB_FETCH_HOUR=7  MB_FETCH_MINUTE=30   → 07:30（默认就是这个）
+ *   非法值会被挡下并退回默认，日志里会明说。
+ */
+const FETCH_TIME = parseFetchTime(process.env);
+const FETCH_AT = formatHm(FETCH_TIME.hour, FETCH_TIME.minute);
+
+/* ---------------- 心跳 ---------------- */
+{
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const line =
+    `booted=${new Date().toISOString()} pid=${process.pid} ` +
+    `electron=${process.versions.electron} node=${process.versions.node} ` +
+    `process.type=${process.type} RUN_AS_NODE=${JSON.stringify(process.env.ELECTRON_RUN_AS_NODE)}\n`;
+  try {
+    fs.writeFileSync(HEARTBEAT, line, 'utf8');
+  } catch {
+    /* 写不进去不该阻止启动 */
+  }
+}
+
+/* ---------------- 数据库（单例连接，**异步打开一次**） ----------------
+ *
+ * ⚠️ `node:sqlite` **不能在 Electron 主进程顶层静态 import**（真机实测：0xC0000005
+ *    原生崩溃、`app.whenReady()` 永不触发、没有任何 JS 报错）。
+ *    所以驱动要延迟加载、连接要在 `whenReady` 之后 `await` 打开。
+ *
+ * ⇒ `getDb()` 保持**同步返回**：因为它在 `whenReady` 里已经 await 过一次，
+ *   之后所有调用点都能确定拿到连接。这样 IPC 处理器与调度器都不用变成异步，
+ *   而"必须等连接就绪"这件事由启动序列的顺序保证。
+ */
+let db = null;
+function getDb() {
+  if (!db) {
+    // 走到这里说明调用方早于启动序列 —— 明确报错，不要静默返回 undefined
+    throw new Error('数据库尚未就绪：getDb() 只能在 whenReady 初始化之后调用');
+  }
+  return db;
+}
+
+/* ---------------- 写操作串行化 ----------------
+ * node:sqlite 的 DatabaseSync 是同步的，但**抓取是异步的**。
+ * 若抓取期间用户翻页、而抓取又在写同一张表，就会读到"写了一半"的状态。
+ * 用一个极简的 promise 链把写操作串起来 —— 抓取是冷路径，串行不损失体验。 */
+let writeChain = Promise.resolve();
+function serialize(fn) {
+  const run = () => fn();
+  writeChain = writeChain.then(run, run);
+  return writeChain;
+}
+
+/** 组一份"当前简报"给界面 */
+function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } = {}) {
+  const d = getDb();
+  /* ⚠️ 夹取：`limit` 来自渲染层，属于**请求参数**，不能直接当口径值用 */
+  const want = Math.max(1, Math.min(200, Number.isFinite(Number(limit)) ? Math.round(Number(limit)) : CURATED));
+  // "今天"的起点（本地日）—— 查询与计数**用同一个** sinceIso，口径必须逐字一致
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const sinceIso = start.toISOString();
+
+  const page = queryItems(d, { limit: want, categoryIds, todayOnly: !!todayOnly, sinceIso });
+  const health = sourceHealth(d);
+  const lastIngest = getMeta(d, 'last_ingest_at');
+
+  /* ★ 两个数必须分开（真机踩过）：
+   *   todayTotal    = **不带筛选**的当日总数   → 决定"看今天全部"按钮**存不存在**
+   *   filteredTotal = **带筛选**的当日总数     → 决定"还有没有更多可以翻"
+   *   第一版只有一个 todayCount，而且用 `todayCount > items.length` 判断按钮可见性。
+   *   于是"看今天全部"一旦把列表加载到等于总数，**按钮就把自己藏起来了** ——
+   *   用户看到的现象是"点了之后按钮就消失了，收起一下它才回来"。
+   *   ⇒ 按钮的存在性必须由**与"已显示多少"无关**的量决定。 */
+  const todayTotal = countItems(d, { sinceIso });
+  const filteredTotal = categoryIds && categoryIds.length ? countItems(d, { sinceIso, categoryIds }) : todayTotal;
+
+  return {
+    items: page.rows,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor,
+    todayTotal,
+    filteredTotal,
+    totalShown: page.rows.length,
+    health,
+    categories: listCategories(d),
+    lastIngestAt: lastIngest,
+    /* ★★ `curated` 是**服务端口径常量**，不是"本次请求的 limit"（真机第三轮返工）。
+     *
+     * 旧代码写的是 `curated: limit` —— 一个回显。渲染层拿它去判断
+     * `todayTotal > curated` 该不该显示「看今天全部」，于是：
+     *   点「看今天全部」→ 渲染层请求 limit=60 → 服务端回显 curated=60
+     *   → 判定 45 > 60 为假 → **按钮把自己藏了**，而且这个错值会一直留在
+     *   渲染层状态里，收起、刷新都救不回来。
+     * 这就是"按钮可见性取决于它自己的效果"（自指）的完整链路。
+     * ⇒ 现在这里**只回口径常量**；请求实际用了多少条另用 `limitUsed` 如实报出，
+     *   两者不再混用。渲染层也不再拿 `curated` 反推任何按钮。 */
+    curated: CURATED,
+    limitUsed: want,
+    todayOnly: !!todayOnly,
+    /* 日期边界随简报一起给渲染层：翻页时它原样带回来，
+       保证第 2 页与第 1 页用的是**同一个**边界（跨午夜也不会错位）。 */
+    sinceIso,
+    activeCategory: categoryIds && categoryIds.length ? categoryIds[0] : null,
+    dataDir: DATA_DIR,
+  };
+}
+
+/* ---------------- 卡片状态 ---------------- */
+const cardState = { value: 'collapsed' };
+
+/**
+ * 拖动处理（JS 手动拖动的**主进程侧**）。
+ *
+ * ⚠️ 三条都是真机取证过的修法，别再动：
+ *   ① 坐标**进入算术前取整**（`screenX/Y` 是小数 ⇒ 窗口边拖边变大）
+ *   ② 位置**对齐物理像素网格**（150% 下奇数坐标 ⇒ 尺寸多 1px）
+ *   ③ 尺寸取**设计值**，不每帧现读（现读会把被撑大的值逐帧传递）
+ */
+function makeDragHandler(win) {
+  let session = null;
+  return (payload) => {
+    if (!win || win.isDestroyed()) return { ok: false, reason: '窗口不存在' };
+    const p = payload || {};
+    const phase = p.phase;
+    const cx = Math.round(Number(p.x) || 0);
+    const cy = Math.round(Number(p.y) || 0);
+
+    if (phase === 'begin') {
+      const b = win.getBounds();
+      const d = screen.getDisplayNearestPoint({ x: cx, y: cy });
+      const step = alignToPhysicalGrid(cx, cy, d.scaleFactor);
+      session = {
+        bx: b.x,
+        by: b.y,
+        cx: step.x,
+        cy: step.y,
+        size: CARD_SIZE[cardState.value] || CARD_SIZE.collapsed,
+        step: step.step,
+        scale: d.scaleFactor,
+        moved: 0,
+      };
+      return { ok: true, phase, start: { x: b.x, y: b.y } };
+    }
+
+    if (!session) return { ok: false, reason: '没有活跃拖动会话' };
+
+    if (phase === 'move') {
+      const d = screen.getDisplayNearestPoint({ x: cx, y: cy });
+      const g = alignToPhysicalGrid(cx, cy, d.scaleFactor);
+      if (g.x === session.cx && g.y === session.cy) return { ok: true, moved: false };
+      const nx = session.bx + (g.x - session.cx);
+      const ny = session.by + (g.y - session.cy);
+      session.moved = Math.max(Math.abs(g.x - session.cx), Math.abs(g.y - session.cy));
+      win.setBounds({ x: nx, y: ny, width: session.size.w, height: session.size.h });
+      const after = win.getBounds();
+      return {
+        ok: true,
+        moved: true,
+        expect: { x: nx, y: ny },
+        actual: { x: after.x, y: after.y },
+        sizeExact: after.width === session.size.w && after.height === session.size.h,
+      };
+    }
+
+    if (phase === 'end') {
+      const b = win.getBounds();
+      const d = screen.getDisplayMatching(b);
+      const g = alignToPhysicalGrid(b.x, b.y, d.scaleFactor);
+      const want = CARD_SIZE[cardState.value] || CARD_SIZE.collapsed;
+      win.setBounds({ x: g.x, y: g.y, width: want.w, height: want.h });
+      const settled = win.getBounds();
+      const sizeExact = settled.width === want.w && settled.height === want.h;
+      console.log(
+        `[drag] end 落点=(${settled.x},${settled.y}) 尺寸=${settled.width}x${settled.height} ` +
+          `（设计 ${want.w}x${want.h}）尺寸精确=${sizeExact} 网格步长=${g.step}`,
+      );
+      session = null;
+      return { ok: true, phase, settled, sizeExact };
+    }
+    return { ok: false, reason: `未知阶段 ${phase}` };
+  };
+}
+
+/* ---------------- 置底 ---------------- */
+let levelApplied = { ok: false, status: 'not-attempted', detail: null };
+async function applyBottomLevel(win) {
+  try {
+    win.setAlwaysOnTop(false);
+  } catch {
+    /* 失败也继续 */
+  }
+  const hwnd = nativeHwnd(win);
+  if (!hwnd) {
+    levelApplied = { ok: false, status: 'failed', detail: '取不到窗口原生句柄（不猜，故不置底）' };
+    console.log(`[level] ✗ ${levelApplied.detail}`);
+    return levelApplied;
+  }
+  /* ★ 置底脚本必须**在项目内**（第五轮：可搬移 / 可打包）。
+   *
+   * ⚠️ 原来这里写的是 `path.join(ROOT, '..', 'm0-probe', 'tools', ...)` ——
+   *    指向项目**外面**的探针目录。在原来的位置能跑（两个目录是兄弟），
+   *    但项目一旦被搬走（比如挪到 D:\morning-brief），这个相对路径就断了：
+   *    `D:\m0-probe\tools\...` 不存在 ⇒ **置底静默失效**，
+   *    卡片从此不再压在其他窗口之下，而日志里只有一行 unavailable。
+   *    对一个"被搬走就该照常能用"的程序来说，这是最不能接受的一种坏法。
+   * ⇒ 脚本随项目走：`tools/win/set-window-level.ps1`。
+   *    这也是"以后要打包给别人用"的前提 —— 打包出去的目录里不能有 `..`。 */
+  const script = path.join(ROOT, 'tools', 'win', 'set-window-level.ps1');
+  if (!fs.existsSync(script)) {
+    levelApplied = { ok: false, status: 'unavailable', detail: `找不到置底脚本：${script}` };
+    console.log(`[level] ✗ ${levelApplied.detail}`);
+    return levelApplied;
+  }
+  try {
+    const { execFile } = await import('node:child_process');
+    const out = await new Promise((resolve, reject) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-ProcessId', String(process.pid), '-Mode', 'bottom', '-WindowHandle', hwnd],
+        { timeout: 15000, windowsHide: true, encoding: 'utf8' },
+        (err, stdout) => (err ? reject(Object.assign(err, { stdout })) : resolve(stdout)),
+      );
+    });
+    const raw = JSON.parse(String(out).replace(/^\uFEFF/, '').trim());
+    // ★ 归属校验：脚本动的必须是我们给的那个句柄
+    const ok = raw.ok === true && String(raw.hwnd) === hwnd;
+    levelApplied = { ok, status: ok ? 'applied' : 'failed', detail: raw.detail || JSON.stringify(raw), raw };
+  } catch (err) {
+    levelApplied = { ok: false, status: 'failed', detail: `调用置底脚本失败：${err.message}` };
+  }
+  console.log(`[level] ${levelApplied.status} —— ${levelApplied.detail}`);
+  return levelApplied;
+}
+
+/* ---------------- 启动 ---------------- */
+let cardWin = null;
+let scheduler = null;
+/** 停止请求的轮询器（见 bootstrap 里的说明） */
+let stopWatcher = null;
+
+/**
+ * 启动序列。
+ *
+ * ⚠️ 为什么不再直接写 `app.whenReady().then(init)`（真机踩过）：
+ *    在某条启动路径下，**模块求值时 `ready` 已经触发过**，
+ *    此时再挂 `.then()` 会**永远不执行** —— 表现为"进程活着、窗口没有、
+ *    没有任何报错"。检查点日志里就是 `heartbeat-written` 之后什么都没有。
+ *    ⇒ 先查 `app.isReady()`，已经就绪就直接跑；否则才挂 `.then()`。
+ */
+async function bootstrap() {
+  mark('bootstrap-enter');
+  try {
+    // ★ 必须 await：驱动是延迟加载的（见 getDb 上方的说明）
+    db = await openDb(DB_FILE);
+    mark('db-opened', DB_FILE);
+  } catch (err) {
+    mark('db-FAILED', String(err && err.message));
+    console.error('[main] ✗ 数据库打不开：', err && err.message);
+    app.quit();
+    return;
+  }
+
+  try {
+    cardWin = createCardWindow({ expanded: false });
+    mark('card-window-created');
+
+    /* ★ 主动让渲染层做一次 DOM 自检。
+       为什么：真机反馈"筛选没有 / 按钮消失"，而我在离线侧看不到界面，
+       靠读代码推理连续两次没打中。⇒ 把"界面到底长什么样"变成终端里的一行 JSON。
+       时机放在数据刷新之后（否则读到的是空列表，没意义）。 */
+    cardWin.webContents.on('did-finish-load', () => {
+      setTimeout(() => {
+        if (!cardWin || cardWin.isDestroyed()) return;
+        cardWin.webContents
+          .executeJavaScript('window.MB_DOMCHECK ? window.MB_DOMCHECK("main-triggered") : "MB_DOMCHECK 未定义"')
+          .catch((err) => mark('domcheck-FAILED', String(err && err.message)));
+      }, 3500);
+    });
+  } catch (err) {
+    mark('card-window-FAILED', String(err && err.message));
+    console.error('[main] ✗ 建窗口失败：', err && err.message);
+    app.quit();
+    return;
+  }
+
+  const drag = makeDragHandler(cardWin);
+
+  registerIpc({
+    getBrief: (opts) => buildBrief(opts),
+    /* ⚠️ 翻页必须**带上筛选条件**（真机踩过）：
+       第一版 getMore 只收 cursor、丢掉了 categoryIds，
+       于是"筛了类别之后再翻页"会翻出**不属于该类别**的条目。
+       ⚠️ 还要带上 `todayOnly`：否则「看今天全部」模式翻到第 2 页就翻出
+       前几天的条目 —— 与按钮文案不符（同一类 bug 的第二次现身）。 */
+    getMore: ({ cursor, categoryIds, todayOnly, sinceIso }) => {
+      const d = getDb();
+      const page = queryItems(d, {
+        limit: PAGE,
+        cursor,
+        categoryIds: categoryIds || null,
+        todayOnly: !!todayOnly,
+        sinceIso: sinceIso || null,
+      });
+      return { items: page.rows, hasMore: page.hasMore, nextCursor: page.nextCursor };
+    },
+    createCategory: (name) => {
+      const d = getDb();
+      const clean = String(name || '').trim().slice(0, 12);
+      if (!clean) return { ok: false, reason: '类别名不能为空' };
+      const existing = listCategories(d).find((c) => c.name === clean);
+      if (existing) return { ok: false, reason: '这个类别已经存在' };
+      const max = listCategories(d).reduce((m, c) => Math.max(m, c.sort_order), -1);
+      upsertCategory(d, clean, max + 1, new Date().toISOString());
+      console.log(`[category] 新增「${clean}」`);
+      return { ok: true, name: clean, categories: listCategories(d) };
+    },
+    runIngest: (trigger) =>
+      serialize(async () => {
+        const r = await runIngest({ dbFile: DB_FILE, trigger, log: (m) => console.log('[ingest]', m) });
+        // 抓完通知界面刷新
+        if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
+        return { ok: r.ok, failed: r.failed, newItems: r.newItems, health: r.health };
+      }),
+    listCategories: () => listCategories(getDb()),
+    setCardState: (next) => {
+      cardState.value = next === 'expanded' ? 'expanded' : 'collapsed';
+      setCardState(cardWin, cardState.value);
+    },
+    minimize: () => {
+      cardState.value = 'collapsed';
+      setCardState(cardWin, 'collapsed');
+    },
+    drag,
+    applyLevel: (mode) => (mode === 'bottom' ? applyBottomLevel(cardWin) : Promise.resolve(levelApplied)),
+    markOpened: (id) => {
+      try {
+        getDb().prepare("UPDATE item SET read_state = 'opened' WHERE id = ?").run(id);
+      } catch {
+        /* 标记失败不影响打开 */
+      }
+    },
+    /* 渲染层的日志经 IPC 回到主进程。`console.log` 已经接到统一日志文件上了
+       （见文件上方的 teeConsole），所以这里只需要打一次 —— 再单独写一次
+       会让同一行在文件里出现两遍。 */
+    log: (m) => console.log(m),
+  });
+
+  mark('ipc-registered');
+
+  // 置底（窗口已建、尺寸已校正，此刻 hwnd 定了）
+  try {
+    await applyBottomLevel(cardWin);
+    mark('level-applied', JSON.stringify(levelApplied.status));
+  } catch (err) {
+    mark('level-FAILED', String(err && err.message));
+  }
+
+  /* ---------------- 定时抓取 ---------------- */
+  scheduler = createScheduler({
+    run: () =>
+      serialize(() =>
+        runIngest({ dbFile: DB_FILE, trigger: 'schedule', log: (m) => console.log('[ingest]', m) }).then((r) => {
+          if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
+          return r;
+        }),
+      ),
+    lastSuccessIso: () => {
+      const d = getDb();
+      /* ⚠️ **只认 last_success_at，不许退回 last_ingest_at。**
+       *
+       * 退回就等于"失败的尝试也算成功过"。具体后果：早上断网时启动一次，
+       * 全部源失败，`last_ingest_at` 照样被更新 ⇒ catchUpDecision 认为
+       * "今天已经抓过" ⇒ **之后一整天都不再重试**，
+       * 用户看到的是"卡片空了一天，而程序明明在跑"。
+       *
+       * 这正是这两个键分开存的意义所在。之前写入端漏了 last_success_at，
+       * 读取端又用 `||` 兜了回去，两处一叠加，这个防线就等于不存在。 */
+      return getMeta(d, 'last_success_at');
+    },
+    hour: FETCH_TIME.hour,
+    minute: FETCH_TIME.minute,
+    log: (m) => console.log(m),
+  });
+  scheduler.start();
+  mark('scheduler-started', `at=${FETCH_AT}`);
+
+  // 唤醒后补抓（休眠跨过了抓取时刻的情形）
+  powerMonitor.on('resume', () => {
+    const d = catchUpDecision(
+      getMeta(getDb(), 'last_success_at'),
+      new Date(),
+      FETCH_TIME.hour,
+      FETCH_TIME.minute,
+    );
+    console.log(`[power] 系统唤醒，补抓判定：${d.due ? '需要' : '不需要'} —— ${d.reason}`);
+    if (d.due) scheduler.checkNow('catchup');
+  });
+
+  /* ---------------- 停止请求（"文件即信号"） ----------------
+   *
+   * ⚠️ 为什么是文件而不是信号 / 窗口消息：
+   *    `stop` 原来只有 `taskkill` 一条路，实测撞到两次权限问题
+   *    （Access denied；spawnSync 直接 EPERM 且**不抛异常**）。
+   *    而"能写自己数据目录"是启动它所需要的最低权限 ——
+   *    **一个装了就该能关掉的程序，不该要求管理员权限才能关。**
+   *
+   * ⚠️ 启动时先清掉**陈旧的**请求文件：上一次停止请求可能没能送达
+   *    （应用当时已经卡死），留在那里会让这一次刚起来就自己退出 ——
+   *    用户看到的是"启动成功但窗口一闪就没了"，最难查的那种。
+   */
+  clearStopRequest(DATA_DIR);
+  stopWatcher = setInterval(() => {
+    if (!hasStopRequest(DATA_DIR)) return;
+    console.log('[main] 收到停止请求（数据目录里的 stop-request 文件），正在退出');
+    clearStopRequest(DATA_DIR);
+    app.quit();
+  }, 1000);
+
+  console.log(`[main] 就绪。数据目录 ${DATA_DIR}`);
+  console.log(
+    `[main] 抓取时刻：每天 ${FETCH_AT}（本地时间）${FETCH_TIME.overridden ? '［来自环境变量］' : '［默认值］'}`,
+  );
+  /* ⚠️ 配置写错必须**大声说出来**。静默回退到默认值等于让人以为自己配上了，
+     然后第二天早上发现简报没更新却找不到原因。 */
+  for (const n of FETCH_TIME.notes) console.log(`[main] ⚠️ 配置有问题：${n}`);
+  console.log(`[main] 下次定时抓取：${nextRunAt(new Date(), FETCH_TIME.hour, FETCH_TIME.minute).toLocaleString()}`);
+}
+
+/* ⚠️ 启动形状**刻意与 m0-probe 的 index.js 一致**（那条路径已真机验证能跑）：
+ *   只调 `app.whenReady().then(...)`，**不加** `app.isReady()` 分支、
+ *   也**不在模块顶层注册** `app.on(...)`。
+ *
+ *   为什么把这两条写下来：我一度为了"更稳"加了 `if (app.isReady())` 与三个
+ *   `app.on(...)` 监听器，结果**应用从能跑到崩**（检查点停在
+ *   `heartbeat-written` 之后、`whenReady` 永不触发，退出码 0xC0000005）。
+ *   去掉之后恢复正常。⇒ **在"已经验证能跑的形状"上做最小改动**，
+ *   想加健壮性要单独验一次，别顺手加。 */
+app.whenReady().then(() =>
+  bootstrap().catch((err) => {
+    mark('bootstrap-threw', String((err && err.stack) || err).split('\n')[0]);
+    console.error('[main] ✗ 启动失败：', err);
+  }),
+);
+
+app.on('window-all-closed', () => {
+  if (scheduler) scheduler.stop();
+  app.quit();
+});
+
+/* ---------------- 优雅退出时注销自己 ----------------
+ *
+ * ⚠️ `will-quit` 只在**退出流程**里触发，不参与启动序列 ——
+ *    这一点很重要：这个项目有一条真机换来的铁律（见上方那段注释），
+ *    **不许在启动路径上顺手加监听器**（曾经因此从能跑变成 0xC0000005）。
+ *    `will-quit` 与启动顺序无关，所以是安全的。
+ *
+ * 为什么必须有：少了它，`service stop` 的优雅路径会留下一个 pid 文件，
+ * 于是下一次 `status` 要靠"归属校验"才发现是陈旧的 —— 那是兜底，不是正常路径。
+ * 正常路径就该是"进程走了、登记也撤了"。
+ */
+app.on('will-quit', () => {
+  try {
+    if (stopWatcher) clearInterval(stopWatcher);
+    removePidFile(DATA_DIR);
+    clearStopRequest(DATA_DIR);
+    mark('pidfile-removed');
+  } catch {
+    /* 退出路径上尽力而为 */
+  }
+});

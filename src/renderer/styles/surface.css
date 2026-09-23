@@ -1,0 +1,246 @@
+/* =====================================================================
+   surface.css —— 形态量（glass / opaque 两套）
+   ---------------------------------------------------------------------
+   ⚠️ 本文件是**唯一**允许出现 `backdrop-filter` / 半透明底 / 阴影的地方。
+   切换形态 = 在 <html> 上改一个 `data-surface` 属性，**不改任何组件代码**。
+
+   =====================================================================
+   2026-09-22 第二轮：**按真机反馈重做**（用户原话）
+   ---------------------------------------------------------------------
+   「元素过于模糊、过度透明、缺乏立体感，需增强清晰度、对比度与层次感」
+   ⇒ 三个病症对应三个具体的错，逐条改：
+   =====================================================================
+
+   ① **过于模糊** —— 根因是 blur 半径过大（30px）+ 铺满整卡的白色渐变纱。
+      30px 的模糊会把背景揉成一团糊，文字压在上面就没有依靠。
+      ⇒ **blur 降到 16px**（够看出"背后有东西"，又不糊成一片），
+        并且**去掉整卡覆盖的纱**。
+      ⚠️ 关于"降模糊能不能保住玻璃感"：玻璃感**不来自模糊强度**，
+        来自"能看出背后有内容 + 有边缘 + 有高光"。模糊只是让背景不抢戏。
+
+   ② **过度透明** —— 根因是底色透明度 0.62，背景一花文字对比度就崩。
+      ⇒ 提到 **0.86**（安静档的观感保住了，可读性回来了）。
+        这与项目硬规则 R-C02（正文对比度 ≥ 4.5:1）是同一件事：
+        玻璃是**功能层**的材质，不能拿可读性换通透。
+
+   ③ **缺乏立体感** —— 根因是高光只做了一个线性渐变，且阴影太散。
+      真正的"厚度"来自**四件事同时存在**（少一件就变平）：
+        · 底：一层从亮到暗的竖向渐变（上亮下暗 = 光从上面来）
+        · 边：外描边（暗）+ 内高光（亮）—— 这是"玻璃厚度"的来源
+        · 顶：一道极细的亮线（边缘反射）
+        · 影：**两层阴影** —— 近处紧而深、远处散而淡（这是"离桌面多高"的线索）
+      ⇒ 四件都做了，且**阴影收紧**（多了就变成"飘"而不是"厚"）。
+   ===================================================================== */
+
+/* ---------------- glass：真实的玻璃 ---------------- */
+:root[data-surface='glass'] {
+  /* ① 底：竖向微渐变（上亮下暗）——"光从上面来"是立体感的第一来源 */
+  --surface-bg: linear-gradient(
+    180deg,
+    rgba(252, 252, 254, 0.9) 0%,
+    rgba(246, 246, 250, 0.86) 100%
+  );
+
+  /* ② 景深：**16px 而不是 30px** + 饱和度 180%（把 blur 造成的褪色推回去）
+   *
+   * ⚠️⚠️ 一条必须写下来的事实（R1 视觉调研，有 Electron 官方文档原文）：
+   *    **在 `transparent: true` 的无边框窗口里，`backdrop-filter` 对"窗口下面的
+   *    桌面"完全无效。** 官方原文：
+   *      "The CSS blur() filter only applies to the window's web contents, so there
+   *       is no way to apply blur effect to the content below the window."
+   *    规范侧同义：backdrop root 是文档根元素，而本页的根节点是**透明的** ——
+   *    没有像素可采样 ⇒ blur 在这张卡片上一直是**空操作**。
+   *
+   *    ⇒ 这个结论的两层含义：
+   *      ① 不要再靠"加大 blur 半径"去换观感 —— 那只会白烧 GPU（规范 §3.2：
+   *         每次应用要额外一趟渲染，嵌套还会指数恶化）。**卡内不许再有第二个
+   *         backdrop-filter**（嵌套语义本身在 CSSWG #500 就有争议，
+   *         实测观感是"内层像凹进去"）。
+   *      ② "立体 / 真实"必须由**卡片自身的明暗结构**承担：上沿受光、内圈 rim、
+   *         下沿厚度、三层负 spread 投影、左上椭圆高光。下面 ④⑤⑥ 就是这四件事。
+   *    ⚠️ 也**绝不加 `will-change`**：规范明确它指定任何会创建 backdrop root 的
+   *       属性时**它自己就创建 backdrop root**，会破坏后代的玻璃效果。 */
+  --surface-blur: blur(16px) saturate(180%);
+
+  /* ③ 边缘：外描边（暗，定义轮廓）+ 内高光（亮，模拟玻璃厚度与折射）
+   *    三个 inset 各司其职，缺一件就"扁"：
+   *      · 上沿 1px 亮线 —— 受光（blur/spread 都是 0；给了 blur 就变成"发光"，
+   *        那正是"充气感"的来源）
+   *      · 内圈 1px rim —— 防边缘发灰，比外描边更淡
+   *      · 下沿 1px 暗影 —— 厚度。没有它，纯高光会让卡片看起来在"飘" */
+  --surface-edge: 1px solid rgba(255, 255, 255, 0.72);
+  --surface-inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28), inset 0 -1px 2px 0 rgba(10, 14, 22, 0.07);
+
+  /* ④ 层次：三层，**中远层用负 spread**
+   *    ⚠️ 负 spread 是"不像塑料"的关键：正 spread 会让阴影四周均匀发光，
+   *       那正是"贴纸 / 充气"的视觉签名。收拢到卡片正下方才有"离桌面多高"的读数。 */
+  --surface-shadow: 0 1px 1px rgba(9, 14, 24, 0.1), 0 6px 14px -4px rgba(9, 14, 24, 0.2),
+    0 22px 44px -20px rgba(9, 14, 24, 0.3);
+
+  /* ⑤ 顶部边缘高光：只走顶部 1px，**不是**铺满整卡的纱（那是"糊"的来源之一） */
+  --surface-top-line: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.95) 22%,
+    rgba(255, 255, 255, 0.95) 78%,
+    rgba(255, 255, 255, 0) 100%
+  );
+
+  /* ⑥ 左上镜面高光：**椭圆径向**而不是线性
+   *    线性渐变铺在顶部像"贴了一条白胶带"；椭圆把光源固定在左上，
+   *    整张卡片的明暗逻辑才自洽（上亮下暗 + 左亮右暗）。 */
+  --surface-sheen: radial-gradient(
+    120% 62% at 18% -12%,
+    rgba(255, 255, 255, 0.5) 0%,
+    rgba(255, 255, 255, 0) 62%
+  );
+
+  --divider: rgba(16, 18, 24, 0.1);
+  --hover-bg: rgba(16, 18, 24, 0.06);
+  --chip-bg: rgba(255, 255, 255, 0.72);
+  /* ⚠️ 这里只负责"选中态与未选中态**看得出不同**"。
+     对比度**不由它承担**：选中 chip 与主按钮的文字是 --text-primary
+     （card.css 的 .chip[data-on] / .btn[data-primary]），
+     实测 12.8–15.6:1，且与 --accent 的深浅完全解耦。
+     曾经的写法是 accent 文字压在这个底上 —— 全壁纸区间只有 3.2–3.9:1。 */
+  --chip-bg-on: rgba(10, 132, 255, 0.16);
+}
+
+/* ---------------- opaque：不透明降级（一等公民，不是"丑版兜底"） ---------------- */
+:root[data-surface='opaque'] {
+  --surface-bg: linear-gradient(180deg, #fdfdfe 0%, #f4f4f7 100%);
+  --surface-blur: none;
+  --surface-edge: 1px solid rgba(16, 18, 24, 0.12);
+  --surface-inner-light: inset 0 1px 0 rgba(255, 255, 255, 1),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.5), inset 0 -1px 2px 0 rgba(10, 14, 22, 0.06);
+  --surface-shadow: 0 1px 1px rgba(9, 14, 24, 0.12), 0 6px 14px -4px rgba(9, 14, 24, 0.18),
+    0 22px 44px -20px rgba(9, 14, 24, 0.24);
+  --surface-top-line: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.9) 22%,
+    rgba(255, 255, 255, 0.9) 78%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  --surface-sheen: radial-gradient(
+    120% 62% at 18% -12%,
+    rgba(255, 255, 255, 0.45) 0%,
+    rgba(255, 255, 255, 0) 62%
+  );
+  --divider: rgba(16, 18, 24, 0.12);
+  --hover-bg: rgba(16, 18, 24, 0.06);
+  --chip-bg: rgba(16, 18, 24, 0.06);
+  --chip-bg-on: rgba(10, 132, 255, 0.18);
+}
+
+/* ---------------- 卡片本体 ----------------
+ * ⚠️⚠️ **本块里不许出现 `width` / `height`**（这是一行代码换来的规矩）。
+ *
+ * 第四轮为了"给外投影留画布"，把窗口做成 内容尺寸 + 2×--win-pad，
+ * 卡片改成 `position:absolute; inset: var(--win-pad)`（见 card.css 的 .card）。
+ * 而这里原来那两行 `width:100%; height:100%` 是**上一个形态**的写法
+ * （那时卡片就等于整个视口），它没被删掉。
+ *
+ * 后果不是"看不出来"：绝对定位元素上 left+right+width 三者都非 auto 时是
+ * **过约束**，CSS 2.1 §10.3.7 规定 ltr 下**忽略 right**（§10.6.4 同理忽略 bottom）。
+ * 于是 `left:20px` + `width:100%`（= 视口宽）⇒ 盒子横向占 [20, 20+视口宽]，
+ * 右沿与下沿各顶穿视口 20px —— **恰好把刚留出来的投影画布消耗干净**：
+ * 右、下两个方向的外投影依然一个像素都到不了屏幕，而左、上是好的。
+ * 用户看到的是一张"往右下偏了 20px、只有左上两条边有厚度"的卡片。
+ *
+ * ⇒ 定位交给 card.css 的 inset，尺寸留空（absolute + inset 会自动撑满）。
+ *    `tools/test-interaction.mjs` 里有一条断言专门盯着这件事：
+ *    它会读这两个 CSS 文件，一旦有人在 .card 上又写 width/height 就会失败。
+ */
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* ★ 内容不许溢出到圆角外 —— 收起态被裁掉按钮就是这条的反面 */
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--surface-bg);
+  -webkit-backdrop-filter: var(--surface-blur);
+  backdrop-filter: var(--surface-blur);
+  border: var(--surface-edge);
+  box-shadow: var(--surface-shadow), var(--surface-inner-light);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  box-sizing: border-box;
+  /* 拖动时不该选中文字（否则拖一下选中一片） */
+  user-select: none;
+}
+
+/* 顶部一道极细的亮线 —— 玻璃最有辨识度的一笔（1px，不参与布局、不吃事件） */
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--surface-top-line);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* 左上镜面高光（椭圆径向）。铺满整卡但**不吃事件、不参与布局**，
+   也**不是**一层纱：它只在左上角有强度，到 62% 处就完全透明了。
+   ⚠️ 用 background 而不是 opacity/filter —— 后两者会创建 backdrop root，
+      在这个工程里就等于把后代的玻璃效果一次性废掉。 */
+.card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--surface-sheen);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 卡内的内容必须浮在高光之上（否则高光会把文字压灰） */
+.card > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* ---------------- 无障碍降级（两条都加，别押在一条上） ----------------
+ * ⚠️ `prefers-reduced-transparency` 只有 Chrome/Edge 118+ 支持，
+ *    Safari 不支持、Firefox 要开 flag —— 所以它**不能**当作唯一防线；
+ *    真正的防线是上面那组本身够不透明的 token（tint 0.86–0.9）。
+ *    这里两条媒体查询只是把"已经很实的玻璃"再推到底。 */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-surface='glass'] {
+    --surface-blur: none;
+    --surface-bg: linear-gradient(180deg, rgba(250, 251, 253, 0.98) 0%, rgba(244, 245, 249, 0.97) 100%);
+  }
+}
+@media (prefers-contrast: more) {
+  :root[data-surface='glass'] {
+    --surface-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(248, 248, 251, 0.98) 100%);
+    --surface-edge: 1px solid rgba(16, 18, 24, 0.55);
+    --text-primary: rgba(0, 0, 0, 1);
+    --text-secondary: rgba(0, 0, 0, 0.8);
+    --text-tertiary: rgba(0, 0, 0, 0.62);
+    --divider: rgba(16, 18, 24, 0.3);
+  }
+}
+/* 125% / 150% 缩放下 1 CSS px 落不到整数物理像素上，发丝线会"发虚"。
+   修法不是加粗（会变塑料），而是**把 alpha 提上去**补对比度 ——
+   对比度的损失比粗细的损失显眼得多。 */
+@media (min-resolution: 1.25dppx) {
+  :root[data-surface='glass'] {
+    --surface-edge: 1px solid rgba(255, 255, 255, 0.84);
+    --surface-inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.36), inset 0 -1px 2px 0 rgba(10, 14, 22, 0.1);
+  }
+}
+
+/* 动效降级：前庭功能敏感的用户必须能关掉 */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

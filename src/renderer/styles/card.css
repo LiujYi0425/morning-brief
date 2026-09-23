@@ -1,0 +1,594 @@
+/* =====================================================================
+   card.css —— 组件样式（**全文件零硬编码形态值**）
+   ---------------------------------------------------------------------
+   本文件里不允许出现：backdrop-filter、半透明 rgba 底色、硬编码 box-shadow。
+   一律通过 var(--令牌) 表达 —— 这样"玻璃 / 不透明"切换不用改这里一行。
+   （颜色令牌如 --text-primary 是"语义值"，不随形态变，用它是合规的。）
+   ===================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  /* 无边框透明窗口：body 不能有底色，否则圆角外会露出直角 */
+  overflow: hidden;
+}
+
+/* ---------------- 布局：整张卡片是一列 ----------------
+ *
+ * ★★ 第三轮返工：**收起 / 展开不再决定"哪些控件存在"**（只决定列表有多高）。
+ *
+ *   上一版的做法是"收起态把筛选条 display:none"，理由是窗口只有 208px、
+ *   装不下。那个理由本身没错，但**修法错了**：用户要的恰恰是"在收起态也能
+ *   换类型"，而且筛选条一消失，"筛选功能缺失"的观感就回来了 ——
+ *   真机反馈原话就是"展开后执行收起时，用于选择不同类型资讯条的分类选项会消失"。
+ *
+ *   正确的修法有两步：
+ *     ① 窗口**该有多大就多大** —— 收起态从 208px 提到 320px（见 window.js），
+ *        装得下 bar + 总览句 + chips + 滑动条 + 底栏 + 3 条列表；
+ *     ② 收起态只**压缩**这些控件的垂直间距，不删除任何一个。
+ *
+ *   ⚠️ 于是有了这条硬规则（离线考裁判会断言）：
+ *      **card.css 里不许出现以 data-state 为条件把 .filters / .catbar /
+ *      .foot 设成 display:none 的规则。**
+ *      形态可以变、间距可以变，**存在性不许变**。
+ *
+ * ★★ 第四轮返工：「立体感」这条需求被透明窗口裁掉了
+ * ---------------------------------------------------------------------
+ *   症状（离线算术可证）：表面上看卡片有 `--surface-shadow` 的三层投影，
+ *   但 `.card` 就是**整个视口**（`width:100vw; height:100vh`），而窗口
+ *   （见 window.js 的 CARD_SIZE）与视口一样大 —— 外投影的唯一可见区域
+ *   = border box **之外**，而那片区域在视口之外。web contents 只能画在自己的
+ *   视口里，于是三层投影**一个像素都到不了屏幕**（唯一例外是四个圆角缺口，
+ *   且因 offset y 为正只有下面两个角吃到）。
+ *   ⇒ 用户看到的深度线索只剩卡内那几件（顶部亮线 / inset rim / 左上 sheen /
+ *     上亮下暗渐变 / 1px 白描边）。浅色壁纸下描边与卡面都是白 ⇒
+ *     卡片的物理边界等于不存在。
+ *
+ *   修法：**给投影留出画布**。窗口比卡片大 2×--win-pad（window.js 里同步），
+ *   卡片用 `position:absolute; inset:var(--win-pad)` 定位在中间：
+ *     · 卡片内容尺寸逐字不变（400×340 / 400×700）⇒ 列表高度、条数都不变
+ *     · 四周多出 20px 供投影铺开 ⇒ 三层投影全部落在视口内
+ *   ⚠️ 同时删掉底下的 `width:100vw; height:100vh`（它就是"卡片=视口"的写法，
+ *     还会盖掉 surface.css 的 100%）。绝对定位 + inset 之后 width/height 必须
+ *     留空，否则会与 inset 互相打架。
+ */
+.card {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  inset: var(--win-pad);
+}
+
+/* ---------------- 顶栏（拖动把手 + 标题 + 统计） ---------------- */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  /* 收起态要把 bar + 总览句 + chips + 滑动条 + 底栏 全塞进 340px（内容尺寸），
+     所以每一处固定高度都要抠。这里从 10/6 收到 8/4、min-height 44 → 40。 */
+  padding: 8px var(--gap-3) 4px;
+  flex: 0 0 auto;
+  min-height: 40px;
+}
+/* 顶栏是 Disclosure 按钮（可聚焦）—— 焦点必须看得见。
+   用负 offset 的内描边：顶栏贴着卡片上沿，正 offset 的外描边会被 .card 的
+   overflow:hidden 裁掉一半。 */
+.bar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ★ 拖动把手：独立的 14px 热区。
+   为什么不做"整条 bar 都能拖"：那样 handle 会吃掉区域内全部鼠标事件
+   （含 click），"点一下展开"就没了。M0 真机踩过两次。 */
+.grip {
+  flex: 0 0 14px;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  border-radius: 4px;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.grip:hover {
+  background: var(--hover-bg);
+}
+:root[data-dragging='on'] .grip {
+  cursor: grabbing;
+}
+/* 把手图形：2×3 点阵（用渐变画，不为装饰加 DOM） */
+.grip::before {
+  content: '';
+  width: 6px;
+  height: 10px;
+  background-image: radial-gradient(circle, var(--text-tertiary) 1px, transparent 1.4px);
+  background-size: 3px 3px;
+  opacity: 0.9;
+}
+
+.bar__title {
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  flex: 0 0 auto;
+}
+
+.bar__date {
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
+}
+
+.bar__spacer {
+  flex: 1 1 auto;
+  min-width: var(--gap-2);
+}
+
+/* 源健康度小圆点 + 条数：一眼看出"今天有没有出问题" */
+.health {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-1);
+  font-size: var(--fs-meta);
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+.health__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--state-ok);
+}
+.health[data-level='warn'] .health__dot {
+  background: var(--state-warn);
+}
+.health[data-level='bad'] .health__dot {
+  background: var(--state-bad);
+}
+
+/* ---------------- 总览句 ----------------
+ * ⚠️ 收起态只给**一行**：它是"抬眼扫一眼"的形态，两行总览会把列表挤没。
+ *    用 -webkit-line-clamp 截断而不是 overflow:hidden —— 后者会切掉半行字。 */
+.headline {
+  margin: 0 var(--gap-3) 6px;
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  color: var(--text-primary);
+  flex: 0 0 auto;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+:root[data-state='expanded'] .headline {
+  -webkit-line-clamp: 3;
+}
+/* 没有总览句时给一句诚实的占位（不是假数据） */
+.headline[data-empty='on'] {
+  color: var(--text-tertiary);
+}
+
+/* ---------------- 类型导轨（需求 2 上半） ----------------
+ * ★ **两种窗口状态下都在**（见文件上方那段硬规则）。
+ *   收起态只把下间距从 8px 压到 6px，`display` 一个字都不改。
+ *
+ * ★ 横向拖动：桌面没有触摸屏，所以导轨的"滑动"由 card.js 的 pointer 拖动实现。
+ *   这里只负责：不许换行、不许把 chip 压扁、把滚动条藏掉（有滑动条了，
+ *   再挂一个横向滚动条会让这一行显得脏）。 */
+.filters {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--gap-1);
+  padding: 0 var(--gap-3) 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  cursor: grab;
+  /* 拖动导轨时不许选中文字（否则拖完选中一片 chip 文字） */
+  user-select: none;
+  touch-action: pan-x;
+}
+.filters[data-dragging='on'] {
+  cursor: grabbing;
+}
+.filters::-webkit-scrollbar {
+  display: none;
+}
+.chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  /* ★ 4px 纵向内边距不是随手写的：WCAG 2.2 SC 2.5.8（AA）要求指针目标
+     至少 24×24 CSS 像素。11px 字号 ≈ 15px 行高 + 4+4 padding + 1+1 边框
+     = 25px ⇒ 刚好达标。旧版的 3px 内边距只有 23px，是**不合规**的。
+     （间距例外也能救，但把目标本身做大更实在。）
+     ⚠️ 边框宽度左右不等（选中态 2px 左描边）会让文字**横向位移 1px**，
+        看起来像"点一下就抖"。修法是把左边框**始终**留 2px（未选中透明），
+        选中只是把它上色 —— 结构而不是尺寸承担"选中"。 */
+  padding: 4px 10px;
+  /* ★ 显式 min-height，不靠字体度量碰巧凑出来。
+     WCAG 2.2 SC 2.5.8(AA) 要求指针目标 ≥ 24×24 CSS px。
+     上面那句"11px 字号 ≈ 15px 行高 + 8 + 2 = 25px"是**算出来的巧合**：
+     实测 chip 高 24.63px，余量来自拉丁字体 strut 1.3301 ——
+     一旦字体回退到度量更紧的中文字体（1.27），它会掉到 24px 以下，
+     于是"是否合规"就变成了"字体装没装"的问题。写成 min-height 才是确定的。 */
+  min-height: 24px;
+  border-radius: var(--radius-chip);
+  border: 1px solid transparent;
+  border-left-width: 2px;
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+  font-size: var(--fs-meta);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.chip:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+/* ★★ 选中态（第四轮返工）：**别再让 accent 去承担对比度**。
+   旧写法是 accent 文字压在 --chip-bg-on 上，实测（离线按 WCAG 相对亮度公式算，
+   见 tokens.css 的算式）全壁纸区间只有 3.2–3.9:1 —— 低于项目硬规则 R-C02 的 4.5:1，
+   而"当前选中的那一个"恰恰是最需要被看清的。
+   ⇒ 选中由**结构**表达：左侧 2px accent 竖条 + --text-primary 文字。
+     文字与底色差 15:1 上下（全壁纸区间），与 accent 的具体深浅彻底解耦，
+     换任何壁纸、任何 accent 都不会再退化。 */
+.chip[data-on='on'] {
+  background: var(--chip-bg-on);
+  border-left-color: var(--accent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 「＋」新增类型：与普通 chip 区分，但同属一条视觉语言。
+   ⚠️ 它现在就住在 .catbar 这一行里（不在导轨里，理由见 card.html 的注释），
+      所以要按这一行的行高对齐，不能沿用导轨里那份 25px 的高度。 */
+.chip--add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.chip--add:hover {
+  background: var(--chip-bg-on);
+}
+
+/* ---------------- 类型滑动条（用户新增要求） ----------------
+ * 「新增一个类型滑动条，方便在这些不同类型之间切换浏览」。
+ * 两个 ‹ › 步进按钮 + 一条 range + 当前类型名：
+ *   · range 给"连续扫一遍所有类型"的手感（按住拖到底就看完一圈）
+ *   · 步进按钮给"精确挪一格"，也是键盘/无鼠标场景的兜底
+ *   · 右侧文字是**当前值文本** —— range 自己不带值提示，缺了它用户不知道
+ *     拖到哪一类了（这是 range 当选择器用时最常见的失败模式） */
+.catbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--gap-1);
+  padding: 0 var(--gap-3) 6px;
+  min-height: 24px;
+}
+/* ★ 24×24 —— WCAG 2.2 SC 2.5.8(AA) 的最小指针目标（步进按钮也是一类目标） */
+.catbar__step {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  line-height: 1;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.catbar__step:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+.catbar__step:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.catbar__now {
+  flex: 0 0 auto;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-meta);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* range 本体：Electron 走 WebKit 伪元素。做成"一根细轨 + 一个小圆点"，
+   刻意不做 iOS 那种大滑块 —— 这是常驻桌面小组件，控件要克制。 */
+.catslider {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.catslider:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.catslider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--divider);
+}
+.catslider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  /* 小圆点自己也要有"厚度"：一圈亮边 + 一点投影（与整卡同一套光影语言） */
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 2px rgba(12, 14, 20, 0.25);
+}
+.catslider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-pill);
+}
+
+/* 新增类型：就地展开的输入行（替代 Electron 里不存在的 window.prompt） */
+.catadd {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.catadd__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-chip);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--fs-meta);
+  outline: none;
+}
+.catadd__input::placeholder {
+  color: var(--text-tertiary);
+}
+
+/* ---------------- 列表 ----------------
+ * `min-height: 0` 是 flex 布局的经典陷阱：不给它，子项会被内容撑大而不滚动。
+ *
+ * ★ 用户要求（问题 3）：「收起的时候也增加一个可以用鼠标滑动的页面显示条」
+ *   ⇒ 收起态**也允许滚动，并且让滚动条可见**。
+ *   之前的写法是收起态 `overflow-y: hidden`（想着"只露一两行"），
+ *   但那样用户就滑不动了 —— 收起态也想翻看是完全合理的需求。
+ *   ⚠️ 滚动条要**始终占位**（scrollbar-gutter: stable），否则出现/消失时
+ *      内容会横跳一下，看起来像"闪"。 */
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 0 var(--gap-2) var(--gap-2);
+  /* Firefox */
+  scrollbar-width: thin;
+  scrollbar-color: var(--divider) transparent;
+}
+/* WebKit（Electron 走这条）：给一个**看得见**的滑块，且不需要悬停才出现 */
+.list::-webkit-scrollbar {
+  width: 8px;
+}
+.list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.list::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  opacity: 0.5;
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+  background-clip: content-box;
+}
+
+/* ★ 正在换类型/换口径时，列表里还是**上一份**数据。
+   与其清空（会闪）或者假装它是对的（会误导），不如如实标成"陈旧"：
+   降透明度 + 不吃点击。数据一到就恢复。这是"诚实优先于好看"的具体做法。 */
+.list[data-stale='on'] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  color: inherit;
+  /* 7px 而不是 9px：收起态一行之差就是"看得见 2 条"和"看得见 3 条"的区别 */
+  padding: 7px var(--gap-2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.item:hover {
+  background: var(--hover-bg);
+}
+.item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* 已读：降一点对比度，但仍然 ≥ 4.5:1（不许为了"看起来读过"把可读性做没） */
+.item[data-read='opened'] .item__title {
+  color: var(--text-secondary);
+}
+
+.item__title {
+  font-size: var(--fs-body);
+  line-height: 1.4;
+  font-weight: 500;
+  display: -webkit-box;
+  /* ★ 收起态**只给一行**：这是"抬眼扫一眼"的形态，一行标题 + 一行来源
+     已经足够判断要不要点开。两行标题会让同样高度少显示一半条目 ——
+     而"每天的热点能被完整覆盖"正是用户提的原始需求之一。
+     展开态给两行，因为那时有空间。 */
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+:root[data-state='expanded'] .item__title {
+  -webkit-line-clamp: 2;
+}
+.item__meta {
+  margin-top: 3px;
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+  display: flex;
+  gap: var(--gap-2);
+  align-items: center;
+}
+.item__source::before {
+  content: '·';
+  margin-right: var(--gap-2);
+  color: var(--text-tertiary);
+}
+.item__source:first-child::before {
+  content: none;
+}
+
+/* ---------------- 底栏 ----------------
+ * ★ 三条硬约束（真机踩过：按钮被裁）：
+ *   ① `flex: 0 0 auto` + `min-height` —— 底栏**任何情况下不许被压缩**
+ *   ② `flex-wrap: nowrap`（显式写出）—— 不许换行，否则第二行会被裁掉
+ *   ③ 按钮 `flex: 0 0 auto` + `white-space: nowrap` —— 按钮**不许被压扁**
+ *      （默认 flex 子项可收缩，四个按钮挤在 400px 里会被压到只剩几个字） */
+.foot {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--gap-2);
+  padding: 8px var(--gap-3) 10px;
+  min-height: 48px;
+  border-top: 1px solid var(--divider);
+  box-sizing: border-box;
+}
+.foot__spacer {
+  flex: 1 1 auto;
+  min-width: var(--gap-1);
+}
+.btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--fs-meta);
+  padding: 5px 12px;
+  border-radius: var(--radius-chip);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+.btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+/* ⚠️ 与 .chip[data-on] 同病同治：这里原来也是 accent 压在 --chip-bg-on 上
+   （实测 3.2–3.9:1）。改成 --text-primary + 加粗 + accent 描边下沿，
+   "这是主按钮"由结构与字重表达，不再靠颜色对比。 */
+.btn[data-primary='on'] {
+  background: var(--chip-bg-on);
+  border-color: var(--accent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* ---------------- 空态 / 加载态 / 错误态（R-C06 要求完整状态） ---------------- */
+.state {
+  padding: 22px var(--gap-3);
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+.state__hint {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+}
+
+/* 骨架屏：加载时**保留布局结构**（结构稳定优先于好看） */
+.skeleton {
+  padding: 10px var(--gap-2);
+}
+.skeleton__line {
+  height: 11px;
+  border-radius: 5px;
+  background: var(--divider);
+  margin-bottom: 7px;
+}
+.skeleton__line--short {
+  width: 46%;
+}
+
+/* ---------------- 轻提示 ---------------- */
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 52px;
+  transform: translate(-50%, 8px);
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-bg);
+  border: var(--surface-edge);
+  color: var(--text-primary);
+  font-size: var(--fs-meta);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+.toast[data-on='on'] {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}

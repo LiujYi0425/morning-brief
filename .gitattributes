@@ -1,0 +1,25 @@
+# 统一换行符为 LF —— 仓库内与工作区都是 LF。
+# 这与父仓库（D:\work Buddy\2026-09-18-18-30-52）的口径一致，
+# 目的是避免 Windows 上反复出现 "LF will be replaced by CRLF" 的噪音，
+# 也避免协作方之间产生整文件级的假 diff。
+#
+# ⚠️ 本项目的离线考裁判里有一条断言会**逐个字节**检查源文件是 LF，
+#    所以这条不是风格偏好，是会被机器拦下来的约定。
+* text=auto eol=lf
+
+# 二进制文件不做换行符转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.db binary
+
+# ⚠️ .vbs 必须保持纯 ASCII（WSH 按系统 ANSI 代码页读它，中文会乱码），
+#    这一点由 tools/test-all.mjs 里的断言守着，不靠自觉。
+*.vbs text eol=lf
+
+# ⚠️ .ps1 带 UTF-8 BOM（PowerShell 5.1 没 BOM 会按 ANSI 读，中文注释变乱码）。
+#    加 BOM 会让 git 认为它是"有 BOM 的文本"，这里不声明 text，
+#    避免 git 自作主张去掉 BOM —— 那会让置底脚本直接语法报错。
+*.ps1 -text

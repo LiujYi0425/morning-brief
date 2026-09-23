@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-surface="glass" data-state="collapsed" data-dragging="off">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      CSP 与 M0 探针同一口径：`default-src 'none'` + 显式 `file:`。
+      为什么显式写 file:：B9 记录过 —— `file://` 下 `'self'` 的匹配不可靠，
+      只写 `'self'` 会出现"页面能开但样式/脚本不执行"。
+      卡片里**没有任何外联能力**（不能发请求、不能加载远程资源），
+      这是刻意的：跳转由主进程做协议白名单校验后交给系统浏览器。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; font-src 'self' file:;"
+    />
+    <title>晨报</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/surface.css" />
+    <link rel="stylesheet" href="styles/card.css" />
+  </head>
+  <body>
+    <div class="card">
+      <!-- ============ 顶栏 ============ -->
+      <!--
+        ★ 顶栏本身是「展开 / 收起」的**按钮**（Disclosure 模式）：可聚焦 + role=button +
+          aria-expanded 由 card.js 随状态同步。少了 tabindex 的后果不是"少个快捷键" ——
+          不用鼠标的人收起之后**再没有任何办法展开**（Tab 能进 chips，但进不了这里）。
+      -->
+      <div class="bar" id="bar" role="button" tabindex="0" aria-expanded="false" aria-label="展开或收起晨报">
+        <!--
+          拖动把手：**只占 14px**，其余区域保持可点。
+          ⚠️ 不用 `-webkit-app-region: drag` —— 那个属性会吞掉区域内全部鼠标事件
+             （包括 click），而"点击顶栏 = 展开/收起"正是我们要的。
+             M0 真机踩过两次：一次补了 CSS 却拖不动，一次拖动被当成"点击展开"。
+             现方案：pointerdown → IPC → 主进程 setBounds（见 card.js）。
+        -->
+        <span class="grip" id="grip" role="button" aria-label="拖动卡片" tabindex="0"></span>
+        <span class="bar__title">晨报</span>
+        <span class="bar__date" id="date"></span>
+        <span class="bar__spacer"></span>
+        <span class="health" id="health" data-level="ok" title="信息源健康度">
+          <span class="health__dot"></span>
+          <span id="healthText">—</span>
+        </span>
+      </div>
+
+      <!-- ============ 总览句 ============ -->
+      <p class="headline" id="headline" data-empty="on">还没有抓取过。点右下「刷新」拉一次。</p>
+
+      <!-- ================================================================
+           筛选区（需求 2 上半）
+           ★ 结构性约定（真机第三轮返工的修法）：**收起态也必须看得见**。
+             旧版把 `.filters` 在收起态设成 display:none，用户看到的就是
+             "一收起，类型选项就没了"。现在这两行在两种状态下都在，
+             收起态只是把它们的高度压紧一点。
+           ================================================================ -->
+      <!--
+        ★ 角色选择：`radiogroup` / `radio` 而不是 `tablist` / `tab`。
+          依据（R4 无障碍调研）：chips 是**单选过滤器**，不是"切换内容面板"。
+          用 tab 角色会带来两个说不通的地方 ——
+            ① 每个 tab 必须 `aria-controls` 指向一个 tabpanel，
+               而这里所有 chip 指向的是同一个列表，语义别扭；
+            ② tab 的"再点一次取消选择"没有对应语义。
+          radiogroup 则天然就是"从 N 个里选一个"，且「全部」本身就是
+          这个组里的一员（表示不加过滤）—— 语义严丝合缝。
+          键盘契约也随之一致：方向键移动**并**选中（APG Radio Group），
+          整组在 Tab 序列里只占一格（roving tabindex）。
+      -->
+      <div class="filters" id="filters" role="radiogroup" aria-label="按类型筛选"></div>
+
+      <!-- 类型滑动条：在不同的资讯类型之间连续切换 -->
+      <div class="catbar" id="catbar">
+        <button class="catbar__step" id="catPrev" type="button" aria-label="上一个类型">‹</button>
+        <input
+          class="catslider"
+          id="catSlider"
+          type="range"
+          min="0"
+          max="0"
+          step="1"
+          value="0"
+          aria-label="资讯类型滑动条"
+          aria-valuetext="全部"
+        />
+        <button class="catbar__step" id="catNext" type="button" aria-label="下一个类型">›</button>
+        <span class="catbar__now" id="catLabel" aria-live="polite">全部</span>
+        <!--
+          「＋新增类型」放在这里而**不是**放进上面那条 tablist。
+          ⚠️ 这是无障碍上的硬约束，不是审美：`role="tablist"` 里只允许放
+             `role="tab"`，而"新增"是一个命令按钮（没有对应的 tabpanel，
+             aria-controls 无处可指）。放进去会让读屏把它播报成"选项卡"，
+             语义是错的。⇒ 命令按钮与选择控件分开两条视觉语言。
+        -->
+        <button class="chip chip--add" id="btnAddCat" type="button" title="新增一个自定义类型">＋</button>
+      </div>
+
+      <!-- ============ 列表 ============ -->
+      <div class="list" id="list" role="list"></div>
+
+      <!-- ============ 底栏 ============ -->
+      <div class="foot" id="foot">
+        <button class="btn" id="btnMore" type="button">展开更多</button>
+        <button class="btn" id="btnAll" type="button">看今天全部</button>
+        <span class="foot__spacer"></span>
+        <button class="btn" id="btnRefresh" type="button">刷新</button>
+        <button class="btn" id="btnCollapse" type="button">收起</button>
+      </div>
+
+      <!-- ============ 轻提示 ============ -->
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+
+    <!--
+      ⚠️ 四个都是**经典 script 标签**（不用 type="module"），顺序不能换：
+        ① diagnostics.js —— 必须第一个（否则 card.js 一抛错，捕获器还没装上）
+        ② interaction.js —— 拖动/点击的手势判定，挂在 globalThis.MB_INTERACTION
+        ③ view-model.js  —— 状态与派生，挂在 globalThis.MB_VIEW（纯函数、无 DOM）
+        ④ card.js        —— 读 ①②③，是唯一碰 DOM 的文件
+      ⚠️ 为什么不用 type="module"：本工程的 CSP 是 `default-src 'none'`，
+         模块脚本的获取走 `connect-src`，而它没在 CSP 里列出 ⇒ 极可能被拦。
+         这个坑在 m0-probe 上踩过：同一次改动里 interaction.js 用了 `export`
+         却被经典 <script> 加载，浏览器抛 SyntaxError、**整个文件不执行**，
+         而离线测试（用 import 加载）全绿 —— "离线绿、真机废"。
+      ⚠️ interaction.js / view-model.js 里**不许出现 import/export**，由离线考裁判断言。
+    -->
+    <script src="diagnostics.js"></script>
+    <script src="interaction.js"></script>
+    <script src="view-model.js"></script>
+    <script src="card.js"></script>
+  </body>
+</html>

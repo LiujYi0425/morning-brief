@@ -1,0 +1,36 @@
+{
+  "name": "morning-brief",
+  "version": "0.1.0",
+  "private": true,
+  "description": "晨报机 · 产品工程（M1）。常驻桌面情报板：定时抓取 → 归一化去重 → AI 筛选与摘要 → 置底玻璃卡片。",
+  "type": "module",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "node tools/launch.mjs",
+    "start:bg": "node tools/service.mjs start",
+    "stop": "node tools/service.mjs stop",
+    "restart": "node tools/service.mjs restart",
+    "status": "node tools/service.mjs status",
+    "logs": "node tools/service.mjs logs",
+    "ingest": "node tools/run-ingest.mjs",
+    "test": "node tools/test-all.mjs && node tools/test-interaction.mjs",
+    "test:data": "node tools/test-all.mjs",
+    "test:ui": "node tools/test-interaction.mjs"
+  },
+  "comment:依赖": "⚠️ 本工程**零运行时依赖**，这是刻意的：① 数据库用 Electron 内嵌 Node 自带的 `node:sqlite`（已实测可用：electron 44.4.2 + node 24.21.0，建表/插入/查询/分页/LIKE 全通）；② RSS/Atom 解析自己写（正则 + 实体解码），不引 xml2js —— 理由是**装包在无网环境下会失败**，而抓取层恰恰是最需要能离线跑测试的部分。",
+  "comment:scripts": {
+    "start": "前台启动（占着一个终端；调试时用这个，日志直接打在屏幕上）",
+    "start:bg": "后台启动（脱离终端，关掉终端也不退出）—— 等价于双击「启动晨报机.vbs」",
+    "stop": "停止后台实例（先请求优雅退出，超时才强制结束）",
+    "restart": "重启",
+    "status": "查询运行状态（进程是否活着、跑了多久、下次抓取、今日条数）",
+    "logs": "看后台运行日志的尾巴",
+    "ingest": "只跑抓取+入库（纯 Node，不需要 Electron）—— 这是抓取层能被离线验证的关键",
+    "test": "离线考裁判总入口（纯 Node）：抓取/数据层 + 交互一致性两层",
+    "test:data": "抓取、数据层与后台运行（实体解码/URL 归一/解析器/去重/游标分页/定时/状态判定）",
+    "test:ui": "交互一致性（四条不变量 + 顺序无关排列 + BFS 可达 + 变异测试）"
+  },
+  "devDependencies": {
+    "electron": "^44.4.2"
+  }
+}
