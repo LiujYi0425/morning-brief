@@ -673,6 +673,21 @@ async function bootstrap() {
   let updateReady = null;   // 已确认可用、等用户点第二次的清单
   let updateNote = '';      // 上一次检查的结论（显示在菜单里）
 
+  /* 外部触发：数据目录里放一个 `update-request` 文件，下次启动就真的去装。
+     与 `stop-request` 完全同一套做法 —— 命令行、脚本、运维都用得上。
+     它也让"演练一次真实升级"不必有人去点托盘的第二次点击。 */
+  const UPDATE_REQUEST = path.join(DATA_DIR, 'update-request');
+  const consumeUpdateRequest = () => {
+    try {
+      if (!fs.existsSync(UPDATE_REQUEST)) return false;
+      fs.rmSync(UPDATE_REQUEST, { force: true });
+      console.log('[update] 收到外部更新请求（数据目录里的 update-request 文件）');
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const updateMenuLabel = () => {
     if (updateBusy) return '正在处理更新…';
     if (updateReady) return `✅ 更新到 ${updateReady.version}（点击安装并重启）`;
@@ -892,8 +907,12 @@ async function bootstrap() {
           mark('update-healthy-FAILED', String(err && err.message));
         }
 
-        /* 启动后延迟查一次更新。失败只记日志，绝不打扰用户。 */
-        setTimeout(() => { void runUpdateCheck({ interactive: false }); }, 8000);
+        /* 启动后延迟查一次更新。
+            失败只记日志、绝不打扰用户；
+            但若数据目录里有 `update-request`，就当成"用户已经同意装"直接走完。 */
+        setTimeout(() => {
+          void runUpdateCheck({ interactive: consumeUpdateRequest() });
+        }, 8000);
       }
     }
   } catch (err) {
