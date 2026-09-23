@@ -95,6 +95,22 @@ import {
   probeWritable,
 } from '../src/shared/runtime-state.js';
 import { createBootMark, bootLogPath, teeConsole, createLogSink } from '../src/shared/run-log.js';
+import {
+  parseVersion,
+  compareVersions,
+  isNewer,
+  parseManifest,
+  decideUpdate,
+  createUpdateState,
+  normalizeState,
+  beginUpdate,
+  bumpAttempt,
+  settle,
+  judgeStartup,
+  finishRollback,
+  formatBytes,
+  DEFAULT_MAX_ATTEMPTS,
+} from '../src/shared/update.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
 
 const lines = [];
@@ -2177,8 +2193,7 @@ ok('★ 重试不许挤掉"明天 07:30"那一次（用户最在意的恰恰是�
   assert.equal(p2.at.getTime(), nextRunAt(early, 7, 30).getTime());
 });
 
-await aok('★★ 端到端：调度器在"全失败"之后排出的定时器必须短于 1 小时', async () => {
-  /* 这条是审查员点名的判据。它跑的是**真的调度器**，不是纯函数 ——
+await aok('★★ 端到端：调度器在"全失败"之后排出的定时器必须短于 1 小时', async () => {  /* 这条是审查员点名的判据。它跑的是**真的调度器**，不是纯函数 ——
      因为洞原来就在调度器的 `scheduleNext()` 里，纯函数测不到它。 */
   let t = new Date(2026, 8, 23, 7, 30, 30).getTime();
   const timers = [];
@@ -2260,10 +2275,195 @@ ok('★ 总览句必须如实说"今天还没抓到"（否则用户看到的是�
   assert.ok(!/今天还没抓到/.test(good), '今天抓到了却还在说没抓到：' + good);
 });
 
+/* ---------- 第十一层 · 更新与回退 ---------- */
+say();
+say('--- 第十一层 · 更新与回退（"装坏了要能退回去"）---');
+
+ok('★ 版本比较：解析不了必须返回 null，**不能**返回 0', () => {
+  assert.deepEqual(parseVersion('v1.2.3'), { major: 1, minor: 2, patch: 3, pre: '' });
+  assert.deepEqual(parseVersion('1.2.3-rc1').pre, 'rc1');
+  assert.equal(parseVersion('1.2'), null, '两位版本号不该被接受');
+  assert.equal(parseVersion('abc'), null);
+  assert.equal(parseVersion(''), null);
+  assert.equal(parseVersion(null), null);
+
+  assert.equal(compareVersions('1.2.3', '1.2.4'), -1);
+  assert.equal(compareVersions('1.10.0', '1.9.0'), 1, '按数字比而不是按字符串比');
+  assert.equal(compareVersions('1.0.0', '1.0.0'), 0);
+  /* ⚠️ 这条是关键：把"解析失败"当成 0（即"版本相同"）会让一份畸形清单
+     被静默当成"已经是最新"，用户永远收不到更新，而且没有任何报错。 */
+  assert.equal(compareVersions('abc', '1.0.0'), null, '解析失败被当成了"版本相同"');
+  assert.equal(compareVersions('1.0.0', 'abc'), null);
+  assert.equal(isNewer('abc', '1.0.0'), false, '解析不了还敢说"有新版"');
+  // 预发布低于同号正式版
+  assert.equal(compareVersions('1.0.0-rc1', '1.0.0'), -1);
+  assert.equal(isNewer('1.0.1', '1.0.0'), true);
+});
+
+ok('★★ 更新清单是不可信输入：缺 sha256 / 非 https / size 不对，必须整份拒绝', () => {
+  const good = {
+    version: '0.2.0',
+    url: 'https://example.com/MorningBrief%20Setup%200.2.0.exe',
+    sha256: 'a'.repeat(64),
+    size: 111449588,
+    notes: '修了几个 bug',
+  };
+  assert.equal(parseManifest(good).ok, true);
+  assert.equal(parseManifest(JSON.stringify(good)).ok, true, 'JSON 文本也要能收');
+
+  const reject = (patch, why) => {
+    const r = parseManifest({ ...good, ...patch });
+    assert.equal(r.ok, false, why + ' —— 竟然放过了');
+    assert.ok(typeof r.error === 'string' && r.error.length > 0, '拒绝了却没说为什么');
+  };
+  /* ⚠️ 最要紧的一条：**不能**"缺 sha256 就先跳过校验"。
+     那等于没有校验 —— 中间人只要把 sha256 字段删掉即可绕过整套机制。 */
+  reject({ sha256: undefined }, '缺 sha256');
+  reject({ sha256: 'abc' }, 'sha256 长度不对');
+  reject({ sha256: 'z'.repeat(64) }, 'sha256 不是十六进制');
+  reject({ url: 'http://example.com/x.exe' }, 'http 明文地址（会被中间人换包）');
+  reject({ url: 'ftp://example.com/x.exe' }, '非 http(s) 协议');
+  reject({ url: undefined }, '缺 url');
+  reject({ version: '1.2' }, '版本号不是 x.y.z');
+  reject({ size: 0 }, 'size 为 0');
+  reject({ size: -1 }, 'size 为负');
+  reject({ size: 'big' }, 'size 不是数字');
+  assert.equal(parseManifest('{ 不是 json').ok, false, '坏 JSON 竟然通过了');
+  assert.equal(parseManifest('[]').ok, false, '数组竟然通过了');
+  assert.equal(parseManifest(null).ok, false);
+});
+
+ok('★ 拿到清单之后的判决：更新 / 不动 / 拒绝，三条路都要走得对', () => {
+  const mf = (v, extra = {}) => ({ version: v, url: 'https://e.com/a.exe', sha256: 'a'.repeat(64), size: 10, ...extra });
+  assert.equal(decideUpdate({ manifest: null, currentVersion: '0.1.0' }).action, 'none');
+  assert.equal(decideUpdate({ manifest: mf('0.1.0'), currentVersion: '0.1.0' }).action, 'none', '同版本不该说"有更新"');
+  assert.equal(decideUpdate({ manifest: mf('0.0.9'), currentVersion: '0.1.0' }).action, 'none', '旧版本不该说"有更新"（降级陷阱）');
+  assert.equal(decideUpdate({ manifest: mf('0.2.0'), currentVersion: '0.1.0' }).action, 'available');
+  assert.equal(decideUpdate({ manifest: mf('0.2.0-rc1'), currentVersion: '0.1.0' }).action, 'refuse', '默认渠道不该接受预发布');
+  assert.equal(decideUpdate({ manifest: mf('0.2.0-rc1'), currentVersion: '0.1.0', allowPrerelease: true }).action, 'available');
+  assert.equal(decideUpdate({ manifest: mf('0.2.0', { minFrom: '0.1.5' }), currentVersion: '0.1.0' }).action, 'refuse',
+    '低于 minFrom 却放行 —— 会拿旧版直接升到改了数据结构的新版');
+  assert.equal(decideUpdate({ manifest: mf('0.2.0', { minFrom: '0.1.0' }), currentVersion: '0.1.0' }).action, 'available');
+  // 解析不了本地版本时必须拒绝，而不是默认放行
+  assert.equal(decideUpdate({ manifest: mf('0.2.0'), currentVersion: 'garbage' }).action, 'refuse');
+});
+
+ok('★★ 坏状态必须被规整，而不是让 undefined 一路漏进判决', () => {
+  const fresh = createUpdateState('0.1.0');
+  assert.equal(fresh.current, '0.1.0');
+  assert.equal(fresh.pending, null);
+  assert.equal(normalizeState(null, '0.1.0').current, '0.1.0');
+  assert.equal(normalizeState('不是对象', '0.1.0').pending, null);
+  assert.equal(normalizeState({ schema: 999 }, '0.1.0').pending, null, 'schema 不认识就该当全新的');
+  // pending 形状不对 ⇒ 丢掉，而不是带着半个 pending 继续跑
+  assert.equal(normalizeState({ schema: 1, pending: { to: '0.2.0' } }, '0.1.0').pending, null, 'pending 缺 from 竟然留下了');
+  assert.equal(normalizeState({ schema: 1, pending: { from: 'a' } }, '0.1.0').pending, null);
+  /* ⚠️ 最阴的一条：attempts 若是 NaN / 负数 / 小数，
+     `attempts >= max` 可能永远为 false ⇒ **坏更新永远不会被回退**。
+     一个静默失效的安全网比没有安全网更糟（因为它给人一种被保护着的错觉）。 */
+  for (const bad of [NaN, -1, 1.5, '3', null, undefined]) {
+    const s = normalizeState({ schema: 1, pending: { from: '0.1.0', to: '0.2.0', attempts: bad } }, '0.1.0');
+    assert.equal(s.pending.attempts, 0, `attempts=${String(bad)} 没有被规整成 0`);
+    assert.equal(judgeStartup(s).action, 'none', `attempts=${String(bad)} 直接触发了回退`);
+  }
+  assert.equal(normalizeState({ schema: 1, pending: { from: '0.1.0', to: '0.2.0', attempts: 5 } }, '0.1.0').pending.attempts, 5,
+    '合法的 attempts 不该被抹掉');
+});
+
+ok('★★ 回退状态机走一遍：装 → 启动计数 → 健康认可 / 判定回退', () => {
+  let s = createUpdateState('0.1.0');
+  assert.equal(judgeStartup(s).action, 'none', '什么都没装就说要回退');
+
+  // ① 没有 pending 时 bumpAttempt **不许**动状态（否则正常版本会攒出一个假计数，
+  //    等哪天真装了更新，第一次启动就被误判成"已经失败过 N 次"）。
+  /* ⚠️ 这里断言的是**同一个对象引用**，不是 deepEqual。
+     deepEqual 会被"两次调用落在同一毫秒 ⇒ updatedAt 字符串恰好相同"骗过去 ——
+     一个返回新对象的变异体因此漏网过（变异测试抓出来的）。
+     "原样返回"本来就是这条的契约，引用相等是确定性的判据。 */
+  const bumped0 = bumpAttempt(s);
+  assert.equal(bumped0, s, '没有 pending 却返回了新对象 —— 状态被改动了');
+  assert.equal(bumped0.pending, null);
+
+  // ② 决定装 0.2.0
+  s = beginUpdate(s, { toVersion: '0.2.0', snapshotDir: 'D:\\snap\\0.1.0' });
+  assert.equal(s.pending.from, '0.1.0');
+  assert.equal(s.pending.to, '0.2.0');
+  assert.equal(s.pending.attempts, 0);
+  assert.equal(s.current, '0.1.0', '还没验证成功就把 current 推走了');
+
+  // ③ 第一次启动：还没到上限，继续观察
+  s = bumpAttempt(s);
+  assert.equal(s.pending.attempts, 1);
+  assert.equal(judgeStartup(s).action, 'none', `第 1 次就判回退（上限是 ${DEFAULT_MAX_ATTEMPTS}）`);
+
+  // ④ 第二次启动：到上限 ⇒ 判定这次更新是坏的
+  s = bumpAttempt(s);
+  assert.equal(s.pending.attempts, 2);
+  const v = judgeStartup(s);
+  assert.equal(v.action, 'rollback', '连续两次没走到健康却不回退');
+  assert.equal(v.target, '0.1.0', '回退目标不是升级前的版本');
+  assert.equal(v.snapshotDir, 'D:\\snap\\0.1.0');
+  assert.ok(/0\.2\.0/.test(v.why) && /0\.1\.0/.test(v.why), '理由里要能看出从哪退到哪：' + v.why);
+
+  // ⑤ 回退之后：pending 清掉、current 退回去、并且**留下记录**
+  const done = finishRollback(s, { why: v.why });
+  assert.equal(done.pending, null);
+  assert.equal(done.current, '0.1.0');
+  assert.ok(done.lastRollback && /0\.1\.0/.test(done.lastRollback.to), '没留下回退记录 —— 用户永远不知道发生过回退');
+  assert.equal(judgeStartup(done).action, 'none', '回退完还在判回退 —— 会无限循环');
+});
+
+ok('★★ 健康认可：settle 之后 current 前进，且不再有任何回退风险', () => {
+  let s = createUpdateState('0.1.0');
+  s = beginUpdate(s, { toVersion: '0.2.0', snapshotDir: 'D:\\snap' });
+  s = bumpAttempt(s);
+  assert.equal(judgeStartup(s).action, 'none');
+  s = settle(s);
+  assert.equal(s.current, '0.2.0', '健康了却没把 current 推到新版本');
+  assert.equal(s.pending, null);
+  assert.equal(judgeStartup(s).action, 'none');
+  /* 同样用**引用相等**而不是 deepEqual —— 理由同上（毫秒级时间戳会让 deepEqual 失真） */
+  assert.equal(settle(s), s, 'settle 幂等性：没有 pending 时应当原样返回同一个对象');
+});
+
+ok('★★★ 没有退路快照时**绝不许**回退 —— 假装回退了比不回退更糟', () => {
+  /* 这条是整套机制里最容易被写成"看着对、其实是坑"的地方：
+     判定说"该回退"，可 snapshotDir 是空的。
+     如果这时仍然返回 rollback，上层会去"恢复"，而实际上无处可恢复 ——
+     用户会以为已经退回旧版本了，其实什么都没有变。
+     ⇒ 必须如实返回 none + 一句"退不回去"。 */
+  let s = createUpdateState('0.1.0');
+  s = beginUpdate(s, { toVersion: '0.2.0', snapshotDir: '' });
+  s = bumpAttempt(s);
+  s = bumpAttempt(s);
+  const v = judgeStartup(s);
+  assert.equal(v.action, 'none', '没有退路却说要回退 —— 上层会去"恢复"一个不存在的东西');
+  assert.ok(/没有退路|退不回去/.test(v.why), '要说清楚为什么退不回去：' + v.why);
+
+  // 上限可调（服务端要求"这次必须启动成功"时用 1）
+  let t = beginUpdate(createUpdateState('0.1.0'), { toVersion: '0.2.0', snapshotDir: 'D:\\snap' });
+  t = bumpAttempt(t);
+  assert.equal(judgeStartup(t, { maxAttempts: 1 }).action, 'rollback', 'maxAttempts=1 时第一次就该判');
+});
+
+ok('★ 杂项：字节格式化与状态可序列化（要落盘，不能带函数/undefined）', () => {
+  assert.equal(formatBytes(0), '0 B');
+  assert.equal(formatBytes(1536), '1.5 KB');
+  assert.equal(formatBytes(111449588), '106.3 MB');
+  assert.equal(formatBytes(-1), '未知');
+  assert.equal(formatBytes('x'), '未知');
+
+  let s = createUpdateState('0.1.0');
+  s = beginUpdate(s, { toVersion: '0.2.0', snapshotDir: 'D:\\snap' });
+  s = bumpAttempt(s);
+  const round = JSON.parse(JSON.stringify(s));
+  assert.deepEqual(round, s, '状态过一遍 JSON 就变了 —— 落盘再读回来会不一致');
+  assert.deepEqual(normalizeState(round, '0.1.0'), round, '落盘再读回来被判成脏数据');
+});
+
 /* ---------- 变异测试 ---------- */
 say();
 say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
-
 /** 每个变异体：改坏一处，期望"至少有一条断言失败" */
 const MUTANTS = [
   {
