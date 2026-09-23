@@ -1,0 +1,31 @@
+{
+  "name": "morning-brief-m0-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "M0 地基验证工程 —— 只回答一个问题：Electron 透明置顶窗口 + backdrop-filter 在 Windows 上到底行不行",
+  "type": "module",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "node tools/launch-electron.mjs .",
+    "selftest": "node tools/launch-electron.mjs . --selftest",
+    "start:debug": "node tools/launch-electron.mjs . --enable-logging",
+    "probe:raw": "electron .",
+    "calibrate": "node tools/calibrate-focus-referee.mjs",
+    "test:names": "node tools/test-artifact-names.mjs",
+    "test:verdict": "node tools/test-focus-verdict.mjs",
+    "test:crash": "node tools/test-crash-policy.mjs",
+    "test:flags": "node tools/test-diag-flags.mjs",
+    "test": "node tools/test-artifact-names.mjs && node tools/test-focus-verdict.mjs && node tools/test-crash-policy.mjs && node tools/test-diag-flags.mjs",
+    "check": "node ../tools/sync-check.mjs"
+  },
+  "comment:test": "四个离线考裁判（纯 Node，不需要 Electron）：产物命名契约 + 焦点判定逻辑 + 主进程失败语义 + 诊断开关解析。真跑 Electron 的那两项是 calibrate / selftest。",
+  "comment:test:flags": "离线考裁判：诊断开关 M0_DIAG_RESIZABLE 的解析口径。它防的是**假阴性** —— 开关设了却解析成 false，诊断就会跑成默认态，然后被误读成「resizable 与拖动无关」，最后把这个错误结论写进留痕。含变异测试与源码接线检查。",
+  "comment:test:names": "离线考裁判：产物命名契约（隔离后缀的合法性与路径逃逸）。它管的是 2026-09-19 那次事故——校准器内部的自检把 report/_selftest-report.md（M0 验收记录本体）覆盖成了「未通过」的假记录。含变异测试。",
+  "comment:test:verdict": "离线考裁判：只考验收 3 的【判定逻辑】是否正确（纯 Node，不需要 Electron，秒级）。采集部分（真实 focus 事件）仍需 npm run calibrate，两者不可互相冒充。",
+  "comment:calibrate": "考裁判：故意把 window.js 的 showInactive() 改成 show()，跑一次自检，确认验收 3 会报 fail，然后自动还原。见 docs/05 §6.4 第 4 条。退出码 0=裁判有效 / 1=裁判是假的 / 2=没测到。",
+  "comment": "本工程是探针，不是产品。它不进安装包、不接真实信息源。M0 结束后，只有 window.js 的结论会继承给产品代码。",
+  "comment:launch": "⚠️ 不要直接用 `electron .`（probe:raw 仅供对照），本机环境的 ELECTRON_RUN_AS_NODE=1 会让 Electron 静默退化成 Node，见 docs/04-项目审查报告.md B11。",
+  "devDependencies": {
+    "electron": "^44.4.2"
+  }
+}

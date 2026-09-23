@@ -1,0 +1,119 @@
+{
+    "ok":  true,
+    "script":  "attach-to-desktop-layer.ps1",
+    "revision":  1,
+    "mode":  "probe",
+    "hostPolicy":  "progman",
+    "capturedAt":  "2026-09-22T08:40:43",
+    "layered":  true,
+    "geometry":  {
+                     "width":  540,
+                     "height":  66,
+                     "x":  -1,
+                     "y":  120
+                 },
+    "screen":  {
+                   "cx":  1707,
+                   "cy":  1067
+               },
+    "hosts":  {
+                  "progman":  {
+                                  "hwnd":  "65828",
+                                  "cls":  "Progman",
+                                  "text":  "Program Manager",
+                                  "visible":  true,
+                                  "enabled":  true,
+                                  "parent":  "0",
+                                  "style":  "0x96000000",
+                                  "exStyle":  "0x00200080",
+                                  "rect":  "0,0,2560,1600,2560x1600"
+                              },
+                  "defview":  {
+                                  "hwnd":  "65836",
+                                  "cls":  "SHELLDLL_DefView",
+                                  "text":  "",
+                                  "visible":  true,
+                                  "enabled":  true,
+                                  "parent":  "65828",
+                                  "style":  "0x56010000",
+                                  "exStyle":  "0x00080000",
+                                  "rect":  "0,0,2560,1600,2560x1600"
+                              },
+                  "progmanWorkerW":  {
+                                         "hwnd":  "131734",
+                                         "cls":  "WorkerW",
+                                         "text":  "",
+                                         "visible":  true,
+                                         "enabled":  false,
+                                         "parent":  "65828",
+                                         "style":  "0x58000000",
+                                         "exStyle":  "0x080000A0",
+                                         "rect":  "0,0,2560,1600,2560x1600"
+                                     },
+                  "progmanHwnd":  "65828",
+                  "defviewHwnd":  "65836",
+                  "workerwHwnd":  "131734",
+                  "targetHost":  "65828",
+                  "targetHostIsEnabled":  true
+              },
+    "probe":  {
+                  "progmanDirectChildren":  [
+                                                {
+                                                    "hwnd":  "65836",
+                                                    "cls":  "SHELLDLL_DefView",
+                                                    "text":  "",
+                                                    "visible":  true,
+                                                    "enabled":  true,
+                                                    "parent":  "65828",
+                                                    "style":  "0x56010000",
+                                                    "exStyle":  "0x00080000",
+                                                    "rect":  "0,0,2560,1600,2560x1600"
+                                                },
+                                                {
+                                                    "hwnd":  "131734",
+                                                    "cls":  "WorkerW",
+                                                    "text":  "",
+                                                    "visible":  true,
+                                                    "enabled":  false,
+                                                    "parent":  "65828",
+                                                    "style":  "0x58000000",
+                                                    "exStyle":  "0x080000A0",
+                                                    "rect":  "0,0,2560,1600,2560x1600"
+                                                }
+                                            ],
+                  "defviewDirectChildClasses":  [
+                                                    "SysListView32"
+                                                ],
+                  "topLevelSHELLDLLDefViewCount":  0,
+                  "topLevelWorkerWCount":  15,
+                  "defviewHasSysListView32":  true
+              },
+    "steps":  [
+
+              ],
+    "verdicts":  {
+
+                 },
+    "humanNeeded":  [
+
+                    ],
+    "notes":  [
+                  "probe 模式只读，未改动任何系统状态。"
+              ],
+    "errors":  [
+
+               ],
+    "env":  {
+                "desktopName":  "Default",
+                "screenBeforeDpi":  {
+                                        "cx":  1707,
+                                        "cy":  1067
+                                    },
+                "screenAfterDpi":  {
+                                       "cx":  2560,
+                                       "cy":  1600
+                                   },
+                "screenChangedAfterDpiSet":  true,
+                "dpiMode":  1
+            }
+}

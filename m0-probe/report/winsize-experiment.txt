@@ -1,0 +1,48 @@
+=== 窗口尺寸偏差实验 ===
+时间: 2026-09-18T12:15:54.886Z
+Electron 44.4.2 / Chromium 152.0.7977.130
+主屏 scaleFactor = 1.5（150%）  物理基准 2561×1601
+请求尺寸 360×44（DIP）→ 物理应约 540×66
+
+--- A. 哪种配置能让 getBounds() 精确等于请求值 ---
+配置                                getBounds()     getContentBounds()  物理推算
+baseline（与产品代码一致）                 362×46          362×46              543×69   ✗ Δw=2 Δh=2
+thickFrame:false                  362×46          362×46              543×69   ✗ Δw=2 Δh=2
+useContentSize:true               362×46          362×46              543×69   ✗ Δw=2 Δh=2
+useContentSize+thickFrame:false   362×46          362×46              543×69   ✗ Δw=2 Δh=2
+roundedCorners:false              362×46          362×46              543×69   ✗ Δw=2 Δh=2
+resizable:true                    362×46          362×46              543×69   ✗ Δw=2 Δh=2
+transparent:false（对照）             363×48          362×48              545×72   ✗ Δw=3 Δh=4
+frame:true（对照）                    362×46          362×20              543×69   ✗ Δw=2 Δh=2
+
+--- B. 反复「原样写回」的漂移（验收 8 的自动部分）---
+初始      : {"x":60,"y":60,"width":362,"height":46}
+第 1 次 : {"x":60,"y":60,"width":362,"height":46}  相对上次 Δx=0 Δy=0 Δw=0 Δh=0  ✅ 幂等
+第 2 次 : {"x":60,"y":60,"width":362,"height":46}  相对上次 Δx=0 Δy=0 Δw=0 Δh=0  ✅ 幂等
+第 3 次 : {"x":60,"y":60,"width":362,"height":46}  相对上次 Δx=0 Δy=0 Δw=0 Δh=0  ✅ 幂等
+第 4 次 : {"x":60,"y":60,"width":362,"height":46}  相对上次 Δx=0 Δy=0 Δw=0 Δh=0  ✅ 幂等
+第 5 次 : {"x":60,"y":60,"width":362,"height":46}  相对上次 Δx=0 Δy=0 Δw=0 Δh=0  ✅ 幂等
+第 6 次 : {"x":60,"y":60,"width":362,"height":46}  相对上次 Δx=0 Δy=0 Δw=0 Δh=0  ✅ 幂等
+
+--- B2. 反复写同一个固定目标 (x=200,y=200,360×44) ---
+第 1 次 : {"x":200,"y":200,"width":360,"height":44}  Δw=0 Δh=0
+第 2 次 : {"x":200,"y":200,"width":360,"height":44}  Δw=0 Δh=0
+第 3 次 : {"x":200,"y":200,"width":360,"height":44}  Δw=0 Δh=0
+第 4 次 : {"x":200,"y":200,"width":360,"height":44}  Δw=0 Δh=0
+
+--- B3. setSize vs setContentSize ---
+setSize(360,44)        → getBounds={"x":200,"y":200,"width":360,"height":44} content={"x":200,"y":200,"width":360,"height":44}
+setContentSize(360,44) → getBounds={"x":200,"y":200,"width":360,"height":44} content={"x":200,"y":200,"width":360,"height":44}
+
+--- C. dipToScreenRect / dipToScreenPoint 传参方式 ---
+dipToScreenRect(win, bounds)       → {"x":300,"y":300,"width":540,"height":66}
+dipToScreenRect(null, bounds)      → {"x":300,"y":300,"width":540,"height":66}
+dipToScreenRect(bounds)            → THROW Insufficient number of arguments.
+dipToScreenPoint(win, {x,y})       → THROW Error processing argument at index 0, conversion failure from 
+dipToScreenPoint(null, {x,y})      → THROW Error processing argument at index 0, conversion failure from null
+screenToDipRect(win, bounds)       → {"x":133,"y":133,"width":241,"height":30}
+
+--- D. 结论 ---
+⚠️ 所有测试配置都无法让 getBounds() 精确等于请求值 —— 说明偏差来自更底层（Windows 窗口管理），需要在产品侧接受或补偿。
+
+（实验结束）

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; font-src 'self' file:;"
+    />
+    <title>M0 地基验证控制台</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/probe.css" />
+  </head>
+  <body>
+    <div class="top">
+      <h1>M0 地基验证控制台</h1>
+      <div class="chips" id="chips"></div>
+      <button class="primary" id="btn-export" type="button">导出验收记录</button>
+      <button id="btn-reload" type="button">重新探测</button>
+    </div>
+
+    <div class="wrap">
+      <!-- ============ 核心结论 ============ -->
+      <section>
+        <h2>核心结论 <small>验收 9 · 本次 M0 唯一的技术未知数</small></h2>
+        <div class="card-box" id="verdict-box">
+          <div class="note note--muted">正在探测…</div>
+        </div>
+      </section>
+
+      <!-- ============ 环境事实 ============ -->
+      <section>
+        <h2>环境事实</h2>
+        <div class="card-box">
+          <dl class="kv" id="kv-env"></dl>
+        </div>
+        <div class="card-box">
+          <h2 class="sub">显示器（Electron 眼中的世界）</h2>
+          <div id="displays"></div>
+        </div>
+        <div class="card-box">
+          <h2 class="sub">Windows 的答案（独立裁判）</h2>
+          <div id="windows-facts"></div>
+        </div>
+      </section>
+
+      <!-- ============ 控制区 ============ -->
+      <section>
+        <h2>控制区 <small>操作被测卡片</small></h2>
+        <div class="card-box">
+          <div class="ctrl">
+            <span class="ctrl__label">卡片状态</span>
+            <button id="btn-collapse" type="button">收起态 44px</button>
+            <button id="btn-expand" type="button">展开态 520px</button>
+            <button id="btn-hide" type="button">隐藏</button>
+            <button id="btn-show" type="button">唤回</button>
+          </div>
+
+          <div class="ctrl">
+            <span class="ctrl__label">渲染形态</span>
+            <button id="btn-glass" type="button">glass 玻璃</button>
+            <button id="btn-opaque" type="button">opaque 不透明</button>
+            <button id="btn-diag" type="button">诊断对照模式</button>
+          </div>
+
+          <div class="ctrl">
+            <span class="ctrl__label">透明度</span>
+            <button id="op-quiet" type="button">安静 96%</button>
+            <button id="op-normal" type="button">标准 94%</button>
+            <button id="op-sheer" type="button">通透 86%</button>
+          </div>
+
+          <div class="ctrl">
+            <span class="ctrl__label">坐标测试</span>
+            <button id="btn-snap" type="button">吸附到右边缘</button>
+            <button id="btn-record" type="button">坐标往返测试</button>
+            <span id="display-buttons" class="ctrl"></span>
+          </div>
+
+          <div class="focus">
+            <div class="focus__bar"><div class="focus__fill" id="focus-fill"></div></div>
+            <div class="focus__stats" id="focus-stats">
+              焦点测试未开始。点右侧按钮开始后，请随便去别的窗口打字，别碰卡片。
+            </div>
+            <div class="ctrl ctrl--tight">
+              <button id="btn-focus" type="button">开始 20 秒焦点测试</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 九条验收 ============ -->
+      <section>
+        <h2>九条验收标准 <small>MASTER-PLAN §4 · M0</small></h2>
+        <div id="checks"></div>
+      </section>
+
+      <!-- ============ 原始数据 ============ -->
+      <section>
+        <h2>原始数据 <small>排障用</small></h2>
+        <div class="card-box">
+          <pre id="raw">（等待数据）</pre>
+        </div>
+      </section>
+    </div>
+
+    <script src="probe.js"></script>
+  </body>
+</html>

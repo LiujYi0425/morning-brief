@@ -1,0 +1,36 @@
+
+===== run @ 2026-09-19T01:29:19.310Z mode=no-handler =====
+[no-handler] process.type=browser
+[no-handler] listenerCount('uncaughtException') = 1
+[no-handler] listenerCount('unhandledRejection') = 0
+[no-handler] 未注册任何监听器（对照组）
+[no-handler] app ready
+[no-handler] 已创建隐藏窗口（保持进程存活，与 src/main/index.js 的运行环境一致）
+[no-handler] [alive #1] 2026-09-19T01:29:19.786Z
+[no-handler] [alive #2] 2026-09-19T01:29:20.189Z
+[no-handler] >>> 现在抛出一个未捕获异常
+[no-handler] [alive #3] 2026-09-19T01:29:27.320Z
+[no-handler] [end] 异常发生 3 秒后进程**仍然存活**（存活心跳 3 次）
+[no-handler] [end] => 判定：未捕获异常**没有**导致退出，进程进入"半死"状态
+
+===== run @ 2026-09-19T01:29:27.579Z mode=with-handler =====
+[with-handler] process.type=browser
+[with-handler] listenerCount('uncaughtException') = 1
+[with-handler] listenerCount('unhandledRejection') = 0
+[with-handler] 已注册 uncaughtException 监听器（与 index.js 同款）
+[with-handler] app ready
+[with-handler] 已创建隐藏窗口（保持进程存活，与 src/main/index.js 的运行环境一致）
+[with-handler] [alive #1] 2026-09-19T01:29:28.064Z
+[with-handler] [alive #2] 2026-09-19T01:29:28.466Z
+[with-handler] >>> 现在抛出一个未捕获异常
+[with-handler] ★★ handler 捕获到：BOOM-未捕获异常
+[with-handler]    —— 注意：捕获之后进程**没有**退出，这就是"半死"的现场
+[with-handler] [alive #3] 2026-09-19T01:29:28.872Z
+[with-handler] [alive #4] 2026-09-19T01:29:29.274Z
+[with-handler] [alive #5] 2026-09-19T01:29:29.678Z
+[with-handler] [alive #6] 2026-09-19T01:29:30.083Z
+[with-handler] [alive #7] 2026-09-19T01:29:30.498Z
+[with-handler] [alive #8] 2026-09-19T01:29:30.904Z
+[with-handler] [alive #9] 2026-09-19T01:29:31.310Z
+[with-handler] [end] 异常发生 3 秒后进程**仍然存活**（存活心跳 9 次）
+[with-handler] [end] => 判定：未捕获异常**没有**导致退出，进程进入"半死"状态

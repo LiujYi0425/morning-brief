@@ -1,30 +1,53 @@
 # =====================================================================
-# .gitignore —— 晨报机
+# .gitignore —— 本文是 **M0（文档 / 规则 / probe）与 M1（应用）合并**后的并集。
+#
+# ⚠️⚠️ 合并时最容易出人命的就是这个文件：**M0 那份里没有 `data/`**。
+#      若合并时让 M0 那份赢了，下一次 `git add -A` 就会把
+#      `data/brief.db`（真实简报正文 + 已读标记）提交进一个**公开**仓库。
+#      ⇒ 所以这里逐条并集，而不是"二选一"。
+#
+# ⚠️ 另一处只差一个字符、结果却相反的细节：`report/` 必须写成**锚定的** `/report/`。
+#      不带斜杠的 `report/` 会匹配**任意层级**的同名目录，
+#      于是把 `m0-probe/report/` 一起吃掉 —— 而那边是**故意保留**的公开证据
+#      （见文件末尾 M0 的说明）。
 # =====================================================================
 
-# ── 依赖 ────────────────────────────────────────────────────────────
-# 约 250MB，其中绝大部分是 Electron 的二进制。
-# 别人 clone 之后跑一次 `npm install` 就能拿到，不需要进仓库。
+# ── 依赖 ──────────────────────────────────────────────
 node_modules/
 .npm-cache/
+.pnpm-store/
 
-# ── ★★ 用户的简报数据 —— 绝不能进仓库 ──────────────────────────────
-# 数据目录现在就在项目里（`data/`，见 src/shared/runtime-state.js
-# 的 dataDirOf）。这是"搬走/备份只搬一个目录"的代价：
-# **一个疏忽就会把私人简报提交到公开仓库。**
-#   · 提交前务必确认 `git status` 里没有 data/ 下的东西
-#   · 打包给别人时也必须排除它（见 package.json 的 build.files 排除项）
+# ── 打包产物 ──────────────────────────────────────────
+dist/
+out/
+release/
+
+# ── 应用图标 ──────────────────────────────────────────
+# ⚠️ 用 `build/*` + 反选，**不能**写成 `build/`：
+#    gitignore 的规则是"父目录被排除后，无法再反选其中的文件"，
+#    写成 `build/` 就再也放不出 `build/icon.ico` 了。
+#    而 `build/icon.ico` 是 package.json 的 `win.icon`，**必须在仓库里**
+#    （生成结果是字节稳定的，见 tools/make-icon.mjs；`npm run icon` 会重建它）。
+#    图标预览图（build/icon-preview-*.png）是纯给人看的，被 `build/*` 一并排除。
+build/*
+!build/icon.ico
+
+# ── ★★★ 用户数据 —— 绝不进仓库，也绝不进安装包 ─────────────────
+# 数据目录现在就在项目里（`data/`，见 src/shared/runtime-state.js 的 dataDirOf）。
+# 这是"搬走 / 备份只需要搬一个目录"的代价：
+#   · 提交前务必确认 `git status` 里没有 data/ 下的任何东西
+#   · 打包给别人时也必须排除它（见 package.json 的 build.files）
+#   · 这一条**刻意不锚定**：宁可多忽略一个同名目录，也不能漏掉真正的数据
 data/
-# 旧版遗留（早期把 MB_DATA_DIR 指到过这里）
 .data/
 
-# ── 运行与测试产物 ──────────────────────────────────────────────────
-# report/ 里是考裁判的输出：**结论进仓库、运行日志不进**（同父仓库的口径）。
-#   运行日志里含本机绝对路径与用户名，公开出去既泄露隐私、对别人也毫无用处。
-report/
+# ── 本仓库自己的运行与测试产物 ────────────────────────
+# ⚠️ 必须锚定成 `/report/`，否则会连 m0-probe/report/ 一起排除（见文件头说明）
+/report/
 *.log
+npm-debug.log*
 
-# ── 编辑器 / 系统 ──────────────────────────────────────────────────
+# ── 系统 / 编辑器 ─────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
@@ -32,30 +55,63 @@ desktop.ini
 .idea/
 *.swp
 
-# ── 临时文件 ────────────────────────────────────────────────────────
+# ── 临时文件 ──────────────────────────────────────────
 *.tmp
 .tmp-*
 *.bak
 
-# ── 密钥 / 凭据兜底 ─────────────────────────────────────────────────
+# ── 密钥 / 凭据（本项目用 safeStorage 落 userData，正常不该进仓库；此为兜底）──
 .env
 .env.*
 *.pem
 *.key
-id_rsa
-id_rsa.pub
+*.p12
+*.ppk
+.credentials.yaml
+
+# SSH 私钥兜底 —— 2026-09-21 真实踩中：ssh-keygen 用了相对路径，
+#   私钥被写进了**仓库根目录**（`Set-Location` 不改变原生子进程的 cwd）。
+#   当时尚未 commit，但 `git add -A` 本会把它推进公开仓库。
+#   ⇒ 密钥一律放 `~/.ssh`，生成时**必须用绝对路径**。
 id_ed25519
 id_ed25519.pub
+id_rsa
+id_rsa.pub
+id_ecdsa
+id_ecdsa.pub
+id_dsa
+id_dsa.pub
 
-# ── 打包产物（以后接 electron-builder 时用得上）──────────────────────
-dist/
-out/
-release/
+# ── 内部工作笔记（AI 助手的工作记忆与日志，不是项目内容）──
+.workbuddy/
 
-# 图标预览图（npm run icon 的 --preview 产物，纯粹给人看的）
-build/icon-preview-*.png
+# ── 对外提交素材 / 内部工作清单（含内部评审口吻与本机绝对路径，不进公开仓库）──
+#   注：有意**不用**通配 `_DSH*.md` —— 未来若有该前缀的正当文件，逐个登记更安全。
+_DSH提交材料包.md
+_DSH开发接入清单.md
 
-# ⚠️ 但下面这两个**要进仓库**：它们是运行时/打包时的输入，且生成结果是字节稳定的
-#   · build/icon.ico              → package.json 的 win.icon
-#   · src/renderer/assets/*.png   → 托盘图标（没它就 tray-SKIPPED，功能缺一块）
-# 不进仓库的话，clone 下来不跑 npm run icon 就没有图标。
+# ── AI 助手执行任务时的中间产物（补丁 / 勘察 / 记账脚本，不属于项目）──
+# 注：本项目另有正当的 `_` 开头文件（如 agents/_template.md），所以**不能**用通配 `_*`，
+#     只排除下面这几类脚本命名。
+_patch-*.mjs
+_append-*.mjs
+_scan*.mjs
+_commit-msg.txt
+
+# ── m0-probe/report：区分「结论」与「运行日志」──
+# ⚠️ 2026-09-21 更正：上一版把整个 report/ 判为「证据保留」，**判断有误** ——
+#    扫描发现其中若干**运行日志**写有本机绝对路径与 Windows 用户名，
+#    公开出去既泄漏隐私、对别人也毫无用处。改为按下面这条原则处理：
+#      **结论进仓，运行日志不进仓。**
+m0-probe/report/calib-*.txt
+m0-probe/report/*.calib.*
+m0-probe/report/*.calib-backup
+m0-probe/report/diag-electron-api.txt
+m0-probe/report/selftest-log.txt
+# 注：`_selftest-report.calib.md` 是校准器**故意改坏**的那一版假记录（写着「M0 未通过」），
+#     公开会误导读者 —— 由上一条 `*.calib.*` 一并排除。
+
+# 说明：以下**刻意不排除**，因为它们是「可验证」的证据，也是目录站审核的加分项 ——
+#   m0-probe/report/ 里的结论类产物：_selftest-report.md / M0-验收记录_*.md /
+#     calibration-focus-referee.md / test-*.txt / winsize*.txt / boot-heartbeat.txt
+#   docs/ agents/ tools/  项目治理体系本身：单一权威源 + 铁律 + 自动同步校验 + 带变异测试的考裁判

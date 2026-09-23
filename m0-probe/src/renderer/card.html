@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-surface="glass" data-state="collapsed" data-diag="off">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; font-src 'self' file:;"
+    />
+    <title>晨报卡片（M0 被测对象）</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/surface.css" />
+    <link rel="stylesheet" href="styles/card.css" />
+  </head>
+  <body>
+    <div class="card">
+      <!-- ============ 收起态 ============ -->
+      <div class="bar" id="bar">
+        <!--
+          拖动把手（验收 8 的"手拖"入口）。
+          ⚠️ 不能把整条 .bar 设成 -webkit-app-region: drag —— 那个属性的区域会
+          吞掉全部鼠标事件，而 card.js 里 #bar 的 click 正是"展开卡片"。
+          所以只在这一小块开 drag，其余保持可点。
+
+          ⚠️⚠️ 2026-09-20 状态更正：阿木实测**拖不动**。已核实 card.js 里没有
+          任何 JS 拖动代码，所以拖动**唯一**依赖下面这条 CSS。
+          根因待实测诊断 —— 开关见 src/main/diag-flags.js。
+          card.js 另给 .grip 挂了一个 mousedown 探针，用来判别"事件有没有到达 DOM"。
+        -->
+        <span class="grip" aria-hidden="true"></span>
+        <span class="bar__dot"></span>
+        <span class="bar__title">晨报</span>
+        <span class="bar__sep">·</span>
+        <span class="bar__meta">今天 7 条</span>
+        <span class="bar__summary">AI 芯片与国产替代 · 开源模型中文评测反超</span>
+        <span class="bar__chevron"></span>
+      </div>
+
+      <!-- ============ 展开态 ============ -->
+      <div class="body">
+        <div class="head">
+          <span class="grip" aria-hidden="true"></span>
+          <span class="head__title">晨报 · 9月18日 周五</span>
+          <span class="head__count">7 条</span>
+          <button class="head__action" id="btn-collapse" type="button">收起</button>
+        </div>
+
+        <div class="scroll">
+          <p class="lead">今天最值得看的是 AI 芯片与国产替代。</p>
+
+          <div class="group">
+            <div class="group__head">
+              <span class="group__bar"></span>
+              <span class="group__name">AI 与算力</span>
+              <span class="group__count">3 条</span>
+            </div>
+            <div class="item">
+              <div class="item__title">某厂商发布新一代推理芯片，能效提升 40%，主打边缘部署</div>
+              <div class="item__digest">单卡算力较上代翻倍，功耗持平，重点强调在断网环境下的本地推理能力。</div>
+              <div class="item__source">机器之心</div>
+            </div>
+            <div class="item">
+              <div class="item__title">开源模型在中文评测上首次超过闭源方案</div>
+              <div class="item__digest">在阅读理解和长文本两项上领先，但工具调用能力仍有明显差距。</div>
+              <div class="item__source">量子位</div>
+            </div>
+            <div class="item">
+              <div class="item__title">推理成本一年下降一个数量级，但端侧仍是瓶颈</div>
+              <div class="item__digest">云端单价持续走低，制约点已经从算力转向内存带宽。</div>
+              <div class="item__source">晚点 LatePost</div>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group__head">
+              <span class="group__bar"></span>
+              <span class="group__name">行业动态</span>
+              <span class="group__count">2 条</span>
+            </div>
+            <div class="item">
+              <div class="item__title">国产替代订单同比增长 35%，交期普遍缩短至 8 周</div>
+              <div class="item__digest">下游客户开始把验证周期纳入采购计划，而不再只看价格。</div>
+              <div class="item__source">财新</div>
+            </div>
+            <div class="item">
+              <div class="item__title">某地出台算力补贴细则，按实际使用量阶梯返还</div>
+              <div class="item__digest">返还比例与连续使用时长挂钩，对长期租用者更有利。</div>
+              <div class="item__source">第一财经</div>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group__head">
+              <span class="group__bar"></span>
+              <span class="group__name">你订阅的博客</span>
+              <span class="group__count">2 条</span>
+            </div>
+            <div class="item">
+              <div class="item__title">为什么我们把整个渲染层重写了两遍</div>
+              <div class="item__digest">第一遍为了性能，第二遍为了可读性。回头看，第二遍更值。</div>
+              <div class="item__source">个人博客</div>
+            </div>
+            <div class="item">
+              <div class="item__title">桌面小工具的十年：从托盘到常驻卡片</div>
+              <div class="item__digest">用户对常驻元素的容忍度，比我们想象的还要低。</div>
+              <div class="item__source">个人博客</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="foot">
+          <!--
+            「展开全部」按钮已于 2026-09-20 移除（用户决策，需求 5）。理由两条：
+            ① 它与铁律 L1「压缩优先」方向相反 —— 卡片的全部价值在于"只给值得看的"，
+               再加一个"把剩下的都倒出来"的入口，等于主动把 L1 让掉；
+            ② 它在 M0 里本就是个空壳：card.js 里它和 refresh/settings 一起躺在占位循环中，
+               点击只打一行日志，从未有过真实行为。
+            ⚠️ 这是"移除"而不是"永久删除"：将来若要找回"看剩下几条"的能力，
+               M3 的「历史存档回看」是它的自然落点。
+            ⚠️ .foot__spacer 保留 —— 它负责把刷新/设置推到右侧，与左侧还有没有按钮无关。
+
+            ⚠️ 2026-09-20 第二次修（阿木反馈「存在大量无行为（无动作/无进展）的按键」）：
+               「刷新」已由占位升级为**真实行为**（重报渲染事实 + 更新条数 + 轻提示）；
+               「设置」则改成 **disabled** —— M0 里没有设置面板，与其留一个点了没反应的
+               假按钮，不如让它诚实地看起来不可用。两者口径见 docs/02 §4.3。
+          -->
+          <span class="foot__spacer"></span>
+          <button class="foot__btn" type="button" id="btn-refresh">刷新</button>
+          <button
+            class="foot__btn"
+            type="button"
+            id="btn-settings"
+            disabled
+            title="设置面板将在 M1 开放"
+          >
+            设置
+          </button>
+        </div>
+      </div>
+
+      <!--
+        轻提示（2026-09-20 新增）—— 刷新等动作的**可见反馈**。
+        它是"死键"的直接解药：此前点刷新没有任何可感知的结果。
+        role=status + aria-live 让读屏用户也能收到这条反馈。
+      -->
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+      <!-- ============ 诊断模式：左右对照 ============ -->
+      <div class="diag">
+        <!--
+          纹理底 —— 自动化测量必需的"可控背景"。
+          它必须排在两个 .diag__row **之前**：两者都是定位元素、都没有 z-index，
+          于是按 DOM 顺序绘制，纹理先画、落在下面，row 的半透明白蒙层叠在它上面。
+          这样 backdrop-filter 模糊的就是这块棋盘格，而不是用户的壁纸 ——
+          信号从此完全落在窗口内部，不依赖桌面捕获，也不怕纯色壁纸。
+        -->
+        <div class="diag__texture"></div>
+        <div class="diag__row diag__row--blur">
+          <span class="diag__label">A · 有 backdrop-filter: blur(24px)</span>
+        </div>
+        <div class="diag__row diag__row--raw">
+          <span class="diag__label">B · 无 backdrop-filter（对照组）</span>
+          <span class="diag__hint">
+            两个半区的白色蒙层完全一致，唯一区别是 A 多了虚化。<br />
+            看起来不同 → 生效；看起来一模一样 → 静默失效。
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <script src="card.js"></script>
+  </body>
+</html>

@@ -1,0 +1,3 @@
+[TLA 组] STEP1 模块开始求值
+[TLA 组] STEP2 即将顶层 await app.whenReady()
+[TLA 组] WATCHDOG 8 秒到了：whenReady 始终没 resolve → 顶层 await 死锁成立

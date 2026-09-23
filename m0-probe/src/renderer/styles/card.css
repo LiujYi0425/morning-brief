@@ -1,0 +1,517 @@
+/* =====================================================================
+   card.css —— 卡片组件样式
+   ---------------------------------------------------------------------
+   ⚠️ 本文件是 R-C08 的示范样本。它遵守的不变量，准确表述是：
+
+     · **产品 UI 部分**（.bar / .body / .item / .group / .foot …）里
+       **没有任何一个硬编码的形态值** ——
+       没有写死的 blur 数值、没有半透明 rgba() 的具体值、没有阴影的具体值；
+     · 这些形态值**只以 `var(--令牌)` 的形式引用**，取值全部集中在 surface.css。
+       切形态 = 改 surface.css，本文件一字不动。
+
+   ⚠️ 一个容易误读的点（2026-09-18 核对时修正）：
+     下面你会看到 `backdrop-filter: var(--card-blur);` —— 这是**正确写法**。
+     禁令针对的是「硬编码的值」，不是「属性名」：写死的 `blur(20px)` 才违规，
+     引用 `var(--card-blur)` 恰恰是这条规则要求你做的事。
+     本文件历史上曾写过"全文件搜不到一个 backdrop-filter"，那句话是错的
+     （当时本文件里就有 5 处 backdrop-filter 声明），已改正。
+
+   ⚠️ **唯一的例外：诊断区（.diag / .diag__row / .diag__texture / .diag__label）。
+     它是 M0 的「测量器材」，不是产品 UI** —— 上面的不变量对它不适用，理由逐条如下：
+
+     · `.diag__row` 的 `rgba(255,255,255,0.55)` 是**刻意硬编码**的：
+       两个半区的蒙层必须**逐字节相同**，才能保证"唯一的变量是 blur"。
+       若把它抽成令牌，反而给了未来"两区被改成不同值"的机会 —— 那会直接毁掉测量。
+     · `.diag__texture` 的棋盘格颜色与 `8px` 周期是**测量参数**（高频纹理的频率与对比度），
+       不是视觉风格。它服务于拉普拉斯方差的量程，不该跟皮肤一起被换掉。
+     · `.diag__label` 的白底黑字同理：要在任意壁纸上都读得清，属于测量可读性而非设计规范。
+
+     结论：诊断区随 M0 一起退役，**不继承给产品代码**；它的硬编码值不构成对 R-C08 的违反，
+     但**必须在注释里显式划出边界** —— 否则下一个人会拿它当"反正是示范样本"的许可。
+
+     这不是洁癖 —— 它决定了"降级"是改一个属性还是重写 2000 行。
+   ===================================================================== */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  /* 透明窗口的关键：根元素必须完全透明，否则整块窗口变成不透明色块 */
+  background: transparent;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------------
+   卡片本体 —— 唯一的形态承载者
+   --------------------------------------------------------------------- */
+.card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* .toast 是绝对定位的，需要一个定位祖先。这是布局属性，不是形态值。 */
+  position: relative;
+  border-radius: var(--radius-card);
+  background: var(--card-bg);
+  -webkit-backdrop-filter: var(--card-blur);
+  backdrop-filter: var(--card-blur);
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
+  /* 注意：不要在这里写 transition，尺寸变化由主进程 setBounds 驱动 */
+}
+
+/* ---------------------------------------------------------------------
+   收起态（44px，默认启动形态）
+   --------------------------------------------------------------------- */
+.bar {
+  height: 44px;
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  background: var(--functional-bg);
+  -webkit-backdrop-filter: var(--functional-blur);
+  backdrop-filter: var(--functional-blur);
+  border-bottom: var(--functional-divider);
+  transition: background-color var(--dur-press) var(--ease-enter);
+}
+
+:root[data-state='expanded'] .bar {
+  display: none;
+}
+
+.bar:hover {
+  /* hover 只改一点点亮度，不做位移、不做缩放 —— 常驻元素不该动 */
+  background: var(--functional-bg);
+  filter: brightness(1.03);
+}
+
+/* ---------------------------------------------------------------------
+   拖动把手 —— 验收 8 的"手拖"这一步要真实可行（2026-09-20 补）
+   ---------------------------------------------------------------------
+   为什么是**显式把手**，而不是"整条 .bar 都能拖"：
+
+     `-webkit-app-region: drag` 的区域会**吞掉全部鼠标事件**（包括 click）。
+     而 card.js 里 `#bar` 的 click 正是"展开卡片" —— 整条设 drag 会把展开功能吃掉。
+     所以只在把手这一小块开 drag，其余区域保持可点。
+
+   ⚠️ 本文件是 R-C08 的示范样本，这里必须说清边界：
+     下面的 14px / 6px / 8px / 3px 是**布局尺寸**，不是形态值 ——
+     与 .bar__dot 的 8px 同类；颜色一律走 `var(--令牌)`。不构成对 R-C08 的违反。
+   ⚠️ 与诊断区不同，把手**不随 M0 退役** —— 常驻卡片必须能被拖走，这是产品行为。
+
+   ⚠️⚠️ 2026-09-20 状态更正：**上面这条 CSS 目前无效** —— 阿木实测拖不动。
+     已核实 card.js 里没有任何 JS 拖动代码，拖动**唯一**依赖的就是下面那一行。
+     原因待实测诊断（M0_DIAG_RESIZABLE 开关，见 src/main/diag-flags.js）。
+     更要紧的是：**ADR-011 已经把"这条 CSS 将来必然失效"写进代价 ②** ——
+     卡片迁到桌面层后，-webkit-app-region: drag 注定不可用。
+     所以本行**不该被修复，而该被替换**：改为 JS 手动拖动（mousedown → IPC → setBounds）。
+   --------------------------------------------------------------------- */
+.grip {
+  -webkit-app-region: drag;
+  flex: 0 0 14px;
+  /* 交叉轴撑满 44px，让"抓得到"的范围尽量大 */
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+}
+
+.grip::before {
+  content: '';
+  width: 6px;
+  height: 8px;
+  /* 2 列 × 3 行 的点阵，用 radial-gradient 画 —— 不为纯装饰加 DOM */
+  background-image: radial-gradient(circle, var(--text-tertiary) 1px, transparent 1.6px);
+  background-size: 3px 3px;
+  opacity: 0.75;
+}
+
+.bar__dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--state-ok);
+}
+
+.bar__title {
+  font-size: var(--fs-item);
+  font-weight: var(--fw-group);
+  line-height: var(--lh-item);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.bar__sep,
+.bar__meta {
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.bar__summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-meta);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar__chevron {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+/* ---------------------------------------------------------------------
+   展开态（520px）
+   --------------------------------------------------------------------- */
+.body {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+:root[data-state='expanded'] .body {
+  display: flex;
+}
+
+/* --- 头部：功能层 --- */
+.head {
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  background: var(--functional-bg);
+  -webkit-backdrop-filter: var(--functional-blur);
+  backdrop-filter: var(--functional-blur);
+  border-bottom: var(--functional-divider);
+}
+
+.head__title {
+  font-size: var(--fs-group);
+  font-weight: var(--fw-group);
+  color: var(--text-primary);
+  flex: 1 1 auto;
+}
+
+.head__count {
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+}
+
+.head__action {
+  font-size: var(--fs-meta);
+  color: var(--text-secondary);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-inner);
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.head__action:hover {
+  background: var(--surface-raised);
+}
+
+/* --- 内容层：可滚动 --- */
+.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+/* 总览区固定在顶部，不参与滚动 —— 用户第一眼必须看到总览句 */
+.lead {
+  font-size: var(--fs-lead);
+  font-weight: var(--fw-lead);
+  line-height: var(--lh-lead);
+  color: var(--text-primary);
+  margin-bottom: var(--space-5);
+}
+
+.group {
+  margin-bottom: var(--space-5);
+}
+
+.group__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.group__bar {
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--accent);
+  flex: 0 0 2px;
+}
+
+.group__name {
+  font-size: var(--fs-group);
+  font-weight: var(--fw-group);
+  line-height: var(--lh-group);
+  color: var(--text-primary);
+  flex: 1 1 auto;
+}
+
+.group__count {
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+}
+
+.item {
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border-radius: var(--radius-inner);
+  transition: background-color var(--dur-press) var(--ease-enter);
+}
+
+.item:hover {
+  background: var(--surface-raised);
+}
+
+.item__title {
+  font-size: var(--fs-item);
+  font-weight: var(--fw-item);
+  line-height: var(--lh-item);
+  color: var(--text-primary);
+  /* 最多 2 行 —— 超出截断。压缩率就是产品力 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.item__digest {
+  margin-top: var(--space-1);
+  font-size: var(--fs-item);
+  line-height: var(--lh-item);
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.item__source {
+  margin-top: var(--space-1);
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+}
+
+/* --- 底栏：功能层，永远在屏内 --- */
+.foot {
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  background: var(--functional-bg);
+  -webkit-backdrop-filter: var(--functional-blur);
+  backdrop-filter: var(--functional-blur);
+  border-top: var(--functional-divider);
+}
+
+.foot__spacer {
+  flex: 1 1 auto;
+}
+
+.foot__btn {
+  font-size: var(--fs-meta);
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-inner);
+  cursor: pointer;
+}
+
+.foot__btn:hover {
+  background: var(--surface-raised);
+}
+
+/* 禁用态必须**看起来**不可用。
+   否则它就是一个"点了没反应的假按钮" —— 那正是阿木 2026-09-20 反馈的
+   「大量无行为（无动作/无进展）的按键」。**禁用比伪装成可用更诚实。** */
+.foot__btn:disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+.foot__btn:disabled:hover {
+  background: transparent;
+}
+
+/* ---------------------------------------------------------------------
+   轻提示（toast）—— 动作的可见反馈（2026-09-20 新增）
+   ---------------------------------------------------------------------
+   为什么需要它：底栏按钮此前"点击 → 只有主进程终端里多一行日志"，
+   卡片 UI 上零变化。toast 把"动作发生了"这件事变成**看得见**的东西。
+
+   ⚠️ R-C08 边界说明：底色 / 虚化 / 描边一律走令牌（--functional-bg /
+      --functional-blur / --card-border），本组件不写任何形态值。
+      下面的 44px 是**底栏高度**，属布局尺寸（与 .bar 的 44px 同类），
+      不是形态值；圆角走 --radius-pill。
+   ⚠️ 刻意不用 position: fixed —— 透明窗口 + 将来的桌面层形态下，
+      fixed 会把元素甩到窗口外（本文件其它地方也一律不用 fixed）。
+   --------------------------------------------------------------------- */
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(44px + var(--space-3));
+  transform: translateX(-50%);
+  max-width: calc(100% - var(--space-4) - var(--space-4));
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--functional-bg);
+  -webkit-backdrop-filter: var(--functional-blur);
+  backdrop-filter: var(--functional-blur);
+  border: var(--card-border);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* ⚠️ 未激活时必须彻底不接触鼠标 —— 常驻元素最忌讳"看不见但点得到" */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-micro) var(--ease-enter);
+}
+
+.toast[data-on='on'] {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------------
+   诊断模式：左右对照区（M0 专用）
+   --------------------------------------------------------------------- */
+.diag {
+  display: none;
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+:root[data-diag='on'] .diag {
+  display: flex;
+}
+
+:root[data-diag='on'] .bar,
+:root[data-diag='on'] .body {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------
+   纹理底 —— 自动化测量必需的"可控背景"（2026-09-18 新增）
+   ---------------------------------------------------------------------
+   为什么需要它：诊断区靠 backdrop-filter 去模糊"背后的东西"。
+   如果背后是**纯色桌面**，模糊与不模糊看起来完全一样 → **假阴性**，
+   自动化测量会兴高采烈地报"通过"或"失败"，而那个结论毫无意义。
+
+   所以这里放一张**程序生成的高频棋盘格**当底（无外部资源，CSP 友好）：
+   无论用户用什么壁纸，A 区背后永远是高频纹理，
+   模糊生效则像素统计必然崩塌 —— 信号不再依赖环境。
+   --------------------------------------------------------------------- */
+.diag__texture {
+  position: absolute;
+  inset: 0;
+  background-image: repeating-conic-gradient(#101010 0% 25%, #ececec 0% 50%);
+  background-size: 8px 8px;
+}
+
+/* 测量模式：藏掉文字标签 —— 文字边缘本身就是高频，会污染模糊度统计 */
+:root[data-diag-measure='on'] .diag__label,
+:root[data-diag-measure='on'] .diag__hint {
+  display: none;
+}
+
+/* 校准态 = "已知失效"基线：把 A 区的 blur 也关掉。
+   此态下两区应当几乎一致；用它证明"这套测量确实能区分生效与失效"——
+   也就是把「考裁判」内建进验收本身，而不是靠人另外去试。 */
+:root[data-diag-blur='off'] .diag__row--blur {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.diag__row {
+  flex: 1 1 50%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 两个半区的蒙层完全一致 —— 唯一变量是 blur */
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.diag__row--blur {
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+}
+
+.diag__row--raw {
+  /* 刻意不加任何 backdrop-filter —— 它是对照组 */
+}
+
+.diag__label {
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-group);
+  color: #1c1c1e;
+  background: rgba(255, 255, 255, 0.85);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-inner);
+}
+
+.diag__hint {
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: var(--space-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  color: #1c1c1e;
+  background: rgba(255, 255, 255, 0.9);
+  padding: var(--space-2);
+  border-radius: var(--radius-inner);
+  text-align: center;
+}
+
+/* 滚动条：常驻元素不该有存在感 */
+.scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--state-idle);
+  border-radius: var(--radius-pill);
+}
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
+}

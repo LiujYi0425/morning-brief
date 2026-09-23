@@ -1,0 +1,349 @@
+{
+    "ok":  true,
+    "script":  "attach-to-desktop-layer.ps1",
+    "revision":  3,
+    "mode":  "mount",
+    "hostPolicy":  "progman",
+    "zOrder":  "above",
+    "placement":  "bottom",
+    "capturedAt":  "2026-09-22T09:07:55",
+    "layered":  true,
+    "geometry":  {
+                     "width":  540,
+                     "height":  66,
+                     "x":  1980,
+                     "y":  120
+                 },
+    "screen":  {
+                   "cx":  1707,
+                   "cy":  1067
+               },
+    "hosts":  {
+                  "progman":  {
+                                  "hwnd":  "65828",
+                                  "cls":  "Progman",
+                                  "text":  "Program Manager",
+                                  "visible":  true,
+                                  "enabled":  true,
+                                  "parent":  "0",
+                                  "style":  "0x96000000",
+                                  "exStyle":  "0x00200080",
+                                  "rect":  "0,0,2560,1600,2560x1600"
+                              },
+                  "defview":  {
+                                  "hwnd":  "65836",
+                                  "cls":  "SHELLDLL_DefView",
+                                  "text":  "",
+                                  "visible":  true,
+                                  "enabled":  true,
+                                  "parent":  "65828",
+                                  "style":  "0x56010000",
+                                  "exStyle":  "0x00080000",
+                                  "rect":  "0,0,2560,1600,2560x1600"
+                              },
+                  "progmanWorkerW":  {
+                                         "hwnd":  "131734",
+                                         "cls":  "WorkerW",
+                                         "text":  "",
+                                         "visible":  true,
+                                         "enabled":  false,
+                                         "parent":  "65828",
+                                         "style":  "0x58000000",
+                                         "exStyle":  "0x080000A0",
+                                         "rect":  "0,0,2560,1600,2560x1600"
+                                     },
+                  "progmanHwnd":  "65828",
+                  "defviewHwnd":  "65836",
+                  "workerwHwnd":  "131734",
+                  "targetHost":  "65828",
+                  "targetHostIsEnabled":  true
+              },
+    "probe":  {
+                  "progmanDirectChildren":  [
+                                                {
+                                                    "hwnd":  "65836",
+                                                    "cls":  "SHELLDLL_DefView",
+                                                    "text":  "",
+                                                    "visible":  true,
+                                                    "enabled":  true,
+                                                    "parent":  "65828",
+                                                    "style":  "0x56010000",
+                                                    "exStyle":  "0x00080000",
+                                                    "rect":  "0,0,2560,1600,2560x1600"
+                                                },
+                                                {
+                                                    "hwnd":  "131734",
+                                                    "cls":  "WorkerW",
+                                                    "text":  "",
+                                                    "visible":  true,
+                                                    "enabled":  false,
+                                                    "parent":  "65828",
+                                                    "style":  "0x58000000",
+                                                    "exStyle":  "0x080000A0",
+                                                    "rect":  "0,0,2560,1600,2560x1600"
+                                                }
+                                            ],
+                  "defviewDirectChildClasses":  [
+                                                    "SysListView32"
+                                                ],
+                  "topLevelSHELLDLLDefViewCount":  0,
+                  "topLevelWorkerWCount":  15,
+                  "defviewHasSysListView32":  true
+              },
+    "steps":  [
+                  {
+                      "step":  "createTestWindow",
+                      "data":  {
+                                   "hwnd":  "3542190",
+                                   "how":  "Button/hInst=module =\u003e hwnd=3542190 GetLastError=0"
+                               }
+                  },
+                  {
+                      "step":  "before",
+                      "data":  {
+                                   "window":  {
+                                                  "hwnd":  "3542190",
+                                                  "cls":  "Button",
+                                                  "text":  "M0 · A10 挂载测试条",
+                                                  "visible":  true,
+                                                  "enabled":  true,
+                                                  "parent":  "0",
+                                                  "style":  "0x94000000",
+                                                  "exStyle":  "0x00000080",
+                                                  "rect":  "1980,120,2520,186,540x66"
+                                              }
+                               }
+                  },
+                  {
+                      "step":  "setLayered",
+                      "data":  {
+                                   "ok":  true,
+                                   "exStyle":  "0x00080080"
+                               }
+                  },
+                  {
+                      "step":  "setNoActivate",
+                      "data":  {
+                                   "ok":  true,
+                                   "exStyle":  "0x08080080"
+                               }
+                  },
+                  {
+                      "step":  "placeBottom",
+                      "data":  {
+                                   "insertAfter":  "HWND_BOTTOM(=1)",
+                                   "ok":  true
+                               }
+                  },
+                  {
+                      "step":  "moveTo",
+                      "data":  {
+                                   "y":  120,
+                                   "ok":  true,
+                                   "x":  1980
+                               }
+                  },
+                  {
+                      "step":  "forceDefviewRepaint",
+                      "data":  {
+                                   "ok":  true
+                               }
+                  },
+                  {
+                      "step":  "topLevelZOrder",
+                      "data":  {
+                                   "note":  "顶层 Z 序自顶向下（GetTopWindow + GW_HWNDNEXT）；index 越小越靠上",
+                                   "weAreAboveDesktop":  true,
+                                   "total":  423,
+                                   "ourIndex":  36,
+                                   "first12":  [
+                                                   "65948\u0001ForegroundStaging\u00010",
+                                                   "65950\u0001IME\u00010",
+                                                   "65894\u0001ForegroundStaging\u00010",
+                                                   "788998\u0001Chrome_WidgetWin_1\u00010",
+                                                   "1115416\u0001MyFinderApp\u00011",
+                                                   "43714838\u0001mydockicotag\u00011",
+                                                   "1378160\u0001MyDockAPP\u00011",
+                                                   "525100\u0001dockhook32\u00010",
+                                                   "788766\u0001MyDockLaunchpadtag\u00010",
+                                                   "657272\u0001MyDockLaunchpad\u00010",
+                                                   "132656\u0001MSCTFIME UI\u00010",
+                                                   "65782\u0001IME\u00010"
+                                               ],
+                                   "progmanIndex":  422
+                               }
+                  },
+                  {
+                      "step":  "paintAndPump",
+                      "data":  {
+                                   "forcePaint":  true,
+                                   "messagesDispatched":  0
+                               }
+                  },
+                  {
+                      "step":  "restored",
+                      "data":  {
+                                   "window":  {
+                                                  "hwnd":  "3542190",
+                                                  "cls":  "Button",
+                                                  "text":  "M0 · A10 挂载测试条",
+                                                  "visible":  true,
+                                                  "enabled":  true,
+                                                  "parent":  "0",
+                                                  "style":  "0x94000000",
+                                                  "exStyle":  "0x08080080",
+                                                  "rect":  "1980,120,2520,186,540x66"
+                                              }
+                               }
+                  },
+                  {
+                      "step":  "destroyTestWindow",
+                      "data":  {
+                                   "hwnd":  "3542190"
+                               }
+                  }
+              ],
+    "verdicts":  {
+                     "mounted_ok":  true,
+                     "parentIsTargetHost":  false,
+                     "isTopLevelWindow":  true,
+                     "stillVisible":  true,
+                     "stillEnabled":  true,
+                     "sizePreserved":  true,
+                     "sizeAfter":  "1980,120,2520,186,540x66",
+                     "hitHwnd":  "3542190",
+                     "hitRootHwnd":  "3542190",
+                     "hitIsUsOrOurChild":  true,
+                     "hitClass":  "Button",
+                     "notes_on_judgement":  [
+                                                "判据②「仍能点击」的机器代理 = WindowFromPoint(中心点) 能否命中我们。",
+                                                "WindowFromPoint 会跳过 hidden/disabled 窗口，所以它是「能不能被点到」的必要条件代理，不是充分条件。",
+                                                "注：若宿主是 disabled，这条几乎注定失败 —— 那本身就是一个有价值的结论。"
+                                            ],
+                     "criterion1_visible":  {
+                                                "state":  "PASS",
+                                                "why":  "挂载后窗口区 nearRatio=0.953，比窗口前基准 0.487 高出 0.466（阈值 0.233）=\u003e 测试条确实出现在屏幕上 =\u003e 判据① 成立。",
+                                                "how":  "屏幕像素取样（GetDC(NULL)+GetPixel）+ 内建正对照 + 人眼复核",
+                                                "thresholds":  "见 calibration 字段（PASS 规则：deltaMounted \u003e= power/2）",
+                                                "messagesDispatchedAfterMount":  0,
+                                                "pumpDispatchedDuringHold":  0,
+                                                "distances":  {
+                                                                  "baselineToTopLevel":  79,
+                                                                  "baselineToMounted":  79,
+                                                                  "mountedSample1To2":  0,
+                                                                  "baselineToAfterDestroy":  83
+                                                              },
+                                                "nearRatios":  {
+                                                                   "barRegion":  0.953,
+                                                                   "topLevelRegion":  0.953,
+                                                                   "controlRegion":  0.535
+                                                               },
+                                                "calibration":  {
+                                                                    "baselineRatio":  0.487,
+                                                                    "topLevelKnownGoodRatio":  0.953,
+                                                                    "power":  0.466,
+                                                                    "powerMinRequired":  0.2,
+                                                                    "deltaMountedVsBaseline":  0.466,
+                                                                    "passThreshold":  0.233,
+                                                                    "passRule":  "deltaMounted \u003e= power / 2",
+                                                                    "knownGoodPowerRange":  "0.422~0.459（5 次实测）",
+                                                                    "knownBadDeltaRange":  "-0.003~+0.053（5 次实测）",
+                                                                    "controlRegionIsNotTheRef":  "对照区与窗口区不是同一块壁纸，nearRatio 实测漂到 0.789 =\u003e 不当参考",
+                                                                    "coverageGap":  "只测过两个端点；部分可见 / 半透明的中间态没有数据，未做量程验证",
+                                                                    "pumpCountIsNotAGate":  "ForcePaint 同步绘制 =\u003e 抽到 0 条消息属正常，不作门槛"
+                                                                },
+                                                "discriminatorHasPower":  true,
+                                                "visibleOnDesktopLayer":  true,
+                                                "deltaNearRatioVsControlAtSameInstant":  null
+                                            }
+                 },
+    "pixels":  {
+                   "placementPrecondition":  {
+                                                 "scans":  [
+                                                               "1980,120 =\u003e SHELLDLL_DefView(65836)",
+                                                               "1980,1000 =\u003e SHELLDLL_DefView(65836)",
+                                                               "120,300 =\u003e CASCADIA_HOSTING_WINDOW_CLASS(854074)",
+                                                               "240,900 =\u003e CASCADIA_HOSTING_WINDOW_CLASS(854074)",
+                                                               "1980,620 =\u003e SHELLDLL_DefView(65836)"
+                                                           ],
+                                                 "chosen":  "1980,120",
+                                                 "rule":  "窗口中心点 WindowFromPoint 命中 Progman/SHELLDLL_DefView/SysListView32 = 那块是桌面，没被别的窗口占用"
+                                             },
+                   "sampleRect":  {
+                                      "x":  1986,
+                                      "y":  126,
+                                      "w":  528,
+                                      "h":  54
+                                  },
+                   "beforeCreate":  {
+                                        "when":  "建窗之前（DefView 已强制重绘 + 抽消息 400ms）",
+                                        "sample":  "149,179,203,318,0.487,0"
+                                    },
+                   "topLevelAfterCreate":  {
+                                               "when":  "建窗之后（仍是顶层 popup，未挂桌面层）+ ForcePaint + 抽消息 400ms",
+                                               "pump":  1,
+                                               "sample":  "228,228,228,318,0.953,0",
+                                               "control":  "190,207,215,318,0.519,0"
+                                           },
+                   "controlRect":  {
+                                       "x":  1986,
+                                       "y":  220,
+                                       "w":  528,
+                                       "h":  54
+                                   },
+                   "pumpDispatchedAfterMount":  0,
+                   "referenceColor":  "button-face gray #F0F0F0 (240,240,240) +-20",
+                   "whileMounted":  {
+                                        "when":  "挂载中（持续抽消息）",
+                                        "pumpDispatched":  0,
+                                        "sample1":  "228,228,228,318,0.953,0",
+                                        "sample2":  "228,228,228,318,0.953,0",
+                                        "control":  "224,226,221,318,0.535,0"
+                                    },
+                   "holdSecondsActual":  10,
+                   "afterDestroy":  {
+                                        "when":  "unparent + destroy + 强制重绘 + 抽消息 400ms 之后",
+                                        "sample":  "232,230,226,318,0.619,0"
+                                    }
+               },
+    "humanNeeded":  [
+                        "⚠️ 前置动作：先按 **Win+D** 把所有窗口最小化、露出桌面 —— 这条窗口挂在桌面层里，",
+                        "   被别的窗口挡住就等于看不见，会把「挂载成功」误判成「被覆盖」。",
+                        "① 被覆盖：看屏幕**右上区域**是否出现了那条「M0 · A10 挂载测试条」（灰底按钮）。",
+                        "   - 本次 Z 序 = above（排在 SHELLDLL_DefView **之上**）。2026-09-22 已实测 below 看不见 ⇒ 换 above 再来。",
+                        "   - **看得见** ⇒ 判据① 成立；同时反证了「below 是被 DefView 盖住」这条推论。",
+                        "   - **仍看不见** ⇒ 说明不止 Z 序问题（渲染层还有别的机制），下一步该换 Electron 真卡片再验。",
+                        "   - 附带证据：JSON 里 `hitIsUsOrOurChild`。above 时它应变成 **true**（鼠标能打到我们）；",
+                        "     若它已是 true 而屏幕仍看不见，那就纯属渲染问题。",
+                        "③ backdrop-filter：本条测试条是系统按钮，测不了玻璃效果，需换真实卡片再验。",
+                        "★ 2026-09-22 修正（重要）：此前几次「看不见」的真因是**这条测试条自己没被绘制** ——",
+                        "   脚本全程在主线程 Start-Sleep、**从不抽消息**，而系统自带的 Button 类要靠线程消息泵",
+                        "   才能收到 WM_PAINT。所以「窗口存在、能被命中、却看不见」是必然的，与桌面层无关。",
+                        "   ⇒ 判据① 的正确状态是 **UNABLE（未测到）**，此前记成「不成立」是错的。",
+                        "   ⇒ 本次已加真消息泵；抽到的消息条数若为 0，本判据仍然判 UNABLE（不许当通过）。",
+                        "② 现在请看屏幕：本次不用靠眼睛下结论 —— 下方「判据①(机器)」一行就是机器读数。",
+                        "   若机器判 PASS 而你仍看不见（或反之）⇒ 以你为准，把这个矛盾告诉我。",
+                        "③ backdrop-filter：本条测试条是系统按钮，测不了玻璃效果，需换真实卡片再验。"
+                    ],
+    "notes":  [
+                  "挂载已保持 10 秒，请在此窗口期内看屏幕。到点自动还原。",
+                  "【已知覆盖缺口】afterDestroy 与基准 a 的通道差只用来解释 A/B 是否可信：若桌面在销毁后没被重画，会伪造出\"没变\"的假阴性。原始读数在 pixels 字段里，可自行复核。"
+              ],
+    "errors":  [
+
+               ],
+    "env":  {
+                "desktopName":  "Default",
+                "screenBeforeDpi":  {
+                                        "cx":  1707,
+                                        "cy":  1067
+                                    },
+                "screenAfterDpi":  {
+                                       "cx":  2560,
+                                       "cy":  1600
+                                   },
+                "screenChangedAfterDpiSet":  true,
+                "dpiMode":  1
+            },
+    "stage":  "complete"
+}
