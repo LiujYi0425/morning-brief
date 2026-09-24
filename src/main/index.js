@@ -45,10 +45,11 @@ import {
   sourceHealth,
   listCategories,
   listSources,
-  getCategorySources,
+  listSourceIdsOfCategory,
   setCategorySources,
   setCategoryPref,
   deleteCategory,
+  addCustomSource,
   prefByCategory,
   getMeta,
   setMeta,
@@ -56,6 +57,20 @@ import {
   upsertSources,
 } from '../store/db.js';
 import { selectByQuota, quotaOf, scopedQuota } from '../shared/quota.js';
+/* ★ 「添加源」要复用这两件**已经存在**的东西，不许另写一份：
+     · `validateExternalUrl` —— 协议白名单（安全边界，见 url-guard.js）
+     · `fetchText` / `parseFeed` —— 与正式抓取同一个抓取器与同一个解析器
+   ⚠️ 另写一份的话，"添加时验得过"与"抓取时抓得动"会各自漂移，
+      而那正是本项目反复栽过的"两份口径"。 */
+import { validateExternalUrl } from './url-guard.js';
+import { fetchText } from '../ingest/fetch-feeds.js';
+import { parseFeed } from '../ingest/feed-parse.js';
+/* ★ "这个地址能不能当源"是**纯判定**，拆在 feed-url.js 里 ——
+   留在这个文件（它 import 了 electron）就等于那段判定**永远没有断言**。
+   ⚠️ 它与 url-guard 是**两件事**，别合并：那个管"点击能不能打开"（用户路径），
+      这个管"程序能不能定期去抓"（程序自己出网的路径，边界更严：
+      本机/内网地址一律拒绝）。 */
+import { validateNewSource } from './feed-url.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -988,7 +1003,7 @@ async function bootstrap() {
     },
     getCategorySources: (id) => {
       const d = getDb();
-      const bound = getCategorySources(d, id);
+      const bound = listSourceIdsOfCategory(d, id);
       const boundSet = new Set(bound.map(Number));
       /* ★★ 清单里**只能有已绑定的源** —— 这一条是真机量出来的缺陷。
        *
@@ -1002,8 +1017,8 @@ async function bootstrap() {
        *    我是靠真机量具（量出 count=36）才看见的。
        *
        * ⇒ 口径改成：面板只列**这个类型包含的源**。
-       *    "把别的源加进来"应当是一个独立的"添加源"入口（尚未做），
-       *    不能靠"把所有源都堆在面板里"来兜底 ——
+       *    "把别的源加进来"改由面板底部的「＋ 添加源」承担（用户粘贴一个 feed 地址）——
+       *    不能靠"把所有源都堆在面板里"来兜底：
        *    宁可少一个功能，也不能让主要操作点不到。 */
       return {
         ok: true,
@@ -1033,6 +1048,108 @@ async function bootstrap() {
       console.log(`[category] 「${c ? c.name : r.categoryId}」现在包含 ${r.sourceIds.length} 个源`);
       return { ...r, categories: listCategories(d) };
     },
+
+    /* ---------------- 「＋ 添加源」（阶段 A） ----------------
+     *
+     * 用户粘贴一个 feed 地址，主进程负责**先验再存**：
+     *   ① 协议白名单（复用 url-guard —— 这是安全边界，不是可选步骤）
+     *   ② 真的抓一次、真的解析一次 —— **解析成功才入库**
+     *   ③ 地址已存在就明确告知（并区分"是预置源"还是"你加过"）
+     *
+     * ⚠️⚠️ 为什么必须"先验再存"：不验的话，用户粘一个网页地址进来，
+     *    它会被存成一个**永远失败的源**，界面上从此多一个"源异常"，
+     *    而用户不知道那是自己加错了 —— 他会以为是程序坏了。
+     *    验过之后，"加不进去"和"加进去了但抓不到"是两件能被分开的事。
+     *
+     * ⚠️ 为什么不校验"抓到的条目数与分类是否合理"：那是猜测。
+     *    只要它是一份能解析出条目的合法 feed，就如实收下。
+     */
+    addSource: async (payload) => {
+      const d = getDb();
+      const p = payload || {};
+
+      /* ① 纯判定（在可被离线穷举的 feed-url.js 里，含"不许本机/内网地址"） */
+      const v = validateNewSource(p);
+      if (!v.ok) {
+        console.log(`[source] ✗ 拒绝添加：${v.reason}`);
+        return { ok: false, reason: v.reason };
+      }
+      /* ② 再走一次协议白名单：与"点击打开"共用同一条安全边界。
+         ⚠️ 这不是重复劳动 —— feed-url 管"像不像一个源地址"，
+            url-guard 管"这个协议能不能出网"，两者谁都不能替代谁。 */
+      const ug = validateExternalUrl(v.feedUrl);
+      if (!ug.ok) {
+        console.log(`[source] ✗ 拒绝添加：${ug.reason}`);
+        return { ok: false, reason: ug.reason };
+      }
+      const url = v.feedUrl;
+      const name = v.name;
+      if (listSources(d).some((s) => s.feed_url === url)) {
+        return { ok: false, reason: '这个地址已经在库里了' };
+      }
+
+      /* ③ **先验再存**：用与正式抓取同一个 fetchText 真抓一次、真解析一次。
+         ⚠️⚠️ 少了这一步，用户粘一个网页地址进来会存成一个**永远失败的源**，
+            界面上从此多一个"源异常"，而用户不知道那是自己加错了 ——
+            他会以为程序坏了。验过之后，"加不进去"和"加进去了但抓不到"
+            是两件能被分开的事。 */
+      let parsed = null;
+      let fetchErr = null;
+      try {
+        const res = await fetchText(url);
+        if (!res.ok) fetchErr = res.error || `HTTP ${res.status}`;
+        else parsed = parseFeed(res.text, { sourceName: name });
+      } catch (err) {
+        fetchErr = (err && err.message) || String(err);
+      }
+      if (fetchErr) {
+        console.log(`[source] ✗ 试抓失败（不存入）：${url} —— ${fetchErr}`);
+        return { ok: false, reason: `抓不到这个地址：${fetchErr}` };
+      }
+      if (!parsed || !parsed.ok) {
+        const kind = (parsed && parsed.contentKind) || '认不出';
+        console.log(`[source] ✗ 不是可解析的 feed（不存入）：${url} —— ${kind}`);
+        return {
+          ok: false,
+          reason: `这个地址不是可解析的 feed（实际拿到的是「${kind}」）。只支持 RSS / Atom。`,
+        };
+      }
+
+      /* 到这里 parsed 一定是 ok 的 ⇒ format 一定有值。
+         ⚠️ 写一句 fail-fast 而不是 `parsed.format || 'rss'`：
+            兜底默认值会把"解析器改了、format 字段没了"这种**开发错误**
+            悄悄变成一个看起来正常的源，而错误的落点离现场很远。
+            （这条与 `_FALLBACK` 那个"缺省值必须站在正常那边"的教训相反 ——
+              那里缺省值是"给用户看的"，这里缺省值是"掩盖逻辑错误"。） */
+      if (!parsed.format) throw new Error('解析成功却没有 format —— parseFeed 的契约变了');
+
+      const add = addCustomSource(d, { name, feedUrl: url, kind: parsed.format }, new Date().toISOString());
+      if (!add.ok) return { ok: false, reason: add.reason, existed: add.existed };
+
+      /* ⚠️ 顺手绑到**当前类型**：用户是在某个类型的编辑面板里加的源，
+         不绑的话它会是一个"抓得到但哪个类型都不属于"的孤儿 ——
+         用户加完切回列表却什么也看不到，会以为没加上。 */
+      const catId = Number(p.categoryId);
+      if (Number.isFinite(catId)) {
+        const cur = listSourceIdsOfCategory(d, catId);
+        if (!cur.includes(add.id)) setCategorySources(d, catId, cur.concat([add.id]));
+      }
+
+      console.log(
+        `[source] ✓ 已添加自定义源「${name}」${url}（${parsed.format}，试抓拿到 ${parsed.items.length} 条）` +
+          (Number.isFinite(catId) ? `，并绑到类型 ${catId}` : ''),
+      );
+      return {
+        ok: true,
+        id: add.id,
+        name,
+        feedUrl: url,
+        format: parsed.format,
+        itemCount: parsed.items.length,
+        categories: listCategories(d),
+      };
+    },
+
     setCategoryPref: (id, pref) => {
       const d = getDb();
       const r = setCategoryPref(d, id, pref);

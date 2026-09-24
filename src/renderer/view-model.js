@@ -213,6 +213,13 @@
       editorSaving: false,
       /** 删除的二次确认：只有一个类型会处于"等你再点一次"的状态 */
       pendingDelete: null,
+      /** 「＋ 添加源」那一行是否展开（阶段 A）。
+       *  ⚠️ 它遵守同一条规矩：**界面上的每一处都由状态决定**。
+       *    输入框里**不回读用户的字**（DOM 是渲染的产物，不是输入源），
+       *    所以这里只存"开没开"和"正在验没验"。 */
+      addSourceOpen: false,
+      /** 正在验证（主进程要先抓一次 feed）——期间禁用整块，避免连点发出多次试抓 */
+      addSourceBusy: false,
 
       /* —— 模式面（用户意图） —— */
       /** 数据口径：false = 只看精选，true = 看今天全部 */
@@ -327,6 +334,11 @@
         if (!stillThere) out.editorOpen = false;
       }
     }
+    /* ⚠️ 关面板也要把「添加源」那一行收起来：下次打开时
+           一个空输入框留在那里，用户会以为"上次没加成功"。 */
+    if (!out.editorOpen) { out.addSourceOpen = false; out.addSourceBusy = false; }
+    out.addSourceOpen = !!out.addSourceOpen;
+    out.addSourceBusy = !!out.addSourceBusy;
     if (out.pendingDelete != null) out.pendingDelete = String(out.pendingDelete);
 
     return out;
@@ -522,7 +534,16 @@
     },
 
     closeEditor: function (v) {
-      return copy(v, { editorOpen: false, editorSaving: false, pendingDelete: null, editorPref: null });
+      return copy(v, {
+        editorOpen: false,
+        editorSaving: false,
+        pendingDelete: null,
+        editorPref: null,
+        /* ⚠️ 关面板也要把「添加源」那一行收起来：下次打开时
+           一个空输入框留在那里，用户会以为"上次没加成功"。 */
+        addSourceOpen: false,
+        addSourceBusy: false,
+      });
     },
 
     /** 面板数据到位（主进程回的源清单 + 该类型当前绑定的源） */
@@ -582,6 +603,18 @@
     /** 面板进入/离开"保存中"（保存期间禁用整块控件） */
     editorSaving: function (v, a) {
       return copy(v, { editorSaving: !!a.on });
+    },
+
+    /** 「＋ 添加源」：开/关那一行输入（顺带清掉上一次的忙碌态） */
+    addSourceToggle: function (v, a) {
+      if (!v.editorOpen) return v;
+      var on = a && a.on != null ? !!a.on : !v.addSourceOpen;
+      return copy(v, { addSourceOpen: on, addSourceBusy: false });
+    },
+
+    /** 正在验证一个 feed 地址（主进程要先抓一次，可能几秒） */
+    addSourceBusy: function (v, a) {
+      return copy(v, { addSourceBusy: !!a.on });
     },
 
     /**
@@ -881,6 +914,18 @@
       /* 删除：二次确认由状态承担（见 REDUCERS.askDelete 的说明） */
       deleting: v.pendingDelete != null && String(v.pendingDelete) === String(v.activeCategory),
       deleteLabel: v.pendingDelete != null && String(v.pendingDelete) === String(v.activeCategory) ? '确认删除' : '删除类型',
+      /* 「＋ 添加源」（阶段 A）：输入行自己可折叠，忙碌时整块禁用。
+         ⚠️ 忙碌态文案要说清"正在验证" —— 主进程会真的抓一次这个地址，
+            可能要几秒；不说明的话用户会以为点了没反应，然后连点。 */
+      addSource: {
+        open: !!v.addSourceOpen,
+        busy: !!v.addSourceBusy,
+        toggleLabel: v.addSourceOpen ? '收起' : '＋ 添加源',
+        placeholder: '粘贴 feed 地址（RSS/Atom）',
+        hint: v.addSourceBusy
+          ? '正在验证这个地址…（会真的抓一次，可能要几秒）'
+          : '只支持 RSS / Atom。加进来的源只属于当前这个类型。',
+      },
     };
     /* 面板的入口按钮：只为**一个真实的类型**出现（「全部」不是类型，没有可编辑的东西） */
     d.editorButton = { visible: v.activeCategory != null, open: d.editor.visible };

@@ -93,10 +93,10 @@ export const DEFAULT_SOURCES = [
      这不是 URL 写错，是产品决策。⇒ 默认关闭，AI 类内容由量子位承担。 */
   { name: '机器之心', feedUrl: 'https://www.jiqizhixin.com/rss', kind: 'rss', categories: ['AI 与算力'], enabled: false },
 
-  /* ⚠️ 36氪：URL 是**对的**，但同一个地址会**间歇性**返回 JS 安全挑战页。
-     ⇒ 默认关闭；抓取层已加"一次重试"（见 fetch-feeds.js 的 RETRY_NOT_FEED），
-        想试的用户可以打开。 */
-  { name: '36氪', feedUrl: 'https://36kr.com/feed', kind: 'rss', categories: ['行业动态'], enabled: false },
+  /* ⚠️ 36氪原来在这里（B 组，`enabled: false`）。2026-09-24 挪到下面的 C 组并
+     **默认开启** —— 它的地址是对的，返回的是间歇性的反爬页，
+     而抓取层已经为"人机验证页"写了重试一次（见 fetch-feeds.js 的 RETRY_NOT_FEED）。
+     放在 B 组（"地址写错/半死"）与事实不符，会误导下一个人别再试。 */
 
   // 境外源：本机实测 `fetch failed`（DNS/TCP 层不可达）。**有代理就打开。**
   { name: 'Hacker News', feedUrl: 'https://hnrss.org/frontpage', kind: 'rss', categories: ['开源与工程'], enabled: false },
@@ -104,11 +104,63 @@ export const DEFAULT_SOURCES = [
   { name: 'BBC World', feedUrl: 'https://feeds.bbci.co.uk/news/world/rss.xml', kind: 'rss', categories: ['国际要闻'], enabled: false },
   { name: 'BBC 中文', feedUrl: 'https://feeds.bbci.co.uk/zhongwen/simp/rss.xml', kind: 'rss', categories: ['国际要闻'], enabled: false },
 
+  /* ==================================================================
+   * C. 2026-09-24 实测补入（本轮）：官方 / 可用 feed
+   *
+   * ⚠️ 这一组**每一个地址都是我当场用项目自己的 fetchText + parseFeed 验过的**，
+   *    不是抄来的。结论写在每个源下面 —— 包括"验不过的"为什么还留着。
+   * ================================================================== */
+
+  /* ★ 澎湃新闻：官方**没有** RSS。能抓到的是 RSSHub 的公共镜像。
+     实测（同一地址连测 4 次）：rsshub.rssforever.com 3 次成功、19 条真新闻；
+     feedx.net 与 rsshub.app **4 次全部失败**（本机不可达）。
+     ⇒ 镜像可用，但要如实告诉用户："这是第三方代抓，不保证长期可用"。
+     放在 enabled:true：本机实测能抓到，而且它是用户要的来源之一。 */
+  {
+    name: '澎湃新闻',
+    feedUrl: 'https://rsshub.rssforever.com/thepaper/featured',
+    kind: 'rss',
+    categories: ['行业动态', '国际要闻'],
+  },
+
+  /* ★ 36氪：官方地址是对的，但**本机实测 4 次全部返回反爬页**（HTTP 200 + HTML）。
+     抓取层已经为它写了"人机验证页重试一次"（见 fetch-feeds.js 的 RETRY_NOT_FEED），
+     所以留着并**默认开启**：别的网络/别的时段可能就通了，
+     而失败了也只是界面上多一个"源异常"，不会污染数据。
+     ⚠️ 实测记录：`<!DOCTY...` —— 与 sources.js 里那条历史结论一致（间歇性、非地址错误）。 */
+  { name: '36氪', feedUrl: 'https://36kr.com/feed', kind: 'rss', categories: ['行业动态'] },
+
+  /* ★ 虎嗅：官网有一个**自己的** RSS（`/rss/0.xml`），是全网少数还活着的官方 feed。
+     但**本机 4 次全部超时**（与 2026-09-22 那次实测一致）。
+     ⇒ 默认 false：按本项目的既定口径，"实测通不过的源不许默认打开"
+       （默认开着但永远失败，界面会长期挂一个"源异常"，用户会以为是 bug）。
+       有代理/换网络的用户可以自己把它打开。 */
+  {
+    name: '虎嗅',
+    feedUrl: 'https://www.huxiu.com/rss/0.xml',
+    kind: 'rss',
+    categories: ['行业动态', '产品与设计'],
+    enabled: false,
+  },
+
+  /* ⚠️ 新浪财经：**查过，但没有可加的地址** —— 记在这里省得以后再查一遍。
+     实测（2026-09-24）：
+       · rss.sina.com.cn/roll/finance/hot_roll.xml  合法 XML，**0 条**
+       · rss.sina.com.cn/finance/macro.xml          合法 XML，**0 条**
+       · rss.sina.com.cn/finance/stock/company.xml  HTTP 404
+       · rss.sina.com.cn/news/marquee/ddt.xml       1 条，且**没有时间**
+       · rss.sina.com.cn/tech/rollnews.xml          15 条，最新 **2018-09-23**
+       · rss.sina.com.cn/news/china/focus15.xml     15 条，最新 **2018-09-23**
+     最后两条是关键：**新浪的 RSS 在 2018 年就停更了**（距今 7 万小时）。
+     ⇒ 加进来只会让用户看到一个"最新的新闻是 2018 年"的源。
+       要接新浪财经，正路是走 RSSHub（阶段 B），不是这些死 feed。 */
+
   // 实测已死 / 抓不到内容（留档，别浪费时间再试）
   { name: '果壳', feedUrl: 'https://www.guokr.com/rss/', kind: 'rss', categories: ['科学新知'], enabled: false },
   { name: '知乎日报', feedUrl: 'https://www.zhihu.com/rss', kind: 'rss', categories: ['行业动态'], enabled: false },
   { name: 'V2EX 最热', feedUrl: 'https://www.v2ex.com/index.xml', kind: 'atom', categories: ['开源与工程'], enabled: false },
 ];
+
 
 /**
  * 选源的六条口径（第三轮返工后补全）

@@ -21,6 +21,7 @@ const IPC = Object.freeze({
   CATEGORY_SOURCES: 'category:sources', // 读「这个类型包含哪些源」
   CATEGORY_SET_SOURCES: 'category:setSources', // 写「这个类型包含哪些源」
   CATEGORY_SET_PREF: 'category:setPref', // 喜欢 / 中性 / 不喜欢
+  SOURCE_ADD: 'source:add', // ★ 用户粘贴一个 feed 地址加源（主进程先验再存）
 
   CARD_SET_STATE: 'card:setState',
   CARD_MINIMIZE: 'card:minimize',
@@ -55,6 +56,10 @@ const api = Object.freeze({
     setCategorySources: (categoryId, sourceIds) =>
       ipcRenderer.invoke(IPC.CATEGORY_SET_SOURCES, { categoryId, sourceIds }),
     setCategoryPref: (categoryId, pref) => ipcRenderer.invoke(IPC.CATEGORY_SET_PREF, { categoryId, pref }),
+    /* ★ 添加自定义源：**异步且可能慢**（主进程要先抓一次验证），
+       ⚠️ 渲染层必须 `await` 它并处理失败 —— 失败原因是给用户看的正文
+          （"这个地址不是可解析的 feed（实际拿到的是「HTML 网页」）"）。 */
+    addSource: (payload) => ipcRenderer.invoke(IPC.SOURCE_ADD, payload),
     onUpdated: (cb) => subscribe(IPC.BRIEF_UPDATED, cb),
   }),
 

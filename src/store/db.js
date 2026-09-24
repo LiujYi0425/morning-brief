@@ -42,7 +42,7 @@ import { canonicalizeUrl, dedupeKey } from '../ingest/urls.js';
 import { DEFAULT_SOURCES, DEFAULT_CATEGORIES } from '../ingest/sources.js';
 
 /** schema 版本。改结构时 +1，并在 migrate() 里加一段 —— 否则老库会静默少字段 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const DDL = `
 PRAGMA journal_mode = WAL;
@@ -57,9 +57,20 @@ CREATE TABLE IF NOT EXISTS source (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   name        TEXT    NOT NULL,
   feed_url    TEXT    NOT NULL UNIQUE,
-  kind        TEXT    NOT NULL DEFAULT 'rss',      -- rss | atom | api
+  kind        TEXT    NOT NULL DEFAULT 'rss',      -- rss | atom | json
   enabled     INTEGER NOT NULL DEFAULT 1,
-  created_at  TEXT    NOT NULL
+  created_at  TEXT    NOT NULL,
+  -- ★ v3：这个源是谁放进来的。
+  --   'preset' = 代码里的预置清单（src/ingest/sources.js）
+  --   'custom' = 用户自己加的（粘贴一个 feed 地址）
+  --   ⚠️ 这一列是 v3 才加的，它解决的是一处会**真丢用户数据**的口径问题：
+  --      upsertSources 原先会把"不在预置清单里的源"一律停用 ——
+  --      那是给"我从代码里删掉一个源"设计的，但它对**用户自己加的源**
+  --      一视同仁 ⇒ 用户今天加一个源，下次抓取就被静默关掉。
+  --      现在退役只针对 origin='preset' 的源。
+  --   ⚠️ 默认值给 'custom' 而不是 'preset'：漏标的行宁可**不动它**
+  --      （少停用一个源是小事，把用户加的源关掉是丢数据）。
+  origin      TEXT    NOT NULL DEFAULT 'custom'
 );
 
 CREATE TABLE IF NOT EXISTS source_state (
@@ -184,10 +195,54 @@ export async function openDb(file) {
     migrate(db, Number(cur));
     setMeta(db, 'schema_version', String(SCHEMA_VERSION));
   }
-  /* ★ 播种必须在**版本检查之后**：老库要先补上 `pref` 列才能被使用，
-     而迁移本身要读 `category` 表；映射表也要先经过 DDL。 */
-  seedSourceCategories(db, new Date().toISOString(), { fresh: isNewFile });
+  /* ★★ 无论版本号如何，都再走一遍**结构性补齐**（幂等）。
+   *
+   * ⚠️ 为什么要多这一步（这是被一条"造老库"的断言逼出来的）：
+   *    `migrate` 只在**版本号不匹配**时才跑，而"列缺失但版本号对/没有版本号"
+   *    是真实存在的状态 —— 最典型的一种是**版本号那一行丢了**
+   *    （手改过库、或者上一次写入被中断）。那种库会被当成"全新库"，
+   *    于是 `CREATE TABLE IF NOT EXISTS` 因为表已存在而跳过、
+   *    迁移也不跑 ⇒ 表里**永远少一列**，之后每一次查询都报
+   *    "no such column" —— 而错误信息完全指不到"少了哪一步"。
+   *    ⇒ 补齐是按"列在不在"判断的，重跑无害（见 migrate 的说明）。 */
+  ensureColumns(db);
+  /* ⚠️⚠️ 这里**不再播种**（原来是有的，本次删掉）。
+   *
+   *    原因是它必然会违反"用户改过的不被覆盖"：`openDb` 拿不到"哪些源是新加进来的"
+   *    这个信息，只能按整个预置清单播一遍 ⇒ 用户把某个源从**所有**类型里取消
+   *    （映射表里一行都不剩）之后，下一次打开库它又被绑回来。
+   *    实测：老库升级那条断言里，用户整组取消的 7 个源全部复活。
+   *
+   *    ⇒ 播种改由 `runIngest` 在**登记新源的那一刻**精确执行
+   *      （它手上有 `upsertSources` 返回的新增名单）。
+   *      新库、老库、新加的预置源三条路径都在那里被覆盖到。 */
   return db;
+}
+
+/**
+ * 结构性补齐：把"当前 schema 该有的列"逐条确认一遍（幂等）。
+ *
+ * ⚠️ 与 `migrate` 的分工：`migrate` 负责**逐版推进时的一次性动作**
+ *    （比如"把历史条目的标签回填一次"），用版本号判断该不该做；
+ *    本函数只做**幂等的列补齐**，不看版本号 —— 因为"表少一列"这件事
+ *    与版本号没有必然联系。
+ * ⚠️ 新增列时**两处都要加**：DDL 里给新库、这里给老库
+ *    （漏了这里，老库就会在第一次查询时报 "no such column"）。
+ */
+function ensureColumns(db) {
+  const hasColumn = (table, col) =>
+    db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+
+  if (!hasColumn('category', 'pref')) {
+    db.exec('ALTER TABLE category ADD COLUMN pref INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!hasColumn('source', 'origin')) {
+    /* ⚠️ 默认值给 'custom'（保守），紧接着**必须**把既有行标成 'preset' ——
+       这个库里现存的行全是预置源。少写这一步的后果见 migrate 里的说明。 */
+    db.exec("ALTER TABLE source ADD COLUMN origin TEXT NOT NULL DEFAULT 'custom'");
+    const n = db.prepare("UPDATE source SET origin = 'preset' WHERE origin IS NULL OR origin = 'custom'").run();
+    console.log(`[db] 已补上 source.origin 列，并把 ${n.changes} 个既有源标记为「预置」`);
+  }
 }
 
 /**
@@ -240,6 +295,24 @@ function migrate(db, from) {
       }
     }
   }
+
+  /* ---- v2 → v3：源要能区分"预置"与"用户自己加的" ----
+   *
+   * ⚠️ 这一列解决一处**真会丢用户数据**的口径问题：`upsertSources` 原先
+   *    把"不在预置清单里的源"一律停用 —— 那是为"我从代码里删掉一个源"设计的，
+   *    但它对用户自己加的源一视同仁 ⇒ 用户今天加、下次抓取就被静默关掉。
+   *
+   * ⚠️ 迁移把**所有现存行**标成 'preset'：这次升级之前，库里不可能有
+   *    用户自己加的源（那时候根本没有"加源"这个入口），所以这个判断是确定的。
+   *    不这么写的话（比如用列默认值 'custom'），老库里的预置源会全部
+   *    被当成用户源 ⇒ 代码里删源的那条退役逻辑**永久失效**。 */
+  if (from < 3) {
+    if (!hasColumn('source', 'origin')) {
+      db.exec("ALTER TABLE source ADD COLUMN origin TEXT NOT NULL DEFAULT 'custom'");
+    }
+    const n = db.prepare("UPDATE source SET origin = 'preset' WHERE origin IS NULL OR origin = 'custom'").run();
+    console.log(`[db] 已把 ${n.changes} 个既有源标记为「预置」（升级前不存在用户自加的源）`);
+  }
   console.log(`[db] schema ${from} → ${SCHEMA_VERSION} 迁移完成（数据未删除）`);
 }
 
@@ -265,21 +338,36 @@ function migrate(db, from) {
  *      还会再播一次（`fresh` 为真时允许），于是新库的初始映射是完整的。
  *
  *   ③ **只读不写**：播种永远不删、不覆盖任何已有行。
+ *
+ *   ④ ★★ **该不该播，由调用方用"新增名单"说清楚**（`opts.only`）。
+ *
+ *      这里有一段我连错三次的历史，写下来免得下一个人再走一遍。
+ *      要守的性质有两条，而且**互相拉扯**：
+ *        ① 代码里**新加**一个预置源 ⇒ 它得按清单拿到类型绑定（否则条目
+ *           一条都不打标签、按类型筛选完全看不到，而日志里一切正常）
+ *        ② 用户把某个源从所有类型里**全取消**之后 ⇒ 绝不能在下次抓取时加回来
+ *      麻烦在于这两种状态在库里**长得一模一样**：源存在、映射表里没有它的行。
+ *      试过的三种判据：
+ *        · "映射表里没有它的行就播" ⇒ 违反②（实测：用户整组取消的 7 个源全被绑回来）
+ *        · "有 source_state 行就不播" ⇒ 违反①（`upsertSources` 先建 state 行、
+ *          播种在后 ⇒ 新库一个源都不播，筛选栏空荡荡）
+ *        · **只播"这次新增的"** ⇒ 两条都对，而且判据是**显式**的
+ *      ⇒ 所以 `runIngest` 把 `upsertSources` 返回的 `newFeedUrls` 传进来；
+ *        本函数只保留"已经有绑定的源绝不碰"这一道兜底。
+ *
+ * @param {object} db
+ * @param {string} nowIso
+ * @param {object} [opts]
+ * @param {Array<object>} [opts.only] 只播这几个源（按 feedUrl 匹配）。
+ *   缺省 = 按整个预置清单播一遍（`openDb` 的自举路径用）。
  */
 export function seedSourceCategories(db, nowIso, opts = {}) {
-  /* ⚠️ `fresh` 的判据是"这次调用之前 `source_category` 是空的"，
-     而不是"文件是新建的" —— 新库第一次打开时源表通常还是空的，
-     真正能播下去的时刻是**第一次抓取之后**（同一个新建库、但已经不是空表）。 */
-  const already = db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
-  const seeded = getMeta(db, 'source_category_seeded');
-  if (seeded === '1') return { seeded: 0, skipped: 'already-seeded' };
-  if (already > 0 && !opts.fresh) {
-    /* 有映射、但没有播种标记 ⇒ 这是一个**升级上来的老库**
-       （v1 → v2 的迁移刚建好映射表并回填过）。
-       ⇒ 只补标记，**绝不重播**：重播会把用户已经改过的映射覆盖掉。 */
-    setMeta(db, 'source_category_seeded', '1');
-    return { seeded: 0, skipped: 'legacy-keep-user' };
-  }
+  /* ⚠️⚠️ `only` **必填**（空数组也算"不播"）。这里不提供"缺省播全部"的路径 ——
+   *    那正是原来 `openDb` 那条自举播种的做法，而它必然会把用户取消掉的源加回来
+   *    （`openDb` 不知道哪些源是新加进来的，只能整份清单重播一遍）。
+   *    ⇒ 播种的**唯一**入口是 `runIngest` 里"登记了新源"那一次。 */
+  const pool = Array.isArray(opts.only) ? opts.only : [];
+  if (!pool.length) return { seeded: 0, skipped: 'no-targets' };
 
   const cats = new Map();
   for (const c of listCategories(db)) cats.set(c.name, c.id);
@@ -293,21 +381,43 @@ export function seedSourceCategories(db, nowIso, opts = {}) {
   const srcIds = new Map();
   for (const s of listSources(db)) srcIds.set(s.feed_url, s.id);
 
+  /* ★ 已经有绑定的源 id：那份映射就是"用户当前的态度"，一行都不许动。 */
+  const hasBinding = new Set(
+    db.prepare('SELECT DISTINCT source_id FROM source_category').all().map((r) => Number(r.source_id)),
+  );
+  /* ★★ 用户**主动摘干净**过的源（`setCategorySources` 写下记号的那些）。
+   *
+   * ⚠️ 为什么需要它：播种要区分"从没被播过"（该播）与"用户摘干净了"（别加回来），
+   *    而这两种状态在数据里长得一模一样。记号是唯一能把它们分开的东西 ——
+   *    没有它，代码里新加的源与升级留下的孤儿就永远播不上
+   *    （真机上撞到过：新加的「澎湃新闻」20 条条目一条标签都没打）。 */
+  const removedByUser = new Set(
+    db
+      .prepare("SELECT key FROM meta WHERE key LIKE 'unbound_by_user:%'")
+      .all()
+      .map((r) => Number(String(r.key).slice('unbound_by_user:'.length)))
+      .filter((n) => Number.isFinite(n)),
+  );
+
   const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
   let seededCount = 0;
   let everythingResolvable = true;
-  for (const s of DEFAULT_SOURCES) {
+  for (const s of pool) {
     const sid = srcIds.get(s.feedUrl);
     if (sid == null) { everythingResolvable = false; continue; } // 这个源还没登记，下次再播
+    if (hasBinding.has(sid)) continue; // ★ 已经有绑定：用户的态度，绝不动
+    if (removedByUser.has(sid)) continue; // ★ 用户把它摘干净过：绝不加回来
+    let allCatsKnown = true;
     for (const name of s.categories || []) {
       const cid = cats.get(name);
-      if (cid == null) { everythingResolvable = false; continue; }
+      if (cid == null) { allCatsKnown = false; everythingResolvable = false; continue; }
       seededCount += Number(ins.run(sid, cid).changes);
     }
+    /* 类别名解析不出来时**不记** —— 否则它会带着"半套绑定"被当成已完成，
+       剩下的再也补不上。 */
+    if (allCatsKnown) hasBinding.add(sid);
   }
-  /* ⚠️ **只有全部播下去之后才写标记**。否则第一次抓取之后那次机会就没了 ——
-     而那时映射表还是空的，用户会看到一个"什么源都没勾"的空筛选栏。 */
-  if (everythingResolvable) setMeta(db, 'source_category_seeded', '1');
+  setMeta(db, 'source_category_seeded', '1');
   return { seeded: seededCount, complete: everythingResolvable };
 }
 
@@ -345,19 +455,30 @@ export function setMeta(db, key, value) {
  */
 export function upsertSources(db, sources, nowIso) {
   const ins = db.prepare(
-    `INSERT INTO source (name, feed_url, kind, enabled, created_at) VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO source (name, feed_url, kind, enabled, created_at, origin) VALUES (?, ?, ?, ?, ?, 'preset')
      ON CONFLICT(feed_url) DO UPDATE SET
        name    = excluded.name,
        kind    = excluded.kind,
-       enabled = excluded.enabled`,
+       enabled = excluded.enabled,
+       /* ★ 一个源只要出现在预置清单里，它就是预置源。
+          这条 UPDATE 顺手修掉一种历史遗留：老库里可能有行是
+          origin='custom'（v3 迁移前的默认值），而它其实来自预置清单。 */
+       origin  = 'preset'`,
   );
   let added = 0;
+  /** ★ 这次**新登记**的源（按 feedUrl）。调用方拿它决定"给谁播类型映射" ——
+   *  这是"新加的源"与"用户改动过的老源"之间**唯一可靠**的区分方式
+   *  （两者在库里长得一模一样，见 fetch-feeds.js 里那段说明）。 */
+  const newFeedUrls = [];
   for (const s of sources) {
     const before = db.prepare('SELECT id FROM source WHERE feed_url = ?').get(s.feedUrl);
     // 未显式声明就是启用（绝大多数源如此）
     const enabled = s.enabled === false ? 0 : 1;
     ins.run(s.name, s.feedUrl, s.kind || 'rss', enabled, nowIso);
-    if (!before) added += 1;
+    if (!before) {
+      added += 1;
+      newFeedUrls.push(s.feedUrl);
+    }
     const row = db.prepare('SELECT id FROM source WHERE feed_url = ?').get(s.feedUrl);
     db.prepare('INSERT INTO source_state (source_id) VALUES (?) ON CONFLICT(source_id) DO NOTHING').run(row.id);
   }
@@ -369,23 +490,75 @@ export function upsertSources(db, sources, nowIso) {
    *     界面顶部因此长期挂着"5 个源异常"。
    * 根因：`upsertSources` 只做"加了什么"，从来不处理"去掉了什么" ——
    *     老库里的行原样留着、`enabled` 仍是 1，于是代码改了等于没改。
-   *     这与"注释说改了、代码没改"是同一类病：**改动没有真正落地**。
    *
-   * 处置：清单是**唯一**的源真相（这一阶段没有"用户自己加源"的入口），
-   *     所以不在清单里的源一律停用。**不删行** —— 删了会连带删掉它的抓取历史
-   *     （source_state、以及将来可能用到的 per-source 统计），而停用是可逆的。
+   * ⚠️⚠️ **只管预置源**（v3 的修正，这一条是真会丢用户数据的边界）：
+   *    退役逻辑是给"我从代码里删掉一个源"设计的，而用户自己加的源
+   *    **天生就不在预置清单里** —— 一视同仁的话，
+   *    用户今天粘一个 feed 地址进来、下次抓取就被静默关掉。
+   *    用户侧的观感是"我加的源过一天自己没了"，而且**没有任何提示**。
+   *    ⇒ 判据从"不在清单里"改成"不在清单里 **且** origin='preset'"。
+   *
+   * **不删行** —— 删了会连带删掉它的抓取历史（source_state），而停用是可逆的。
    *
    * @returns {{added:number, retired:string[]}}
    */
   const wanted = new Set(sources.map((s) => s.feedUrl));
   const retired = [];
-  for (const row of db.prepare('SELECT id, name, feed_url, enabled FROM source').all()) {
+  for (const row of db.prepare('SELECT id, name, feed_url, enabled, origin FROM source').all()) {
     if (wanted.has(row.feed_url)) continue;
+    if (row.origin !== 'preset') continue; // ★ 用户自己加的源，永不因为清单而停用
     if (!row.enabled) continue; // 已经停用，不用再报一次
     db.prepare('UPDATE source SET enabled = 0 WHERE id = ?').run(row.id);
     retired.push(row.name);
   }
-  return { added, retired };
+  return { added, retired, newFeedUrls };
+}
+
+/**
+ * 加一个**用户自己的**源（origin='custom'）。
+ *
+ * ⚠️ 与 `upsertSources` 分开写是刻意的，理由有两条且都很实际：
+ *   ① 它**不参与**"不在清单里就停用"那套口径（见上面的说明）；
+ *   ② 它不该覆盖同 URL 的预置源。用户把一个预置源地址粘进"添加源"时，
+ *      正确的行为是告诉他"库里已经有了"，而不是把它改写成 custom
+ *      —— 那样这个源从此就脱离了预置清单的管理（代码里以后删它也不生效了）。
+ *
+ * @returns {{ok:boolean, id?:number, existed?:object, reason?:string}}
+ */
+export function addCustomSource(db, { name, feedUrl, kind }, nowIso) {
+  const url = String(feedUrl || '').trim();
+  const cleanName = String(name || '').trim().slice(0, 24);
+  if (!url) return { ok: false, reason: 'feed 地址不能为空' };
+  if (!cleanName) return { ok: false, reason: '源名称不能为空' };
+
+  const existing = db.prepare('SELECT id, name, feed_url, origin FROM source WHERE feed_url = ?').get(url);
+  if (existing) {
+    return {
+      ok: false,
+      existed: { id: Number(existing.id), name: existing.name, origin: existing.origin },
+      reason: `这个地址已经在库里了（${existing.name}${existing.origin === 'preset' ? '，是预置源' : ''}）`,
+    };
+  }
+
+  const r = db
+    .prepare("INSERT INTO source (name, feed_url, kind, enabled, created_at, origin) VALUES (?, ?, ?, 1, ?, 'custom')")
+    .run(cleanName, url, kind || 'rss', nowIso);
+  const id = Number(r.lastInsertRowid);
+  db.prepare('INSERT INTO source_state (source_id) VALUES (?) ON CONFLICT(source_id) DO NOTHING').run(id);
+  return { ok: true, id };
+}
+
+/** 删掉一个**用户自己的**源（预置源不许删 —— 删了下次抓取又被清单加回来，制造"删不掉"的假象） */
+export function deleteCustomSource(db, sourceId) {
+  const id = Number(sourceId);
+  if (!Number.isFinite(id)) return { ok: false, reason: '源 id 不是数字' };
+  const row = db.prepare('SELECT id, name, origin FROM source WHERE id = ?').get(id);
+  if (!row) return { ok: false, reason: '这个源不存在' };
+  if (row.origin !== 'custom') {
+    return { ok: false, reason: `「${row.name}」是预置源，不能删（在预置清单里改）` };
+  }
+  db.prepare('DELETE FROM source WHERE id = ?').run(id);
+  return { ok: true, name: row.name };
 }
 
 export function listSources(db, onlyEnabled = false) {
@@ -699,14 +872,88 @@ export function deleteCategory(db, categoryId) {
   return { ok: true, removed: { id, name: row.name, tags: tagged, bindings: bound }, itemsKept: itemsAfter };
 }
 
-/** 某个类别绑定了哪些源 id（用户可编辑的那份映射） */
-export function getCategorySources(db, categoryId) {
+/**
+ * 某个**类别**绑定了哪些源 id（用户可编辑的那份映射）。
+ *
+ * ⚠️ 名字故意长：第一版叫 `getCategorySources(db, categoryId)`，
+ *    我在一条断言里把**源 id** 传了进去，得到的是一句无声的 `[]` ——
+ *    排查花了很久（数据明明在库里、裸 SQL 也查得到）。
+ *    ⇒ 名字里写清"入参是类别、出参是源 id"，这种错就没法悄悄发生。
+ */
+export function listSourceIdsOfCategory(db, categoryId) {
   const id = Number(categoryId);
   if (!Number.isFinite(id)) return [];
   return db
     .prepare('SELECT source_id FROM source_category WHERE category_id = ? ORDER BY source_id')
     .all(id)
     .map((r) => Number(r.source_id));
+}
+
+/** 某个**源**绑定了哪些类别 id（上面那个函数的反方向；名字写清方向，别再传错） */
+export function listCategoryIdsOfSource(db, sourceId) {
+  const sid = Number(sourceId);
+  if (!Number.isFinite(sid)) return [];
+  return db
+    .prepare('SELECT category_id FROM source_category WHERE source_id = ? ORDER BY category_id')
+    .all(sid)
+    .map((r) => Number(r.category_id));
+}
+
+/**
+ * 给一个源**已有的条目**补上类型标签（按它当前的映射关系）。
+ *
+ * ---------------------------------------------------------------------
+ * 为什么需要它，以及它为什么**不能**做成"每次抓取都跑"
+ * ---------------------------------------------------------------------
+ * 标签（`item_category`）是**抓取那一刻**按当时的映射写下的 —— 那是有意的：
+ * 它是"当时的事实"，跟着映射漂移就等于伪造历史。
+ * 但代码升级会留下一种**孤儿**：某个源被旧版本登记过、却从来没被播过映射
+ * （本次真机上的「澎湃新闻」就是），于是它已有的条目**一条标签都没有** ——
+ * 按类型筛选时完全看不到（用户侧就是"这个源的内容不见了"，
+ * 而"全部"里明明有它）。⇒ 绑定刚补上的那一次，要把已有条目也补上标签。
+ *
+ * ⚠️⚠️ 必须带 `meta` 记号（调用方传 key），**只做一次**：
+ *    否则用户手动把某个源从类型里摘掉之后，下一次抓取又被补回来 ——
+ *    那正是"用户改过的被覆盖"。
+ * ⚠️ 只**新增**标签（`INSERT OR IGNORE`），绝不删任何已有标签。
+ *
+ * @returns {{tagged:number}} 本次写入的标签行数
+ */
+export function tagExistingItemsOfSource(db, sourceId, markerKey) {
+  const sid = Number(sourceId);
+  if (!Number.isFinite(sid)) return { tagged: 0 };
+  if (markerKey && getMeta(db, markerKey) === '1') return { tagged: 0 };
+  const cats = listCategoryIdsOfSource(db, sid);
+  let tagged = 0;
+  if (cats.length) {
+    /* ⚠️ 判据是"这个源的条目**一条标签都没有**" —— 只有那种情况才补。
+       已经有一部分标签的源不碰：那说明标签是按当时自己的映射写的，
+       而用户可能**故意**去掉了某几条的标签（界面上的取消勾选），
+       一律重打就等于把用户的改动盖掉。 */
+    const orphan = Number(
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM item i WHERE i.source_id = ?
+           AND NOT EXISTS (SELECT 1 FROM item_category ic WHERE ic.item_id = i.id)`,
+        )
+        .get(sid).n,
+    );
+    if (orphan === 0) {
+      if (markerKey) setMeta(db, markerKey, '1'); // 没有需要补的 ⇒ 也记账，别每次都查
+      return { tagged: 0 };
+    }
+    const r = db
+      .prepare(
+        `INSERT OR IGNORE INTO item_category (item_id, category_id)
+         SELECT i.id, sc.category_id FROM item i
+         JOIN source_category sc ON sc.source_id = i.source_id
+         WHERE i.source_id = ?`,
+      )
+      .run(sid);
+    tagged = Number(r.changes);
+  }
+  if (markerKey) setMeta(db, markerKey, '1');
+  return { tagged };
 }
 
 /**
@@ -732,12 +979,32 @@ export function setCategorySources(db, categoryId, sourceIds) {
   const known = new Set(listSources(db).map((s) => Number(s.id)));
   /* 只接受库里真实存在的源 id：界面上传错一个 id 不该变成一行悬挂绑定 */
   const clean = [...new Set(list.map(Number).filter((n) => Number.isFinite(n) && known.has(n)))];
+  /* 改动**之前**这个类型绑了谁 —— 用来判断"有没有源被摘干净了" */
+  const beforeBound = db
+    .prepare('SELECT source_id FROM source_category WHERE category_id = ?')
+    .all(id)
+    .map((r) => Number(r.source_id));
 
   db.exec('BEGIN');
   try {
     db.prepare('DELETE FROM source_category WHERE category_id = ?').run(id);
     const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
     for (const sid of clean) ins.run(sid, id);
+    /* ★★ 被摘掉的源里，哪些**从此一个类型都不属于**了 ⇒ 给它留个记号。
+     *
+     * ⚠️⚠️ 这一条是"两份口径"交界处的关键：播种必须能区分
+     *    · "这个源从来没被播过"（该播：代码里新加的源、升级留下的孤儿）
+     *    · "用户主动把它摘干净了"（绝不加回来）
+     *    而这两种状态在数据里**长得一模一样**（源存在、映射表里没有它的行）。
+     * ⇒ 用这个记号把后者钉住。记号一旦写下**不再抹掉**：
+     *    用户以后重新勾上也无害（那时它有绑定了，播种本来就不碰它）。 */
+    for (const sid of beforeBound) {
+      if (clean.includes(sid)) continue;
+      const stillBound = Number(
+        db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE source_id = ?').get(sid).n,
+      );
+      if (stillBound === 0) setMeta(db, `unbound_by_user:${sid}`, '1');
+    }
     db.exec('COMMIT');
   } catch (err) {
     try {

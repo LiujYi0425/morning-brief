@@ -482,7 +482,57 @@
 
     frag.appendChild(el('div', 'catpanel__hint', ed.prefHint));
 
-    /* —— 第 4 行：删除 / 关闭 ——
+    /* —— 第 3.5 行：「＋ 添加源」（阶段 A）——
+     *
+     * ⚠️ 这一行是**必需**的，不是锦上添花：面板里的源清单只列"这个类型包含的源"
+     *    （列全部会把按钮挤出可视区，见 listSourceIdsOfCategory 那段注释），
+     *    所以没有它，用户就只能取消勾选、永远加不进新的源。
+     *
+     * ⚠️ 输入框的**内容不回读**：提交时现取 `input.value` 一次就走，
+     *    不进状态机。理由见 view-model.js 顶部那条规矩 ——
+     *    DOM 是渲染的产物，把它当输入源就等于让界面变成第二份真相。
+     *    （"正在验证"这个**布尔量**进状态机，因为它是界面必须显示的东西。） */
+    if (ed.addSource.open) {
+      var addRow = el('div', 'catpanel__row catpanel__add');
+      /* ⚠️ **按顺序 append**，不用 `insertBefore`：
+         逻辑上"名字在前、地址在后"，那就先建名字再建地址。
+         用 insertBefore 多绕一步，而且装置的极简 DOM 里没有那个方法 ——
+         它在真机上能跑、离线跑不了，等于这段代码**没有断言**。 */
+      var nameInput = el('input', 'catpanel__input catpanel__input--name');
+      nameInput.type = 'text';
+      nameInput.maxLength = 12;
+      nameInput.placeholder = '名字';
+      nameInput.setAttribute('aria-label', '源名称');
+      nameInput.disabled = ed.addSource.busy;
+      addRow.appendChild(nameInput);
+
+      var urlInput = el('input', 'catpanel__input');
+      urlInput.type = 'text';
+      urlInput.placeholder = ed.addSource.placeholder;
+      urlInput.setAttribute('aria-label', 'feed 地址');
+      urlInput.disabled = ed.addSource.busy;
+      addRow.appendChild(urlInput);
+
+      var goBtn = el('button', 'btn', ed.addSource.busy ? '验证中…' : '添加');
+      goBtn.type = 'button';
+      goBtn.disabled = ed.addSource.busy;
+      goBtn.addEventListener('click', function () { submitAddSource(nameInput.value, urlInput.value); });
+      addRow.appendChild(goBtn);
+      frag.appendChild(addRow);
+      frag.appendChild(el('div', 'catpanel__hint', ed.addSource.hint));
+
+      var submitOnEnter = function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); submitAddSource(nameInput.value, urlInput.value); }
+        else if (e.key === 'Escape') { e.preventDefault(); dispatch({ type: 'addSourceToggle', on: false }); }
+        e.stopPropagation(); // 别让顶栏/文档级的快捷键抢走按键
+      };
+      urlInput.addEventListener('keydown', submitOnEnter);
+      nameInput.addEventListener('keydown', submitOnEnter);
+      /* 聚焦**地址**而不是名字：用户手里有的是地址，名字可以随口起一个 */
+      setTimeout(function () { urlInput.focus(); }, 0);
+    }
+
+    /* —— 第 4 行：删除 / 添加源 / 关闭 ——
        ⚠️ 删除是**两步**（第一次点变成「确认删除」，再点才真的删）。
           理由见 view-model.js 的 askDelete：一次点击就删掉的话，
           误触的代价是"我辛苦分的类没了"，而这里没有撤销。 */
@@ -501,6 +551,16 @@
     });
     foot.appendChild(del);
     foot.appendChild(el('span', 'catpanel__spacer'));
+    /* 「＋ 添加源」：与「删除类型」分居两端，中间留白 —— 破坏性动作与新增动作
+       不挨着（这一条与面板里其它按钮的排布规矩一致）。 */
+    var addBtn = el('button', 'btn', ed.addSource.toggleLabel);
+    addBtn.type = 'button';
+    addBtn.disabled = !!ed.saving || ed.addSource.busy;
+    addBtn.title = '粘贴一个 RSS / Atom 地址，加到这个类型里';
+    addBtn.addEventListener('click', function () {
+      dispatch({ type: 'addSourceToggle' });
+    });
+    foot.appendChild(addBtn);
     var close = el('button', 'btn', '关闭');
     close.type = 'button';
     close.addEventListener('click', function () { closeEditor(); });
@@ -984,6 +1044,48 @@
       dispatch({ type: 'editorSaving', on: false });
       api.log('[card] ❌ 设置偏好抛错：' + (err && err.message));
       toast('设置失败：' + (err && err.message));
+    }
+  }
+
+  /**
+   * 「＋ 添加源」提交（阶段 A）。
+   *
+   * 主进程负责"先验再存"：它会用**与正式抓取同一个** fetchText 真抓一次，
+   * 解析成功才入库。所以这里要等，而且要**把失败原因说出来** ——
+   * 失败原因是给用户看的正文（"实际拿到的是「HTML 网页」"），
+   * 只弹一句"添加失败"的话，用户不知道该改什么。
+   *
+   * ⚠️ 忙碌期间整块禁用（`addSourceBusy`）：一次点击就是一次真抓，
+   *    连点会对着同一个地址打好几遍 —— 与"刷新"那条守卫同一个道理。
+   */
+  async function submitAddSource(name, feedUrl) {
+    var ed = VM.derive(view).editor;
+    if (!ed.visible || ed.saving || ed.addSource.busy) return;
+    var url = String(feedUrl || '').trim();
+    var nm = String(name || '').trim();
+    if (!url) { toast('先粘贴一个 feed 地址'); return; }
+    if (!nm) { toast('给它起个名字吧'); return; }
+
+    dispatch({ type: 'addSourceBusy', on: true });
+    api.log('[card] 添加源：' + nm + ' ' + url.slice(0, 70));
+    try {
+      var r = await api.brief.addSource({ name: nm, feedUrl: url, categoryId: ed.categoryId });
+      if (!r || !r.ok) {
+        dispatch({ type: 'addSourceBusy', on: false });
+        toast((r && r.reason) || '添加失败');
+        api.log('[card] ❌ 添加源被拒：' + ((r && r.reason) || '未知原因'));
+        return;
+      }
+      /* 成功：收起输入行、把源清单重新读一遍（新源已经绑到当前类型） */
+      dispatch({ type: 'addSourceToggle', on: false });
+      dispatch({ type: 'categories', list: r.categories || VM.derive(view).categories });
+      toast('已添加「' + r.name + '」（' + (r.itemCount || 0) + ' 条）');
+      api.log('[card] ✓ 添加源成功：' + r.name + ' ' + r.feedUrl + ' ' + r.format);
+      loadEditorData(ed.categoryId);
+    } catch (err) {
+      dispatch({ type: 'addSourceBusy', on: false });
+      api.log('[card] ❌ 添加源抛错：' + (err && err.message));
+      toast('添加失败：' + (err && err.message));
     }
   }
 

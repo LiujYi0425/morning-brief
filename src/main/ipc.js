@@ -30,6 +30,8 @@ import { validateExternalUrl } from './url-guard.js';
  * @param {(id:number) => object} deps.getCategorySources
  * @param {(id:number, sourceIds:number[]) => object} deps.setCategorySources
  * @param {(id:number, pref:number) => object} deps.setCategoryPref
+ * @param {(payload:{name:string, feedUrl:string, categoryId?:number}) => Promise<object>} deps.addSource
+ *   用户粘贴一个 feed 地址加源。**异步**：主进程要先抓一次验证。
  * @param {(next:string) => void} deps.setCardState
  * @param {() => void} deps.minimize
  * @param {(p:object) => object} deps.drag
@@ -56,6 +58,14 @@ export function registerIpc(deps) {
   ipcMain.handle('category:setPref', (_e, payload) => {
     const p = payload || {};
     return deps.setCategoryPref(p.categoryId, p.pref);
+  });
+  /* ★ 添加自定义源（阶段 A）。**异步**：主进程要先真的抓一次、解析一次
+     （"先验再存"，理由见 main/index.js 里那段说明），
+     所以渲染层必须等这个 promise —— 这一点在 preload 的注释里也写了。 */
+  ipcMain.handle('source:add', async (_e, payload) => {
+    const p = payload || {};
+    log(`[ipc] 添加源请求：${p.name || '(无名)'} ${String(p.feedUrl || '').slice(0, 80)}`);
+    return deps.addSource(p);
   });
   /* ⚠️ 手动刷新要**带上当前选中的类型**（本次改动）：
       在此之前 `brief:ingest` 只收一个 trigger，于是"我只想看安全类"
@@ -133,6 +143,7 @@ export function checkChannelParity(rendererChannels) {
     'category:sources',
     'category:setSources',
     'category:setPref',
+    'source:add',
     'card:setState',
     'card:minimize',
     'card:drag',

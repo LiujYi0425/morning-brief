@@ -30,7 +30,9 @@ import {
   listSources,
   listEnabledSourcesOfCategories,
   listCategories,
-  getCategorySources,
+  listSourceIdsOfCategory,
+  listCategoryIdsOfSource,
+  tagExistingItemsOfSource,
   seedSourceCategories,
   recordSourceResult,
   startRun,
@@ -144,20 +146,70 @@ export async function runIngest(opts) {
       if (sync.retired.length) {
         log(`以下 ${sync.retired.length} 个源已从预置清单移除，本次停用：${sync.retired.join(' / ')}`);
       }
+      /* ★★ 给两类源播映射。这一段是"预置清单与用户编辑两份口径"的交界处，
+       *    我在这里连错四次，每次都换一种失败方式，所以把结论写死在这里。
+       *
+       *   要守的性质有两条，而且它们**互相拉扯**：
+       *     ① 代码里**新加**一个预置源 ⇒ 它得按清单拿到类型绑定，
+       *        否则它的条目一条都不打标签、按类型筛选完全看不到
+       *        （而日志里一切正常，只有查库才发现）。
+       *     ② 用户把某个源从某个类型里摘掉之后 ⇒ 绝不能自己加回来。
+       *
+       *   ⇒ 播的名单 = **这次新登记的源** ∪ **一条绑定都没有的预置源**。
+       *
+       *   为什么必须有第二项（真机实测撞到的）：升级路径上会留下"孤儿"——
+       *     某个源由**旧版本**登记过（所以不是"新增"），却从来没被播过
+       *     （所以没有任何绑定）。本次的「澎湃新闻」就是这样：
+       *     它先被一个临时版本登记进库，再升级上来，于是它的 20 条条目
+       *     一条标签都没打、按类型筛选时完全看不到。
+       *
+       *   而"有绑定就绝不碰"那条兜底（在 `seedSourceCategories` 里）保证了②：
+       *     被用户摘掉一个类型的源仍然绑在别的类型上 ⇒ 不属于"一条绑定都没有"。
+       *
+       *   ⚠️ 试过并否掉的判据（都因为破坏其中一条而作废）：
+       *     · "有映射表行就不播" ⇒ 违反②（用户整组取消的源会被绑回来）
+       *     · "有 source_state 行就不播" ⇒ 违反①（新库一个源都不播）
+       *     · "只播新增名单" ⇒ 违反①的升级变体（就是上面那个孤儿） */
+      const boundIds = new Set(
+        db.prepare('SELECT DISTINCT source_id FROM source_category').all().map((r) => Number(r.source_id)),
+      );
+      const srcIdsNow = new Map(listSources(db).map((s) => [s.feed_url, Number(s.id)]));
+      const newUrls = new Set(sync.newFeedUrls || []);
+      const toSeed = DEFAULT_SOURCES.filter((s) => {
+        if (newUrls.has(s.feedUrl)) return true;
+        const id = srcIdsNow.get(s.feedUrl);
+        return id != null && !boundIds.has(id); // 升级留下的孤儿：登记过、却一条绑定都没有
+      });
+      if (toSeed.length) {
+        const seed = seedSourceCategories(db, nowIso, { only: toSeed });
+        if (seed.seeded) {
+          log(`按预置清单写入 ${seed.seeded} 条「源 ↔ 类型」映射（涉及 ${toSeed.length} 个源，其中新登记 ${newUrls.size} 个）`);
+        }
+      }
       // 预置类别（用户之后可增删改）
       DEFAULT_CATEGORIES.forEach((name, i) => upsertCategory(db, name, i, nowIso));
-      /* ★ 源与类别登记完，**立刻再播一次**「源 ↔ 类型」映射。
+
+      /* ★★ 给"标签缺了"的预置源补一次标签（每个源只做一次）。
        *
-       * 为什么需要这一步：`openDb` 里的播种发生在**源表还空着**的时候
-       * （一个新库第一次打开，预置源还没登记）⇒ 那次播种一个源都解析不到，
-       * 映射表是空的，用户在界面上会看到一个"什么源都没勾"的空筛选栏。
-       * 而播种标记只在**全部播下去之后**才写，所以这一次真的会生效。
+       * ⚠️ 为什么需要：标签（`item_category`）是**抓取那一刻**按当时的映射写下的
+       *    （那是有意的 —— 它是当时的事实，跟着映射漂移就等于伪造历史）。
+       *    于是这些情况下条目会**一条标签都没有**，按类型筛选时完全看不到
+       *    （用户侧是"这个源的内容不见了"，而「全部」里明明有）：
+       *      · 升级留下的孤儿：源由旧版本登记过、却从来没被播过映射
+       *        （真机实测：本次的「澎湃新闻」，29 条老条目全都没有标签）
+       *      · 用户先抓了内容、之后才把这个源勾进某个类型
        *
-       * ⚠️ 为什么不在 openDb 里"多开一会儿"等源表：那是把抓取层的事
-       *    塞进数据层 —— 数据层不该知道"预置源什么时候会被登记"。 */
-      const seed = seedSourceCategories(db, nowIso);
-      if (seed.seeded) log(`首次运行：写入 ${seed.seeded} 条「源 ↔ 类型」映射（此后以数据库为准）`);
-      if (seed.complete === false) log('「源 ↔ 类型」映射还没播完（有源或类别尚未登记），下次抓取会继续');
+       * ⚠️⚠️ 判据是"**一条标签都没有**"（而不是"刚播过映射"）——
+       *    后者漏掉"绑定早就补上了、标签还没补"的那种中间状态，
+       *    而那正是真机上「澎湃新闻」的实际处境（我第一版就漏了它）。
+       * ⚠️ 每个源只补一次（`meta.backfill_tags:<源id>`）：否则用户手动把某个源
+       *    从所有类型里摘掉之后，下次抓取又会被补回来 —— 那正是"用户改过的被覆盖"。 */
+      for (const s of DEFAULT_SOURCES) {
+        const sid = srcIdsNow.get(s.feedUrl);
+        if (sid == null) continue;
+        const r = tagExistingItemsOfSource(db, sid, `backfill_tags:${sid}`);
+        if (r.tagged) log(`给「${s.name}」已有的条目补上 ${r.tagged} 条类型标签（只补这一次）`);
+      }
     }
 
     /* ⚠️ 选源的口径（本次改动）：**用户选了什么类型，就抓那个类型绑定的源并集**。
@@ -211,7 +263,7 @@ export async function runIngest(opts) {
     const catIdByName = new Map();
     for (const c of listCategories(db)) {
       catIdByName.set(c.name, c.id);
-      for (const sid of getCategorySources(db, c.id)) {
+      for (const sid of listSourceIdsOfCategory(db, c.id)) {
         if (!catOfSource.has(sid)) catOfSource.set(sid, []);
         catOfSource.get(sid).push(c.id);
       }

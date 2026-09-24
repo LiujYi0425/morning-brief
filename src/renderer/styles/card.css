@@ -648,6 +648,44 @@ body {
   font-size: var(--fs-meta);
 }
 
+/* ---------------- 「＋ 添加源」那一行（阶段 A） ----------------
+ * 视觉骨架**照抄 `.catadd__input`**（「＋新增类型」那个就地输入行）：
+ * 同样的边框 / 圆角 / 底色 / 字号。用户要求"不得改变现有整体美观样式"，
+ * 所以这里不引入任何新的输入框外观。 */
+.catpanel__add {
+  gap: var(--gap-1);
+}
+.catpanel__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-chip);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--fs-meta);
+  outline: none;
+  /* ⚠️⚠️ `.card` 上有 `user-select: none`（拖动卡片时不许选中文字）。
+   *    输入框**必须**把它改回 text，否则：
+   *      · 选不中已经粘进去的地址（想改一个字符只能整段删掉重贴）
+   *      · 有些情况下连光标都放不稳
+   *    这一条是真机上"输入框能点但用不了"的典型成因，别删。 */
+  user-select: text;
+}
+.catpanel__input--name {
+  /* 名字短：给固定但不宽的一档，把空间留给地址 */
+  flex: 0 0 auto;
+  width: 72px;
+}
+.catpanel__input::placeholder {
+  color: var(--text-tertiary);
+}
+.catpanel__input:disabled {
+  opacity: 0.55;
+}
+
 /* ---------------- 列表 ----------------
  * `min-height: 0` 是 flex 布局的经典陷阱：不给它，子项会被内容撑大而不滚动。
  *

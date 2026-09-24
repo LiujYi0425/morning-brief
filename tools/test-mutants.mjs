@@ -26,6 +26,7 @@ const QUOTA = 'src/shared/quota.js'
 const DB = 'src/store/db.js'
 const INGEST = 'src/ingest/fetch-feeds.js'
 const MAIN = 'src/main/index.js'
+const FEEDURL = 'src/main/feed-url.js'
 
 const MUTANTS = [
   /* ── 打包态数据目录与可写性探测（P0-2）── */
@@ -142,6 +143,28 @@ const MUTANTS = [
     expect: '面板的源清单只能列',
   },
   {
+    file: INGEST,
+    why: '新登记的源不再播种（不把新增名单交给播种）⇒ 新加的预置源拿不到类型绑定，条目全都不打标签',
+    /* ⚠️ 这条是**真机上撞到过**的：新加的「澎湃新闻」在库里没有任何类型绑定，
+       它的条目一条都不打标签 ⇒ 按类型筛选时完全看不到（像没抓到），
+       而日志里一切正常（`✓ 澎湃新闻 20 条（新增 20）`）。
+       ⚠️ 靶子打在**接线处**：判定逻辑本身（`seedSourceCategories`）有单测，
+          但"有没有把新增名单接上去"只有这里能咬住。 */
+    from: '      if (toSeed.length) {',
+    to: '      if (false) {',
+    /* ⚠️ `expect` 要写**最先咬住它的那条**断言：实测这个变异体是
+       "首次抓取应当播种出映射"先红（"新加进来的预置源…"那条排在后面，
+       根本轮不到执行）。写成后者的话会误报"漏网"。 */
+    expect: '首次抓取应当播种出映射，实得 0',
+  },
+  {
+    file: DB,
+    why: '播种不再看「用户主动摘干净」的记号 ⇒ 用户取消掉的源又自己勾上了',
+    from: '    if (removedByUser.has(sid)) continue; // ★ 用户把它摘干净过：绝不加回来',
+    to: '    if (false) continue;',
+    expect: '这次抓取把用户摘掉的源加回来了',
+  },
+  {
     file: QUOTA,
     why: '配额不随筛选范围的占比缩放 ⇒ 点进那个类型本身时被砍到 3 条（"配比"变成了"过滤"）',
     /* ⚠️ 靶子要打在**真正决定缩放结果**的那条算式上。我第一版改的是
@@ -151,20 +174,99 @@ const MUTANTS = [
     to: '  const scaled = quotaOf(want); // 变异体：不缩放，永远用基础配额',
     expect: '配额要随**筛选范围**的占比缩放',
   },
+  /* ⚠️ 这里原本有一条变异体："补标签不再看『一条标签都没有』这个判据"。
+     实测它**必然存活**，因此删掉而不是留着充数：`tagExistingItemsOfSource` 里
+     那段 `if (orphan === 0) return` 只是**性能短路** —— 即便拆掉它，
+     后面的 `INSERT OR IGNORE … WHERE` 也插不进任何行（没有条目处于"零标签"状态），
+     行为与原来**逐字等价**。一个拆掉也没人发现的靶子会让人误以为那里有防线。
+     ⇒ "用户手动摘掉的标签不许被重打"这条性质由上面那条（记号）与
+        `backfill_tags` 的记账共同保证，不是靠这个短路。 */
+  {
+    file: INGEST,
+    why: '孤儿源补了映射却不补标签 ⇒ 它已有的条目在类型里完全看不到（像没抓到）',
+    from: '        const r = tagExistingItemsOfSource(db, sid, `backfill_tags:${sid}`);',
+    to: '        const r = { tagged: 0 };',
+    expect: '已有的条目一条标签都没有',
+  },
   {
     file: DB,
-    why: '播种的"老库"守卫被拆掉 ⇒ 升级上来的库里，用户改过的映射被预置清单整个冲掉',
-    /* ⚠️ 为什么靶子是**第二道**守卫（`already > 0 && !fresh`）而不是第一道
-       （`seeded === '1'`）：我两条都试过，第一道拆掉之后**所有断言照样全绿** ——
-       因为走 db.js 这条路径根本到不了它：`openDb` 只会在"映射表还是空的"时候
-       让播种真正执行，而那之后第二道守卫必然先返回。
-       ⇒ 靶子必须打在**行为可观测**的那一条上，否则我们得到的只是
-         "变异体落网"的假象（第一道拆掉后 156 条断言一条都不红）。
-       ⚠️ 第一道守卫保留着当"显式契约"（它让"播种是一次性的"这件事写在代码里、
-         可以被读出来），这是刻意的冗余，不是死代码。 */
-    from: '  if (already > 0 && !opts.fresh) {',
+    why: '摘干净的源不留记号 ⇒ 下次抓取按预置清单把它绑回来（"我取消了，重启又回来了"）',
+    from: '      if (stillBound === 0) setMeta(db, `unbound_by_user:${sid}`, \'1\');',
+    to: '      if (false) setMeta(db, `unbound_by_user:${sid}`, \'1\');',
+    expect: '摘干净一个源之后没有留下记号',
+  },
+  {
+    file: DB,
+    why: '`openDb` 又按整份清单播一遍（把"用户改过的不被覆盖"这条承诺作废）',
+    /* ⚠️ 这个变异体是**返工回来的**：我一开始写的靶子是"删掉 `hasBinding` 那道兜底"，
+       而它**存活** —— 实测过：把那一行改成 `if (false) continue;`，
+       169 条断言一条都不红。原因是 `runIngest` 传进来的 `only` **已经只是新增的源**，
+       兜底那一行在真实路径上永远轮不到（它只在"调用方把老源也放进 only"时才起作用）。
+       ⇒ 一段拆掉也没人发现的代码不是防线，是噪音：靶子换成**真正在起作用的
+         "openDb 不再播种"**（把它加回去 ⇒ 4 条断言红）；
+         `hasBinding` 那一行留在源码里当**契约**，并在注释里写明它为什么留着。 */
+    from: '  ensureColumns(db);',
+    to: '  ensureColumns(db);\n  seedSourceCategories(db, new Date().toISOString(), { only: DEFAULT_SOURCES });',
+    /* ⚠️ `expect` 要写**最先咬住它的那条**：实测是"老库里已经改过的映射不许被播种覆盖"
+       先红（v1 迁移那条也红），而"用户摘掉的源被加回来了"那句排在别的断言后面。 */
+    expect: '老库里用户改过的映射被预置清单覆盖了',
+  },
+  {
+    file: DB,
+    why: '「不在清单里就停用」不再区分预置源与用户自加的源 ⇒ 用户加的源过一天自己消失',
+    /* ⚠️ 这条守的是一处**真会丢用户数据**的口径：退役逻辑是给"我从代码里
+       删掉一个源"设计的，而用户自己加的源**天生不在预置清单里** ——
+       少判一个 origin，用户今天粘进来的地址下次抓取就被静默关掉，
+       而界面上没有任何提示。 */
+    from: "    if (row.origin !== 'preset') continue; // ★ 用户自己加的源，永不因为清单而停用\n",
+    to: '',
+    expect: '不会被预置清单停用',
+  },
+  {
+    file: DB,
+    why: '补列时忘了把既有源标回 preset（默认值是 custom）⇒ 代码里删源的退役逻辑永久失效',
+    /* ⚠️ 这个退化极其隐蔽：列默认值写成 'custom'、补齐时忘了改回来，
+       于是老库里**全部**预置源都被当成"用户自加的" ⇒
+       以后从预置清单里删任何一个源，用户机器上它都会被永远抓下去。
+       而代码看起来完全正确、其它断言也全绿。 */
+    from: "    const n = db.prepare(\"UPDATE source SET origin = 'preset' WHERE origin IS NULL OR origin = 'custom'\").run();",
+    to: '    const n = { changes: 0 };',
+    expect: '既有源必须被标成「预置」',
+  },
+  {
+    file: MAIN,
+    why: '添加源不再校验地址（本机/内网、非 http、畸形地址都会被收下）',
+    /* ⚠️ 这条咬的是"判定有没有真的接上"：纯判定在 feed-url.js 里
+       （那一份有 12 条断言逐条穷举），但**接不上就是没做** ——
+       所以我额外断言了 main/index.js 里"确实调了那两个校验"。 */
+    from: '      const v = validateNewSource(p);',
+    to: '      const v = { ok: true, name: p.name, feedUrl: p.feedUrl };',
+    expect: '添加源必须**真的**调用那两个校验',
+  },
+  {
+    file: MAIN,
+    why: '失败返回不带 reason（用户看到"点了没反应"，不知道为什么加不进去）',
+    /* ⚠️ 这条盯的是那条**契约**断言而不是某个 if：
+       这个文件 import 了 electron，离线跑不起来 ⇒
+       "解析失败的分支还在不在"只能靠源码判据咬。
+       把 reason 换成 success 字段之后，理由就从界面上消失了。 */
+    from: '        return { ok: false, reason: `抓不到这个地址：${fetchErr}` };',
+    to: '        return { ok: false, detail: `抓不到这个地址：${fetchErr}` };',
+    expect: '有一条失败返回没带 reason',
+  },
+  {
+    file: FEEDURL,
+    why: '本机 / 内网地址不再拦（程序会变成一个被外部数据牵着走的探测器）',
+    from: '  if (isPrivateHost(u.hostname)) {',
     to: '  if (false) {',
-    expect: '老库里**已经改过**的映射不许被播种覆盖',
+    expect: '本机 / 内网地址一律拒绝',
+  },
+  {
+    file: FEEDURL,
+    why: '172.16-31 的私有网段判错（把整个 172 段都当内网 / 或都不当）⇒ 要么误伤公网、要么放行内网',
+    from: '  if (a === 172 && b >= 16 && b <= 31) return true;',
+    to: '  if (a === 172) return true;',
+    expect: '172.15 属于公网，被误伤了',
   },
   {
     file: INGEST,
@@ -174,6 +276,23 @@ const MUTANTS = [
     expect: '抓取打标签读的是 DB 里的映射',
   },
 ]
+
+/* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。
+ *
+ *    原因：`String.prototype.replace` 会把替换串里的 `$&` / `$1` / `` $` `` 等
+ *    当成**特殊模式**来解释（MDN 的 "Specifying a string as the replacement"）。
+ *    我这个变异体要改的那一行里有模板字符串 `${fetchErr}` ——
+ *    用字符串形式替换时它被改写成 `\$&{fetchErr}`，
+ *    于是注入之后的文件是**语法错误**的，而表现是
+ *    "变异体注入失败/测试起不来"，看起来像锚点写错了。
+ *    （这一条踩过一次：报的是 `SyntaxError: Invalid or unexpected token`，
+ *      指向的位置离真正的原因很远。）
+ * ⚠️ 下面**两处** `replace` 都要用这个函数（注入与还原各一处）。 */
+const replaceLiteral = (src, from, to) => {
+  const i = src.indexOf(from);
+  if (i < 0) return src;
+  return src.slice(0, i) + to + src.slice(i + from.length);
+};
 
 /* 每个被改过的文件都留一份原文，最后逐字节校验还原 */
 const originals = new Map()
@@ -192,7 +311,16 @@ for (const m of MUTANTS) {
     allCaught = false
     continue
   }
-  fs.writeFileSync(abs, original.replace(m.from, m.to), 'utf8')
+  /* ⚠️⚠️ 必须用 replaceLiteral（按字面替换），不能用 `String.replace(from, to)`。
+   *
+   *    后者会把**替换串**里的 `$&` / `` $` `` / `$'` / `$1` 当特殊模式解释
+   *    （MDN: "Specifying a string as the replacement"）——
+   *    而本项目几乎每个变异体改的那一行里都有模板字符串或正则，
+   *    于是一部分变异体被改写成**语法错误**的文件，
+   *    表现是"变异体注入失败/测试起不来"，看起来像锚点写错了。
+   *    （实测：`to` 里带 `${fetchErr}` 的那条直接被改成 `\$&{fetchErr}`。）
+   *    ⚠️ 这个坑在本脚本里踩过两次，所以下面这行旁边留着这段注释。 */
+  fs.writeFileSync(abs, replaceLiteral(original, m.from, m.to), 'utf8')
   let out = ''
   try {
     const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'test-all.mjs')], {

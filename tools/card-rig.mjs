@@ -169,6 +169,9 @@ export function makeRig(cardSrc) {
       setCategorySources: (id, ids) => { calls.push({ kind: 'setCategorySources', id, sourceIds: ids }); return new Promise((res, rej) => pending.push({ kind: 'setCategorySources', id, sourceIds: ids, res, rej })); },
       setCategoryPref: (id, pref) => { calls.push({ kind: 'setCategoryPref', id, pref }); return new Promise((res, rej) => pending.push({ kind: 'setCategoryPref', id, pref, res, rej })); },
       deleteCategory: (id) => { calls.push({ kind: 'deleteCategory', id }); return new Promise((res, rej) => pending.push({ kind: 'deleteCategory', id, res, rej })); },
+      /* ★ 添加源（阶段 A）：**异步且慢**（主进程要先抓一次验证），
+         所以装置里也做成"要等结算"的样子 —— 否则测不出"忙碌期间不许连点"。 */
+      addSource: (payload) => { calls.push({ kind: 'addSource', payload }); return new Promise((res, rej) => pending.push({ kind: 'addSource', payload, res, rej })); },
     },
     card: { setState: async () => ({ ok: true }), drag: async () => ({ ok: true }) },
     openItem: async () => ({ ok: true }),
@@ -379,6 +382,32 @@ export function makeRig(cardSrc) {
         text: byId.catPanel.children.map((c) => c.textContent).join(' | '),
         rows: byId.catPanel.children.length,
       };
+    },
+    /** 面板里的文本输入框（阶段 A 的「添加源」那一行） */
+    panelInputs() {
+      const out = [];
+      const walk = (n) => {
+        for (const c of n.children) {
+          if (c.tagName === 'INPUT' && c.type === 'text') out.push(c);
+          walk(c);
+        }
+      };
+      walk(byId.catPanel);
+      return out;
+    },
+    /** 在「添加源」那一行里填名字与地址，然后点「添加」 */
+    fillAddSource(name, url) {
+      const inputs = this.panelInputs();
+      if (inputs.length < 2) throw new Error('「添加源」那一行没打开（只找到 ' + inputs.length + ' 个输入框）');
+      inputs[0].value = name;
+      inputs[1].value = url;
+      this.clickPanelButton(/^添加$|^验证中/);
+      return { name: inputs[0].value, url: inputs[1].value };
+    },
+    /** 面板状态里与「添加源」有关的那几个开关（由 card.js 从 derive 取） */
+    addSourceHint() {
+      const t = byId.catPanel.textContent;
+      return { hasVerifying: /正在验证这个地址/.test(t), text: t.slice(0, 200) };
     },
     editBtn() {
       return { hidden: !!byId.btnEditCat.hidden, open: byId.btnEditCat.getAttribute('data-open') === 'on' };

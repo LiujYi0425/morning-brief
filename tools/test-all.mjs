@@ -61,7 +61,8 @@ const VM = (() => {
 import { decodeEntities, unwrapCdata, cleanText, collapseWhitespace, stripHtml } from '../src/ingest/entities.js';
 import { canonicalizeUrl, fnv1a, titleFingerprint, dedupeKey } from '../src/ingest/urls.js';
 import { parseFeed, parseDate, sniffContentKind } from '../src/ingest/feed-parse.js';
-import { openDb, upsertSources, startRun, insertItem, queryItems, countItems, sourceHealth, listSources, getMeta } from '../src/store/db.js';
+import { openDb, upsertSources, startRun, insertItem, queryItems, countItems, sourceHealth, listSources, getMeta, setMeta, upsertCategory, seedSourceCategories, SCHEMA_VERSION } from '../src/store/db.js';
+import { DEFAULT_CATEGORIES } from '../src/ingest/sources.js';
 import { runIngest, shouldRunNow } from '../src/ingest/fetch-feeds.js';
 import {
   nextRunAt,
@@ -112,6 +113,9 @@ import {
   DEFAULT_MAX_ATTEMPTS,
 } from '../src/shared/update.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
+/* 「添加源」的地址判定（阶段 A）：同样是零依赖纯函数，
+   所以它能被离线穷举 —— 这正是把它从 main/index.js 里拆出来的原因。 */
+import { validateNewSource, isPrivateHost } from '../src/main/feed-url.js';
 /* 本次功能（筛选栏）：配额选取是**零依赖纯函数**，所以它能被离线穷举 ——
    这不是巧合：它 import 不了 electron，写进 main/index.js 就等于永远没有断言。 */
 import { selectByQuota, quotaOf, scopedQuota, classOf, PREF } from '../src/shared/quota.js';
@@ -550,13 +554,19 @@ function tmpDbFile(tag) {
  *    而变异体的 `run()` 是同步的。
  *    ⇒ 这里用 `createRequire` 同步拿驱动 —— **测试进程里没有那个崩溃条件**
  *      （崩溃只发生在 Electron 主进程求值 `app.whenReady()` 之前）。
- *    刻意只建分页需要的那几列：变异体考的是"OFFSET 会不会重叠"，与完整 schema 无关。
+ *
+ * ⚠️ 建的表**够用就好，但少了会当场炸**（"no such table: source_state"）：
+ *    `upsertSources` 会写 source_state，`addCustomSource` 也会。
+ *    ⇒ 与源有关的几张表（source / source_state）都在这里建全，
+ *      并且带上 v3 的 origin 列。
+ *    刻意**不**建 item/category 那几张与分页无关的表。
  */
 function makeSyncTestDb(file) {
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(file);
   db.exec(
-    'CREATE TABLE source (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, feed_url TEXT UNIQUE, kind TEXT, enabled INTEGER DEFAULT 1, created_at TEXT);' +
+    'CREATE TABLE source (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, feed_url TEXT UNIQUE, kind TEXT, enabled INTEGER DEFAULT 1, created_at TEXT, origin TEXT NOT NULL DEFAULT \'custom\');' +
+      'CREATE TABLE source_state (source_id INTEGER PRIMARY KEY, last_fetch_at TEXT, last_ok_at TEXT, last_status TEXT, last_error TEXT, consecutive_fail INTEGER DEFAULT 0, total_items INTEGER DEFAULT 0);' +
       'CREATE TABLE fetch_run (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, trigger TEXT, ok_count INTEGER DEFAULT 0, fail_count INTEGER DEFAULT 0, new_items INTEGER DEFAULT 0, finished_at TEXT, detail TEXT);' +
       'CREATE TABLE item (id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe_key TEXT UNIQUE, title TEXT, url TEXT, url_canonical TEXT, summary TEXT, author TEXT, source_id INTEGER, source_name TEXT, published_at TEXT, fetched_at TEXT, first_run_id INTEGER, read_state TEXT DEFAULT \'unread\');',
   );
@@ -2704,21 +2714,21 @@ await (async () => {
 
   await aok('首次抓取会按预置清单**播种**映射（不播种的话用户改完下次启动就被覆盖）', () => {
     assert.equal(getMeta(db, 'source_category_seeded'), '1', '播种标记没写上 —— 下次启动会再播一遍，把用户的改动冲掉');
-    assert.ok(cats.getCategorySources(db, catId).length > 0, '开源与工程一个源都没绑 —— 播种没生效');
+    assert.ok(cats.listSourceIdsOfCategory(db, catId).length > 0, '开源与工程一个源都没绑 —— 播种没生效');
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n > 20, true, '映射行数太少，播种只播了一部分');
   });
 
   await aok('★ 用户改过的映射**不会被预置清单覆盖**（重开一次库来验）', async () => {
     /* 用户从「开源与工程」里**摘掉** GitHub Blog */
-    const kept = cats.getCategorySources(db, catId).filter((id) => id !== Number(src.id));
+    const kept = cats.listSourceIdsOfCategory(db, catId).filter((id) => id !== Number(src.id));
     const w = cats.setCategorySources(db, catId, kept);
     assert.equal(w.ok, true);
-    assert.equal(cats.getCategorySources(db, catId).includes(Number(src.id)), false, '摘掉之后不该还在');
+    assert.equal(cats.listSourceIdsOfCategory(db, catId).includes(Number(src.id)), false, '摘掉之后不该还在');
     db.close();
 
     /* 重新打开（模拟下次启动：预置清单会再跑一遍） */
     const db2 = await openDb(dbFile);
-    const after = cats.getCategorySources(db2, catId);
+    const after = cats.listSourceIdsOfCategory(db2, catId);
     assert.equal(after.includes(Number(src.id)), false,
       '★ 用户摘掉的源被代码里的预置清单加回来了 —— 这正是"两份口径"，用户改完下次启动就白改');
     db2.close();
@@ -2739,11 +2749,11 @@ await (async () => {
     const probeId = cats.upsertCategory(db6, '探针类型（预置清单里没有它）', 99, now6);
     const rows = () => db6.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
     const before = rows();
-    assert.equal(cats.getCategorySources(db6, probeId).length, 0, '新类型一开始不该有任何绑定');
+    assert.equal(cats.listSourceIdsOfCategory(db6, probeId).length, 0, '新类型一开始不该有任何绑定');
     db6.close();
 
     const db7 = await openDb(dbFile);
-    assert.equal(cats.getCategorySources(db7, probeId).length, 0,
+    assert.equal(cats.listSourceIdsOfCategory(db7, probeId).length, 0,
       '★ 重开一次库之后，一个"预置清单里没有映射"的类型被塞进了绑定 —— 播种不再是"一次性的"了');
     assert.equal(db7.prepare('SELECT COUNT(*) AS n FROM source_category').get().n, before,
       '重开之后映射总行数变了 ⇒ 播种又跑了一遍');
@@ -2753,46 +2763,95 @@ await (async () => {
   await aok('取消勾选是**可逆的筛选**：再勾回去就在了，而且条目不受影响', async () => {
     const db3 = await openDb(dbFile);
     const before = db3.prepare('SELECT COUNT(*) AS n FROM item').get().n;
-    const add = cats.getCategorySources(db3, catId).concat([Number(src.id)]);
+    const add = cats.listSourceIdsOfCategory(db3, catId).concat([Number(src.id)]);
     assert.equal(cats.setCategorySources(db3, catId, add).ok, true);
-    assert.equal(cats.getCategorySources(db3, catId).includes(Number(src.id)), true, '勾回去应当立刻生效');
+    assert.equal(cats.listSourceIdsOfCategory(db3, catId).includes(Number(src.id)), true, '勾回去应当立刻生效');
     assert.equal(db3.prepare('SELECT COUNT(*) AS n FROM item').get().n, before, '改映射不该动条目');
     db3.close();
   });
 
   await aok('★ 升级路径：老库里**已经改过**的映射不许被播种覆盖', async () => {
-    /* ★★ 这条补的是一个**真实的盲区**（被变异测试逼出来的）。
+    /* ★★ 这条守的是**老库补账**：本次升级之前播种过（`source_category` 里有行），
+     *    但那时还没有"按源记账"这回事。少了补账这一步，下次播种会把预置清单
+     *    整个重插一遍 ⇒ 用户侧看到"升级之后我摘掉的那些源又都自己勾上了"。
      *
-     * `seedSourceCategories` 有**两道**守卫：
-     *   ① `meta.source_category_seeded === '1'`  ⇒ 已经播过就退出
-     *   ② `映射表非空 && !fresh`                 ⇒ **老库**（升级上来的）只补标记
-     * 上面那条"播种只发生一次"的断言只咬得住①。把②拆掉，所有断言照样全绿 ——
-     * 而②保护的恰恰是最危险的那条路径：
-     *   老库（v1 升上来的、没有任何标记）里若有用户已经改过的映射，
-     *   没有②就会被"预置清单"整个冲掉，用户侧看到的是"升级之后我的筛选设置没了"。
-     *
-     * ⇒ 造出那个状态：一个**没有播种标记**、但映射表里躺着用户改动的库。 */
-    const db8 = await openDb(dbFile);
-    const now8 = new Date().toISOString();
-    const cat8 = cats.listCategories(db8).find((c) => c.name === '开源与工程').id;
-    const all = cats.listSources(db8).map((s) => Number(s.id));
-    /* 用户把所有源都摘掉，只留第一个 —— 一个绝不会与预置清单重合的状态 */
-    const keptOne = [all[0]];
-    cats.setCategorySources(db8, cat8, keptOne);
-    /* 抹掉标记：模拟"老库升级上来"（v1 → v2 的迁移刚建好映射表，还没有任何标记） */
-    db8.prepare("DELETE FROM meta WHERE key IN ('source_category_seeded','source_category_backfill')").run();
-    db8.prepare("UPDATE meta SET value = '1' WHERE key = 'schema_version'").run();
-    db8.close();
+     * ⚠️⚠️ 这条断言**必须从一个真正手工造出来的老库开始**。
+     *    我前两版都栽在同一个地方：先 `openDb` + `upsertSources` 造出一个
+     *    **新库**，再删几个 meta 键假装它是老库 —— 但那个库里的每一行
+     *    都已经带着"按源记账"的键，删掉全局标记根本不影响它们 ⇒
+     *    "老库"压根没造出来，断言与它的变异体互相抵消、双双失效。
+     *    ⇒ 老库要用**裸 sqlite** 建（不带任何记账），这样才真的在考"补账"。 */
+    const legacyFile = tmpDbFile('legacy-seed');
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(legacyFile);
+    raw.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    raw.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('schema_version', '2');
+    /* 建库：只用 openDb 建结构，然后手工塞进"用户改过的"映射 */
+    raw.close();
+    const ldb = await openDb(legacyFile);
+    const nowL = new Date().toISOString();
+    upsertSources(ldb, DEFAULT_SOURCES, nowL);
+    for (const [i, name] of DEFAULT_CATEGORIES.entries()) upsertCategory(ldb, name, i, nowL);
+    const catL = cats.listCategories(ldb).find((c) => c.name === '开源与工程').id;
+    const byName = new Map(cats.listCategories(ldb).map((c) => [c.name, Number(c.id)]));
+    const byUrl = new Map(cats.listSources(ldb).map((s) => [s.feed_url, Number(s.id)]));
+    const allL = [...byUrl.values()];
+    /* 用户留下的那一个：取"预置清单里第一个绑到「开源与工程」的源"，
+       这样它一定属于这个类型（不能随便取 allL[0]，它可能压根不绑这个类型） */
+    const keptL = [byUrl.get(DEFAULT_SOURCES.find((s) => (s.categories || []).includes('开源与工程')).feedUrl)];
+    assert.ok(Number.isFinite(keptL[0]), '前置条件：应当能在预置清单里找到一个绑「开源与工程」的源');
+    ldb.close();
+    /* ★★ 用**裸 SQL** 把库改造成"当年那套老代码留下的样子"：
+     *    · 映射 = 预置清单里那套**完整的**绑定（当年播的）；
+     *    · 用户的改动 = 从「开源与工程」里摘掉几个，只留一个；
+     *    · **没有任何 `seed_preset:*` 记账**（那时还没这回事）。
+     *  ⚠️⚠️ 必须"先有整套、再改"，不能"一开始就只有一条"：
+     *    我前几版都是 DELETE 之后只写一条 —— 那种库在真实升级路径里
+     *    **不存在**（当年播过 ⇒ 映射表一定是满的）。而 `openDb` 一打开它，
+     *    补账只会把"表里有的那一条"记上账，其余源全都没账 ⇒
+     *    播种立刻把它们补回来。于是断言失败的原因成了"我造的前置状态不真实"，
+     *    而不是"代码有缺陷"——这一条我绕了四轮才看明白，
+     *    也是这个文件里最贵的一次调试。 */
+    const raw2 = new DatabaseSync(legacyFile);
+    const insMap = raw2.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
+    for (const s of DEFAULT_SOURCES) {
+      const sid = byUrl.get(s.feedUrl);
+      if (sid == null) continue;
+      for (const name of s.categories || []) {
+        const cid = byName.get(name);
+        if (cid != null) insMap.run(sid, cid);
+      }
+    }
+    const goneL = raw2
+      .prepare('SELECT source_id FROM source_category WHERE category_id = ?')
+      .all(catL)
+      .map((r) => Number(r.source_id))
+      .filter((id) => !keptL.includes(id));
+    assert.ok(goneL.length > 0, '前置条件：用户应当确实摘掉过几个源');
+    raw2.prepare(`DELETE FROM source_category WHERE category_id = ? AND source_id IN (${goneL.map(() => '?').join(',')})`).run(catL, ...goneL);
+    raw2.close();
 
-    const db9 = await openDb(dbFile);
-    const after9 = cats.getCategorySources(db9, cat8);
-    assert.equal(after9.join(','), keptOne.join(','),
-      '★ 老库里用户改过的映射被预置清单覆盖了（期望只剩 ' + keptOne.join(',') + '，实得 ' + after9.join(',') +
+    const check0 = new DatabaseSync(legacyFile);
+    const preBound = check0.prepare('SELECT source_id FROM source_category WHERE category_id = ? ORDER BY source_id').all(catL).map((r) => Number(r.source_id));
+    const preRows = check0.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
+    const preMarkers = check0.prepare("SELECT COUNT(*) AS n FROM meta WHERE key LIKE 'seed_preset:%'").get().n;
+    check0.close();
+    assert.equal(preMarkers, 0, '前置条件：老库里不该有任何按源记账');
+    assert.equal(preBound.join(','), keptL.join(','), '前置条件：这个类型应当只剩用户留下的那一个源');
+    assert.ok(preRows > 5, '前置条件：映射表整体应当是"满的"（当年播过），实得 ' + preRows + ' 行');
+
+    const ldb2 = await openDb(legacyFile);
+    const afterL = cats.listSourceIdsOfCategory(ldb2, catL);
+    assert.equal(afterL.join(','), keptL.join(','),
+      '★ 老库里用户改过的映射被预置清单覆盖了（期望只剩 ' + keptL.join(',') + '，实得 ' + afterL.join(',') +
         '）—— 升级之后用户的筛选设置会整个消失');
-    /* 顺手确认"只补标记、不重播"这条契约真的落到了库里：
-       标记没写上的话，下一次打开还会再判一次"要不要播种"。 */
-    assert.equal(getMeta(db9, 'source_category_seeded'), '1', '老库升级之后应当补上播种标记');
-    db9.close();
+    /* 再打开一次仍然不许变（这条比"补记账"更直接：记账是实现细节，
+       而"反复打开都不许把用户取消掉的源加回来"才是要守的性质） */
+    ldb2.close();
+    const ldb3 = await openDb(legacyFile);
+    assert.equal(cats.listSourceIdsOfCategory(ldb3, catL).join(','), keptL.join(','),
+      '第二次重开又把用户取消掉的源加回来了 —— 那说明判据依赖了某个会丢的状态');
+    ldb3.close();
   });
 
   await aok('写入只接受库里真实存在的源 id（错 id 不许变成悬挂绑定）', async () => {
@@ -2881,15 +2940,252 @@ await (async () => {
   seed.prepare("DELETE FROM meta WHERE key IN ('source_category_seeded','source_category_backfill')").run();
   seed.close();
 
-  await aok('★ v1 → v2 迁移：不删数据、补上 pref 列、播种映射、回填历史标签', async () => {
+  await aok('★ v1 → 最新 迁移：不删数据、补上 pref 列与 origin 列、回填历史标签', async () => {
     const db2 = await openDb(dbFile);
-    assert.equal(getMeta(db2, 'schema_version'), '2', '版本号没推进');
+    assert.equal(getMeta(db2, 'schema_version'), String(SCHEMA_VERSION), '版本号没推进');
     assert.equal(db2.prepare('SELECT COUNT(*) AS n FROM item').get().n, itemsBefore, '迁移把条目弄丢了');
     assert.ok(db2.prepare('SELECT COUNT(*) AS n FROM item_category').get().n >= tagsBefore, '标签数不该变少');
     const cols = db2.prepare('PRAGMA table_info(category)').all().map((c) => c.name);
     assert.ok(cols.includes('pref'), 'v2 的 category.pref 列没补上');
-    assert.ok(db2.prepare('SELECT COUNT(*) AS n FROM source_category').get().n > 0, '映射没有被播种');
+    /* ⚠️ `source_category` 在 v1 里本来就是空的（那时代码里根本没有这张表），
+       所以**迁移不该凭空播种** —— 播种是"登记新源"那一步的事。
+       这一条原来断言的是"迁移之后映射非空"，那是把两件事混在一起了：
+       迁移负责结构，播种负责数据。 */
+    assert.equal(db2.prepare('SELECT COUNT(*) AS n FROM source_category').get().n, 0,
+      '模拟的 v1 库里映射表是空的，迁移不该凭空播种（播种归 runIngest 管）');
     assert.equal(getMeta(db2, 'source_category_backfill'), '1', '回填标记没写上（下次启动会重复回填）');
+    db2.close();
+  });
+
+  await aok('★★ v3：老库（没有 origin 列）升级时，既有源必须被标成「预置」', async () => {
+    /* ⚠️⚠️ 这条必须**真的造一个没有 origin 列的库**再由迁移补上。
+     *
+     *    我第一版写的是"打开这个库、断言每一行的 origin 都是 preset" ——
+     *    而那个库里的源是**测试代码自己用 upsertSources 插进去的**，
+     *    而 upsertSources 本来就会写 'preset' ⇒ 迁移那段代码就算整段删掉，
+     *    断言照样通过（变异测试当场把这条抓出来了：变异体"漏网"）。
+     *    ⇒ 判据要落在**迁移本身的行为**上：造一个 v3 之前的库，
+     *      看升级之后既有行有没有被改回来。
+     *
+     *    这个退化极其隐蔽：列默认值是 'custom'，迁移忘了改，
+     *    老库里**全部**预置源就都被当成"用户自加的" ⇒
+     *    `upsertSources` 的退役逻辑（"代码里删掉的源要停用"）永久失效 ——
+     *    代价是以后从预置清单里删一个源，用户机器上它会被**永远抓下去**，
+     *    而代码看起来完全正确、其它断言也全绿。 */
+    const dbvFile = tmpDbFile('v3-v2lib');
+    const dbv = await openDb(dbvFile);
+    const nowv = new Date().toISOString();
+    /* 先按新代码插一条（会写 origin='preset'） */
+    upsertSources(dbv, [{ name: '升级前就有的源', feedUrl: 'https://legacy.example/feed', kind: 'rss' }], nowv);
+
+    /* ★ 再把这个库**改造成"v2 老库"的样子**：source 表没有 origin 列。
+       做法：建一张同名新表（不带 origin）→ 拷数据 → 换名 → 删掉 schema_version，
+       于是下一次 openDb 会当成全新库、用 v3 的 DDL 建表并补列。 */
+    dbv.exec(`
+      CREATE TABLE source_old (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+        feed_url TEXT NOT NULL UNIQUE, kind TEXT NOT NULL DEFAULT 'rss',
+        enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+      );
+      INSERT INTO source_old (id, name, feed_url, kind, enabled, created_at)
+        SELECT id, name, feed_url, kind, enabled, created_at FROM source;
+      DROP TABLE source;
+      ALTER TABLE source_old RENAME TO source;
+      DELETE FROM meta WHERE key = 'schema_version';
+    `);
+    /* ⚠️ 前置检查要用**新的连接**做：`PRAGMA table_info` 在同一条连接上
+       可能还缓存着旧的表结构 —— 我第一版就是这么误判的
+       （它报"还有 origin 列"，于是后面断言全跑偏）。
+       ⚠️ 而且这里刻意**不用 `openDb`** —— 那会顺手把列补上，前置条件就没了。 */
+    dbv.close();
+    const probe = require('node:sqlite').DatabaseSync;
+    const pdb = new probe(dbvFile);
+    const cols = pdb.prepare('PRAGMA table_info(source)').all().map((c) => c.name);
+    pdb.close();
+    assert.ok(!cols.includes('origin'), '前置条件没造出来：这张表不该有 origin 列（实得 ' + cols.join(',') + '）');
+
+    /* 再打开 ⇒ 走"全新库"那条路：DDL 建表（带 origin，默认 custom）+ 迁移补标 */
+    const dbv2 = await openDb(dbvFile);
+    const rows = dbv2.prepare('SELECT name, origin FROM source').all();
+    assert.ok(rows.length > 0, '升级之后源不该消失');
+    const wrong = rows.filter((r) => r.origin !== 'preset');
+    assert.equal(wrong.length, 0,
+      `升级后仍有 ${wrong.length} 个源的 origin 不是 preset（例：${wrong.slice(0, 3).map((r) => r.name + '=' + r.origin).join(', ')}）—— ` +
+        '它们会被当成"用户自己加的"，于是代码里删源的退役逻辑再也不生效');
+    dbv2.close();
+  });
+
+  await aok('★★ 代码里**新增**一个预置源时，它必须照样拿到类型绑定', async () => {
+    /* ⚠️⚠️ 这条守的是一个**真机上撞到**的缺陷，而且它几乎没有线索：
+     *   播种原先靠**全局标记**保证"只播一次"。于是我在代码里新增一个预置源
+     *   （本次加的「澎湃新闻」）时：
+     *     · 全局标记早就是 '1' ⇒ 播种整段跳过 ⇒ 新源**没有任何类型绑定**
+     *   后果不是"少一个勾"：
+     *     · 它的条目**一条都不打标签** ⇒ 按类型筛选时完全看不到（像没抓到）
+     *     · 它在界面上是"哪个类型都不属于"的孤儿，只能靠「全部」看到
+     *   而日志里一切正常（`✓ 澎湃新闻 20 条（新增 20）`）——
+     *   要不是我顺手查了一下 `source_category`，这个洞会一直留着。
+     *
+     * ⇒ 现在播种的判据是**显式的**：`runIngest` 把 `upsertSources` 返回的
+     *    **新增名单**交给 `seedSourceCategories`，只给那几个源播。
+     *    这条断言就走**真实路径**：先抓一次建库，再"加一个新源"抓第二次。
+     */
+    const dbFile2 = tmpDbFile('seed-late');
+    const fetcher = async () => ({ ok: true, text: GOOD_RSS });
+    await runIngest({ dbFile: dbFile2, trigger: 'manual', ensureSources: true, fetcher });
+
+    const db = await openDb(dbFile2);
+    const seeded0 = db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
+    assert.ok(seeded0 > 0, '首次抓取应当播种出映射，实得 ' + seeded0);
+    const byUrl = new Map(cats.listSources(db).map((s) => [s.feed_url, Number(s.id)]));
+    const byCat = new Map(cats.listCategories(db).map((c) => [c.name, Number(c.id)]));
+
+    /* —— 挑一个"多类绑定"的预置源，把它伪装成**代码里新加的**：
+     *    删掉它的行与绑定，然后让下一次抓取把它当新源登记（`upsertSources` 会
+     *    重新 INSERT 它 ⇒ `added` 名单里有它 ⇒ 它该被播一次）。
+     *    ⚠️ 不动全局的 `DEFAULT_SOURCES`：那会让断言依赖测试环境的网络与清单。 */
+    const multi = DEFAULT_SOURCES.find((s) => (s.categories || []).length >= 2);
+    assert.ok(multi, '预置清单里应当有绑定多个类型的源（断言本身要有意义）');
+    const sid = byUrl.get(multi.feedUrl);
+    const wantCatIds = multi.categories.map((n) => byCat.get(n)).sort();
+    assert.ok(wantCatIds.length >= 2, '这个源应当绑定了至少 2 个类型');
+    db.prepare('DELETE FROM source_category WHERE source_id = ?').run(sid);
+    db.prepare('DELETE FROM source_state WHERE source_id = ?').run(sid);
+    db.prepare('DELETE FROM source WHERE id = ?').run(sid);
+
+    /* —— 另一个源：模拟"用户把它从某个类型里摘掉了"（它**没被删行**，
+     *    所以不在新增名单里 ⇒ 绝不该被播回来） */
+    const catId = byCat.get('开源与工程');
+    const before = cats.listSourceIdsOfCategory(db, catId);
+    const dropped = before[before.length - 1];
+    cats.setCategorySources(db, catId, before.filter((x) => x !== dropped));
+    assert.equal(cats.listSourceIdsOfCategory(db, catId).includes(dropped), false, '前置条件：应当已经摘掉');
+    db.close();
+
+    /* ★ 第二次抓取：那个伪装成新源的源会被重新登记 ⇒ 该拿到绑定 */
+    await runIngest({ dbFile: dbFile2, trigger: 'manual', ensureSources: true, fetcher });
+
+    const db2 = await openDb(dbFile2);
+    const sid2 = cats.listSources(db2).find((s) => s.feed_url === multi.feedUrl).id;
+    /* ⚠️ 这里要的是"这个**源**绑了哪些类别"，所以直接用裸 SQL。
+       `listSourceIdsOfCategory(db, 类别id)` 是**反方向**的查询。
+       ⚠️ 我第一版就是把源 id 传给了那个函数，得到一句无声的 `[]` ——
+          而数据明明在库里、裸 SQL 也查得到，我却盯着"播种坏了"查了很久。
+          函数因此改了名（名字里写清入参是类别），这类错现在很难再犯。 */
+    const got = db2
+      .prepare('SELECT category_id FROM source_category WHERE source_id = ? ORDER BY category_id')
+      .all(sid2)
+      .map((r) => Number(r.category_id))
+      .sort();
+    assert.equal(got.join(','), wantCatIds.join(','),
+      `★ 新加进来的预置源没拿到类型绑定（应有 ${wantCatIds.join(',')}，实得 ${got.join(',') || '（空）'}）—— ` +
+        '它的条目会一条都不打标签，按类型筛选时完全看不到（像没抓到）');
+
+    /* ★ 而**用户摘掉的**那个源，绝不能被这次抓取加回来 */
+    assert.equal(cats.listSourceIdsOfCategory(db2, catId).includes(dropped), false,
+      '这次抓取把用户摘掉的源加回来了 —— 那条"用户改过的不被覆盖"的承诺破了');
+    db2.close();
+  });
+
+  await aok('★★ 孤儿源：映射补上之后，它**已有的条目**也要补上标签（而且只补一次）', async () => {
+    /* ⚠️⚠️ 这条来自真机实测的处境：标签是"抓取那一刻"按当时的映射写下的
+     *    （那是有意的 —— 它是当时的事实）。于是当某个源**登记过、却从没被播过映射**
+     *    时，它已有的条目**一条标签都没有** ⇒ 按类型筛选时完全看不到。
+     *    真机上的「澎湃新闻」就是这样：29 条条目、0 条标签 ——
+     *    用户看到的是"这个源的内容不见了"，而「全部」里明明有它。
+     *
+     * ⚠️ 判据必须落在"**补了标签**"上，而不是"播了映射"：
+     *    真机上这两个动作是分两次抓取才发生的（先补映射、后补标签），
+     *    只断言前者的话，那种"绑定补上了但标签还缺着"的中间状态照样漏。 */
+    const dbFile3 = tmpDbFile('orphan-tag');
+    /* ⚠️ 每个源喂**不同**的条目：同一份假 feed 喂给所有源时，
+       去重会把后面的全判成重复 ⇒ 除了第一个源，别的源一条条目都没有，
+       而下面"这个源应当抓到过条目"那条前置断言就没法成立。 */
+    const fetcher3 = async (url) => ({
+      ok: true,
+      text: `<rss><channel><title>T</title>
+        <item><title>${url}#1</title><link>${url}#1</link><pubDate>Tue, 22 Sep 2026 10:00:00 +0800</pubDate></item>
+        <item><title>${url}#2</title><link>${url}#2</link><pubDate>Tue, 22 Sep 2026 09:00:00 +0800</pubDate></item>
+      </channel></rss>`,
+    });
+    await runIngest({ dbFile: dbFile3, trigger: 'manual', ensureSources: true, fetcher: fetcher3 });
+
+    /* 造一个孤儿：把某个预置源清成"登记过、没有任何绑定与标签" */
+    const db = await openDb(dbFile3);
+    const now3 = new Date().toISOString();
+    const src = cats.listSources(db).find((s) => /InfoQ/.test(s.name));
+    assert.ok(src, '应当能找到 InfoQ 中文（断言本身要有意义）');
+    const sid = Number(src.id);
+    const itemsOf = Number(db.prepare('SELECT COUNT(*) AS n FROM item WHERE source_id = ?').get(sid).n);
+    assert.ok(itemsOf > 0, '这个源应当已经抓到过条目，实得 ' + itemsOf);
+    db.prepare('DELETE FROM item_category WHERE item_id IN (SELECT id FROM item WHERE source_id = ?)').run(sid);
+    db.prepare('DELETE FROM source_category WHERE source_id = ?').run(sid);
+    db.prepare("DELETE FROM meta WHERE key IN (?, ?)").run(`backfill_tags:${sid}`, `unbound_by_user:${sid}`);
+    const before = Number(
+      db.prepare('SELECT COUNT(*) AS n FROM item_category WHERE item_id IN (SELECT id FROM item WHERE source_id = ?)').get(sid).n,
+    );
+    assert.equal(before, 0, '前置条件：这个源的条目应当一条标签都没有');
+    db.close();
+
+    /* 再抓一次：映射该补上、**已有的条目也该补上标签** */
+    await runIngest({ dbFile: dbFile3, trigger: 'manual', ensureSources: true, fetcher: fetcher3 });
+    const db2 = await openDb(dbFile3);
+    assert.ok(cats.listCategoryIdsOfSource(db2, sid).length > 0, '孤儿的映射没有被补上');
+    const after = Number(
+      db2.prepare('SELECT COUNT(*) AS n FROM item_category WHERE item_id IN (SELECT id FROM item WHERE source_id = ?)').get(sid).n,
+    );
+    assert.ok(after > 0,
+      '★ 孤儿的映射补上了、但它**已有的条目一条标签都没有** —— 按类型筛选时完全看不到这个源的内容（像没抓到）');
+    assert.equal(getMeta(db2, `backfill_tags:${sid}`), '1', '补标签没有记账 ⇒ 下次还会再补一遍');
+    db2.close();
+
+    /* ★ 再抓一次：**不许**再补（记号守着）—— 否则用户手动摘掉的标签会被重打 */
+    const db3 = await openDb(dbFile3);
+    db3.prepare('DELETE FROM item_category WHERE item_id IN (SELECT id FROM item WHERE source_id = ?)').run(sid);
+    db3.close();
+    await runIngest({ dbFile: dbFile3, trigger: 'manual', ensureSources: true, fetcher: fetcher3 });
+    const db4 = await openDb(dbFile3);
+    const again = Number(
+      db4.prepare('SELECT COUNT(*) AS n FROM item_category WHERE item_id IN (SELECT id FROM item WHERE source_id = ?)').get(sid).n,
+    );
+    assert.equal(again, 0, '★ 用户手动摘掉的标签被"补标签"重打回来了 —— 那等于把用户的改动盖掉');
+    db4.close();
+  });
+
+  await aok('★★ 用户把某个源**从所有类型里摘干净**之后，重启不许自己回来', async () => {
+    /* ⚠️⚠️ 这条守的是"两份口径"交界处最难的一处：播种要区分
+     *    · "这个源从来没被播过"（该播：代码里新加的源、升级孤儿）
+     *    · "用户主动把它摘干净了"（绝不加回来）
+     *    而这两种状态在数据里**长得一模一样**（源存在、映射表里没有它的行）。
+     *    ⇒ 靠 `setCategorySources` 写下的 `unbound_by_user:<源id>` 记号来分开。
+     *    没有这个记号，用户把某个源从它唯一的类型里取消勾选之后，
+     *    下次抓取会把它按预置清单绑回来 —— 用户侧「我取消了，重启又回来了」。 */
+    const dbFile4 = tmpDbFile('unbound-mark');
+    const fetcher = async () => ({ ok: true, text: GOOD_RSS });
+    await runIngest({ dbFile: dbFile4, trigger: 'manual', ensureSources: true, fetcher });
+
+    const db = await openDb(dbFile4);
+    /* 挑一个**只绑了一个类型**的预置源（这样"摘掉"就等于"全摘干净"） */
+    const counts = db
+      .prepare('SELECT source_id, COUNT(*) AS n FROM source_category GROUP BY source_id HAVING n = 1 ORDER BY source_id')
+      .all();
+    let target = null;
+    for (const row of counts) {
+      const src = cats.listSources(db).find((s) => Number(s.id) === Number(row.source_id));
+      const preset = DEFAULT_SOURCES.find((s) => s.feedUrl === src.feed_url);
+      if (preset) { target = { sid: Number(row.source_id), url: src.feed_url, name: src.name, catId: Number(db.prepare('SELECT category_id FROM source_category WHERE source_id = ?').get(row.source_id).category_id) }; break; }
+    }
+    assert.ok(target, '应当能找到"只绑一个类型"的预置源（断言本身要有意义）');
+    assert.equal(cats.setCategorySources(db, target.catId, cats.listSourceIdsOfCategory(db, target.catId).filter((x) => x !== target.sid)).ok, true);
+    assert.equal(getMeta(db, `unbound_by_user:${target.sid}`), '1',
+      '摘干净一个源之后没有留下记号 —— 播种下一次就会把它绑回来');
+    db.close();
+
+    /* ★ 再抓一次：绝不能被绑回来 */
+    await runIngest({ dbFile: dbFile4, trigger: 'manual', ensureSources: true, fetcher });
+    const db2 = await openDb(dbFile4);
+    assert.equal(cats.listCategoryIdsOfSource(db2, target.sid).length, 0,
+      `★ 用户摘干净的「${target.name}」被预置清单加回来了 —— 用户侧就是"我取消了，重启又回来了"`);
     db2.close();
   });
 
@@ -2911,6 +3207,199 @@ await (async () => {
     assert.deepEqual(b, a, '重复打开改变了数据 —— 迁移不是幂等的');
   });
 })();
+
+say();
+say('--- 第十六层之七 · 自定义源：加了不许被清单停用 ---');
+
+await (async () => {
+  const cats = await import('../src/store/db.js');
+  const { DEFAULT_SOURCES } = await import('../src/ingest/sources.js');
+
+  await aok('★★ 用户自己加的源**不会被预置清单停用**（这一条以前是会丢用户数据的）', () => {
+    /* ⚠️ 这条守的是一个**真会丢用户数据**的口径：
+       `upsertSources` 的退役逻辑是给"我从代码里删掉一个源"设计的，
+       原先的判据是"不在预置清单里 ⇒ 停用"。而用户自己加的源
+       **天生就不在清单里** ⇒ 用户今天粘一个地址进来、下次抓取就被静默关掉。
+       用户侧看到的是"我加的源过一天自己没了"，而且没有任何提示。
+       ⇒ 判据改成"不在清单里 **且** origin='preset'"。 */
+    const dbFile = tmpDbFile('custom-src');
+    const db = makeSyncTestDb(dbFile);
+    /* ⚠️ makeSyncTestDb 造的表没有 origin 列（它只建分页要的那几列）——
+       这里补上，因为本组考的就是 origin 的口径。 */
+    const now = new Date().toISOString();
+
+    /* 先按预置清单登记两个源 */
+    upsertSources(db, [
+      { name: '预置甲', feedUrl: 'https://preset-a.com/feed', kind: 'rss' },
+      { name: '预置乙', feedUrl: 'https://preset-b.com/feed', kind: 'rss' },
+    ], now);
+    /* 再"用户自己加"一个 */
+    const add = cats.addCustomSource(db, { name: '我自己加的', feedUrl: 'https://mine.com/feed', kind: 'rss' }, now);
+    assert.equal(add.ok, true, '加自定义源应当成功：' + JSON.stringify(add));
+
+    const byUrl = (u) => db.prepare('SELECT id, name, enabled, origin FROM source WHERE feed_url = ?').get(u);
+    assert.equal(byUrl('https://mine.com/feed').origin, 'custom', '自定义源的 origin 应当写 custom');
+    assert.equal(byUrl('https://preset-a.com/feed').origin, 'preset', '预置源的 origin 应当是 preset');
+
+    /* ★ 再跑一次清单同步（模拟下一次抓取）—— 自定义源必须**还开着** */
+    const r = upsertSources(db, [
+      { name: '预置甲', feedUrl: 'https://preset-a.com/feed', kind: 'rss' },
+      // 「预置乙」从清单里去掉了 ⇒ 它应当被停用（这条老行为不许退化）
+    ], now);
+    assert.equal(byUrl('https://mine.com/feed').enabled, 1,
+      '★ 用户自己加的源被预置清单停用了 —— 用户会看到"我加的源过一天自己没了"');
+    assert.equal(r.retired.join(','), '预置乙', '从清单里删掉的**预置**源应当被停用，实得：' + JSON.stringify(r.retired));
+    assert.equal(byUrl('https://preset-b.com/feed').enabled, 0, '删掉的预置源没被停用（老行为退化了）');
+
+    /* 反向：清单里存在的源，origin 会被修正成 preset（历史遗留的 custom 也要修） */
+    db.prepare("UPDATE source SET origin = 'custom' WHERE feed_url = 'https://preset-a.com/feed'").run();
+    upsertSources(db, [{ name: '预置甲', feedUrl: 'https://preset-a.com/feed', kind: 'rss' }], now);
+    assert.equal(byUrl('https://preset-a.com/feed').origin, 'preset',
+      '出现在预置清单里的源没有被修正回 preset —— 它以后就不会被退役逻辑管了');
+    db.close();
+  });
+
+  await aok('addCustomSource：地址重复要明确拒绝，且区分"预置源"与"你加过"', () => {
+    const dbFile = tmpDbFile('custom-dup');
+    const db = makeSyncTestDb(dbFile);
+    const now = new Date().toISOString();
+    upsertSources(db, [{ name: '预置甲', feedUrl: 'https://preset-a.com/feed', kind: 'rss' }], now);
+
+    const dup1 = cats.addCustomSource(db, { name: '重名尝试', feedUrl: 'https://preset-a.com/feed' }, now);
+    assert.equal(dup1.ok, false, '粘一个已经在库里的地址应当被拒');
+    assert.equal(dup1.existed.origin, 'preset', '应当告诉用户"这是个预置源"');
+    /* ★ 而且**不许**把预置源改写成 custom —— 改了就脱离了清单管理 */
+    assert.equal(db.prepare('SELECT origin FROM source WHERE feed_url = ?').get('https://preset-a.com/feed').origin, 'preset',
+      '重复添加把预置源改写成了 custom（它以后就不会被退役逻辑管了）');
+
+    assert.equal(cats.addCustomSource(db, { name: '甲', feedUrl: 'https://x.com/feed' }, now).ok, true);
+    const dup2 = cats.addCustomSource(db, { name: '乙', feedUrl: 'https://x.com/feed' }, now);
+    assert.equal(dup2.ok, false);
+    assert.equal(dup2.existed.origin, 'custom', '应当告诉用户"你自己加过"');
+
+    /* 空值一律拒绝，不许存进去一个空名或空地址的源 */
+    assert.equal(cats.addCustomSource(db, { name: '', feedUrl: 'https://y.com/feed' }, now).ok, false, '空名称应当被拒');
+    assert.equal(cats.addCustomSource(db, { name: '丙', feedUrl: '' }, now).ok, false, '空地址应当被拒');
+    db.close();
+  });
+
+  await aok('deleteCustomSource：自定义源可删，**预置源不许删**（删了下次又被清单加回来）', () => {
+    const dbFile = tmpDbFile('custom-del');
+    const db = makeSyncTestDb(dbFile);
+    const now = new Date().toISOString();
+    upsertSources(db, [{ name: '预置甲', feedUrl: 'https://preset-a.com/feed', kind: 'rss' }], now);
+    const id = cats.addCustomSource(db, { name: '我的', feedUrl: 'https://mine.com/feed' }, now).id;
+
+    assert.equal(cats.deleteCustomSource(db, id).ok, true, '自定义源应当能删');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM source WHERE id = ?').get(id).n, 0);
+
+    const presetId = db.prepare('SELECT id FROM source WHERE feed_url = ?').get('https://preset-a.com/feed').id;
+    const del = cats.deleteCustomSource(db, presetId);
+    assert.equal(del.ok, false, '预置源不许删 —— 删了下次抓取又会被清单加回来，制造"删不掉"的假象');
+    assert.ok(/预置/.test(del.reason), '拒绝理由要说清是预置源：' + del.reason);
+    db.close();
+  });
+})();
+
+say();
+say('--- 第十六层之八 · 「添加源」的地址判定（纯函数，可穷举）---');
+
+ok('★★ 本机 / 内网地址一律拒绝（源是程序**定期主动去抓**的地址）', () => {
+  /* ⚠️ 这一条与"点击跳转"的白名单是**两件事**：
+     那个管"用户点的链接能不能交给系统浏览器"（边界是"别执行外部数据"）；
+     这个管"程序能不能定期去抓它"（边界更严：不许本机/内网）。
+     允许 127.0.0.1 就等于给"外部数据 → 本机请求"开了一条路 ——
+     用户可能被一段话术骗着把内网地址粘进来。 */
+  for (const bad of [
+    'http://127.0.0.1:1200/rsshub/x',
+    'http://localhost/feed',
+    'http://10.0.0.5/feed',
+    'http://172.16.3.4/feed',
+    'http://172.31.255.254/feed',
+    'http://192.168.1.1/feed',
+    'http://169.254.1.1/feed',
+    'http://0.0.0.0/feed',
+    'http://[::1]/feed',
+    'http://nas.local/feed',
+    'http://db.internal/feed',
+    'http://foo.localhost/feed',
+  ]) {
+    const r = validateNewSource({ name: '本机', feedUrl: bad });
+    assert.equal(r.ok, false, `应当拒绝本机/内网地址：${bad}`);
+    assert.ok(/本机|内网/.test(r.reason), `拒绝理由要说清原因：${bad} → ${r.reason}`);
+  }
+  /* 反向：正常的公网地址必须放行（否则这条闸门会变成"永远关着"） */
+  for (const good of ['https://www.qbitai.com/feed', 'http://example.com/rss', 'https://a.b.c.d.e.com/feed.xml']) {
+    assert.equal(validateNewSource({ name: '正常', feedUrl: good }).ok, true, `不该拒绝：${good}`);
+  }
+  /* 边界：172.15 / 172.32 是公网，不许误伤 */
+  assert.equal(validateNewSource({ name: 'x', feedUrl: 'http://172.15.0.1/f' }).ok, true, '172.15 属于公网，被误伤了');
+  assert.equal(validateNewSource({ name: 'x', feedUrl: 'http://172.32.0.1/f' }).ok, true, '172.32 属于公网，被误伤了');
+});
+
+ok('★ 地址必须能解析、协议必须是 http/https、不许带控制字符', () => {
+  assert.equal(validateNewSource({ name: 'x', feedUrl: '' }).ok, false, '空地址应当被拒');
+  assert.equal(validateNewSource({ name: '', feedUrl: 'https://e.com/f' }).ok, false, '空名字应当被拒');
+  assert.equal(validateNewSource({ name: 'x', feedUrl: '不是地址' }).ok, false, '解析不了的应当被拒');
+  assert.equal(validateNewSource({ name: 'x', feedUrl: 'ftp://e.com/f' }).ok, false, 'ftp 应当被拒');
+  assert.equal(validateNewSource({ name: 'x', feedUrl: 'javascript:alert(1)' }).ok, false, 'javascript: 应当被拒');
+  assert.equal(validateNewSource({ name: 'x', feedUrl: 'file:///C:/x.xml' }).ok, false, 'file: 应当被拒');
+  assert.equal(validateNewSource({ name: 'x', feedUrl: 'https://e.com/a\nhttps://evil.com' }).ok, false, '带换行的应当被拒');
+  assert.equal(validateNewSource({ name: 'x'.repeat(50), feedUrl: 'https://e.com/f' }).ok, false, '超长名字应当被拒');
+  assert.equal(validateNewSource({ name: 'x', feedUrl: 'https://e.com/' + 'a'.repeat(600) }).ok, false, '超长地址应当被拒');
+  /* 拒绝理由必须是**给用户看的正文**（能照着改），不是错误码 */
+  const r = validateNewSource({ name: 'x', feedUrl: '不是地址' });
+  assert.ok(/http/.test(r.reason), '理由里要告诉用户该写什么：' + r.reason);
+});
+
+ok('★ 存的是**归一化之后**的地址（否则同一个源会被存成两个）', () => {
+  /* ⚠️ `source.feed_url` 上有 UNIQUE。粘的原文与存进去的地址不一致时，
+     "同一个地址的两种写法"（末尾斜杠、主机名大小写）会绕过去重存成两个源，
+     而它们抓的是同一份内容 ⇒ 用户看到重复条目。 */
+  const r = validateNewSource({ name: '  x  ', feedUrl: '  HTTPS://Example.COM/feed  ' });
+  assert.equal(r.ok, true);
+  assert.equal(r.feedUrl, 'https://example.com/feed', '地址没被归一化：' + r.feedUrl);
+  assert.equal(r.name, 'x', '名字两边的空白应当被去掉');
+});
+
+ok('★★ 添加源必须**真的**调用那两个校验、并且**先验再存**', () => {
+  /* ⚠️ 这条是**静态**断言，我知道它比"跑一遍"弱。它的存在理由很具体：
+     IPC 处理器住在 `main/index.js` 里（那个文件 import 了 electron），
+     离线加载不了 ⇒ 那段逻辑**永远没法被执行到**。
+     而它的失效方式恰好是"看着像做了、其实没接上"：
+       · 判定写好了（feed-url.js 里那 12 条断言全绿），但 handler 没调用它
+       · "先验再存"那道 if 被删掉，于是用户粘一个网页地址进来也能入库
+     ⇒ 能做到的最强静态判据就是逐条咬这几个调用点。 */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  const body = src.match(/addSource: async \(payload\) => \{[\s\S]*?\n    \},/);
+  assert.ok(body, '找不到 addSource 的 IPC 实现');
+  const b = body[0];
+  assert.ok(/validateNewSource\(p\)/.test(b), 'addSource 没有调用 validateNewSource —— 地址判定等于没做');
+  assert.ok(/validateExternalUrl\(v\.feedUrl\)/.test(b), 'addSource 没有复用协议白名单（url-guard）');
+  assert.ok(/fetchText\(url\)/.test(b), 'addSource 没有真的抓一次 —— 那"先验再存"就是空话');
+  assert.ok(/parseFeed\(res\.text/.test(b), 'addSource 没有真的解析一次');
+  assert.ok(/if \(!parsed \|\| !parsed\.ok\) \{/.test(b), '解析失败的分支没了 ⇒ 不是 feed 的地址也会被存成源');
+  /* ★ 两条**契约**断言（比"某个 if 还在不在"更结实）：
+     ① 这个 handler 里**每一条失败返回都必须带 reason** ——
+        原因是要给用户看的正文，静默失败在这里的表现是"点了没反应"；
+     ② 不许有 `|| 'rss'` 这类**兜底默认值** ——
+        它会把"解析器契约变了"这种开发错误悄悄变成一个看起来正常的源。 */
+  const returns = b.match(/return \{[^}]*ok: false[^}]*\}/g) || [];
+  assert.ok(returns.length >= 3, '失败分支太少（应当至少有：校验失败 / 试抓失败 / 不是 feed），实得 ' + returns.length);
+  for (const r of returns) {
+    assert.ok(/reason:/.test(r), '有一条失败返回没带 reason（用户会看到"点了没反应"）：' + r.replace(/\s+/g, ' ').slice(0, 90));
+  }
+  /* ⚠️ 检查代码前**先去掉注释**：我自己在注释里写了 "而不是 `parsed.format || 'rss'`"
+     来解释为什么不用兜底 —— 不剥注释的话，那条解释本身会把断言判红。
+     （这类"断言咬到自己的注释"的坑，本项目在别处也踩过：
+       见 test-interaction 里那条去掉注释再匹配的 CSS 断言。） */
+  const code = b.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!/\|\|\s*'rss'/.test(code), "出现了 `|| 'rss'` 兜底 —— 它会把解析器契约的变化悄悄掩盖掉");
+  /* 顺序：校验 → 试抓 → 入库。反过来的话"先存后验"，
+     一个坏地址已经进库了才发现——那就留下了一个永远失败的源。 */
+  assert.ok(b.indexOf('validateNewSource(p)') < b.indexOf('fetchText(url)'), '校验必须在试抓之前');
+  assert.ok(b.indexOf('fetchText(url)') < b.indexOf('addCustomSource('), '试抓必须在入库之前（先验再存）');
+});
 
 say();
 say('--- 第十六层之五 · 界面侧：面板的"取消勾选"必须真的写回去 ---');
@@ -2942,7 +3431,7 @@ await (async () => {
 
     /* 与 main/index.js 里那段逐字同形（这就是"实现"的副本用于断言） */
     const impl = (id) => {
-      const bound = cats.getCategorySources(db, id);
+      const bound = cats.listSourceIdsOfCategory(db, id);
       const boundSet = new Set(bound.map(Number));
       return {
         ok: true,

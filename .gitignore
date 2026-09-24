@@ -118,3 +118,6 @@ m0-probe/report/selftest-log.txt
 
 # ── 交接文档（含本机路径与内部工作记录，不进公开仓库）──
 HANDOFF.md
+
+# 阶段 A 交接文档（含本机路径与内部工作记录，不进公开仓库）
+HANDOFF-阶段A.md

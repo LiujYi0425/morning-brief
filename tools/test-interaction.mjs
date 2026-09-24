@@ -1158,6 +1158,107 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
+  ok('★★ 添加源：忙碌期间不许连点，失败原因必须原样说出来', async () => {
+    /* 这条盯的是阶段 A 那个"先验再存"的动作。两个点最容易做坏：
+       ① 一次点击 = 主进程**真抓一次**该地址 ⇒ 连点就是对着别人站点打好几遍
+          （与"刷新"那条重入守卫同一个道理）；
+       ② 失败原因是**给用户看的正文**（"实际拿到的是「HTML 网页」"）——
+          只弹一句"添加失败"的话，用户不知道该改什么。 */
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+
+    /* 打开「＋ 添加源」那一行 */
+    r.clickPanelButton(/添加源/);
+    await r.sleep(20);
+    assert.equal(r.panelInputs().length, 2, '「添加源」应当展开出"名字 + 地址"两个输入框');
+
+    const filled = r.fillAddSource('示例站', 'https://example.com/feed');
+    await r.sleep(20);
+    const req = r.calls[r.calls.length - 1];
+    assert.equal(req.kind, 'addSource', '点「添加」应当发出 addSource');
+    assert.equal(req.payload.feedUrl, filled.url, '发出去的地址与输入框里的一致');
+    assert.equal(req.payload.name, filled.name);
+    assert.equal(String(req.payload.categoryId), '2', '必须带上当前类型 —— 不带的话新源会变成哪个类型都不属于的孤儿');
+
+    /* ★ 忙碌期间再点一次：不许发出第二笔 */
+    const n = r.calls.length;
+    r.clickPanelButton(/^验证中|^添加$/);
+    await r.sleep(20);
+    assert.equal(r.calls.length, n, '验证进行中还能再点一次 ⇒ 会对着同一个地址重复抓');
+    assert.equal(r.addSourceHint().hasVerifying, true, '忙碌时应当显示"正在验证这个地址…"（否则用户以为点了没反应）');
+
+    /* 失败：原因要原样透出 */
+    await r.ok('addSource', { ok: false, reason: '这个地址不是可解析的 feed（实际拿到的是「HTML 网页」）' });
+    await r.sleep(20);
+    assert.equal(r.attr('list', 'data-editing'), 'on', '添加失败不该把面板关掉（用户还要改地址）');
+    assert.ok(r.logs.some((l) => /添加源被拒/.test(l)), '被拒必须在日志里留痕');
+    assert.ok(r.logs.some((l) => /HTML 网页/.test(l)), '失败原因要原样进日志，便于事后定位');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★ 添加源成功：收起输入行、重读源清单、把新源并进来', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    r.clickPanelButton(/添加源/);
+    await r.sleep(20);
+    r.fillAddSource('我的站', 'https://mine.example/feed');
+    await r.sleep(20);
+
+    const NEW_SOURCES = PANEL_SOURCES.concat([{ id: 9, name: '我的站', enabled: true, lastStatus: null, lastError: null }]);
+    await r.ok('addSource', { ok: true, id: 9, name: '我的站', feedUrl: 'https://mine.example/feed', format: 'rss', itemCount: 12, categories: CATS });
+    await r.sleep(40);
+    /* 成功后必须**重新读一次源清单** —— 否则新加的源不出现在勾选列表里，
+       用户会以为没加上，然后再加一次（而第二次会因为重复被拒，更难理解）。 */
+    assert.equal(r.has('categorySources'), true, '添加成功后没有重读源清单 —— 新源不会出现在面板里');
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1, 9], sources: NEW_SOURCES });
+    const names = r.panelSources().map((s) => s.name);
+    assert.ok(names.some((x) => /我的站/.test(x)), '新加的源应当出现在勾选列表里：' + JSON.stringify(names));
+    assert.equal(r.panelInputs().length, 0, '添加成功之后输入行应当收起来');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★ 添加源：空地址 / 空名字在渲染层就拦住（不去打扰主进程）', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    r.clickPanelButton(/添加源/);
+    await r.sleep(20);
+    const n = r.calls.length;
+    r.fillAddSource('有名字', '');
+    await r.sleep(20);
+    assert.ok(!r.calls.slice(n).some((c) => c.kind === 'addSource'), '地址为空时不该发请求（省一次白跑的真抓）');
+    r.fillAddSource('', 'https://example.com/feed');
+    await r.sleep(20);
+    assert.ok(!r.calls.slice(n).some((c) => c.kind === 'addSource'), '名字为空时不该发请求');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★ 「添加源」那一行随面板关闭一起收起（免得下次打开看到一个空输入框）', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    r.clickPanelButton(/添加源/);
+    await r.sleep(20);
+    assert.equal(r.panelInputs().length, 2);
+    r.clickPanelButton(/^关闭$/);
+    await r.sleep(20);
+    r.click('btnEditCat');
+    await r.sleep(20);
+    if (r.has('categorySources')) await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    assert.equal(r.panelInputs().length, 0, '重新打开面板时不该还留着上次的输入行');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
   ok('★ 取消勾选一个源：写回主进程的是**去掉它之后**的集合（只增不减会让取消变成空操作）', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
