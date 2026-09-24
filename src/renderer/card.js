@@ -462,6 +462,10 @@
        ⚠️ 这里**不再画分隔线**：收起态下每 12px 都要省（面板总共只有 176px），
           而 `.catpanel` 的纵向 gap 已经足以把三块分开。 */
     var prefRow = el('div', 'catpanel__row');
+    /* ⚠️ `data-role` 是给离屏自检定位用的（`panelBox()` 报它的视口坐标）。
+       没有它，自检只能报"面板在哪儿"，报不出"三档按钮在哪儿"，
+       而真机上"按钮可不可点"恰恰只由后者决定。 */
+    prefRow.setAttribute('data-role', 'pref');
     prefRow.appendChild(el('span', 'catpanel__label', '喜欢程度'));
     ed.prefOptions.forEach(function (o) {
       var b = el('button', 'chip', o.label);
@@ -1398,6 +1402,37 @@
     var cardEl = document.querySelector('.card');
     b.cardBottom = cardEl ? Math.round(cardEl.getBoundingClientRect().bottom) : null;
     b.clippedBy = b.cardBottom != null && b.exists ? Math.max(0, b.bottom - b.cardBottom) : null;
+    /* ★ 三个关键控件的**视口坐标**，一起报出来。
+       为什么需要：面板里"点不点得到"只有坐标能回答，而我在真机上
+       连着几次合成点击都打在别的东西上（还顺带打开了一篇文章）。
+       有了这三个数，"按钮在不在可视区里"就是一行 JSON 能判的事，
+       不用再靠推断 —— 这与本项目"失败要有嘴"是同一条规矩。 */
+    var r1 = function (sel) {
+      var el2 = n.querySelector(sel);
+      if (!el2) return null;
+      var rr = el2.getBoundingClientRect();
+      return { x: Math.round(rr.left), y: Math.round(rr.top), w: Math.round(rr.width), h: Math.round(rr.height) };
+    };
+    b.list = r1('.catpanel__list');
+    b.prefRow = r1('.catpanel__row[data-role="pref"]');
+    b.footRow = r1('.catpanel__foot');
+    if (b.list) {
+      var listEl = n.querySelector('.catpanel__list');
+      b.list.clientH = listEl.clientHeight;
+      b.list.scrollH = listEl.scrollHeight;
+      /* ⚠️ 再加三个"内容长什么样"的数：光看 scrollH 无法区分
+         "源很多" / "名字换行把行撑高" / "网格没生效变成一列"。
+         真机上我量到 scrollH=358（而离线只有 98），只能靠这三项定位。 */
+      var cells = listEl.querySelectorAll('.catpanel__src');
+      b.list.count = cells.length;
+      b.list.firstCellH = cells.length ? Math.round(cells[0].getBoundingClientRect().height) : 0;
+      b.list.names = [].slice.call(cells, 0, 4).map(function (c) { return c.textContent; });
+      b.list.computed = {
+        display: getComputedStyle(listEl).display,
+        cols: getComputedStyle(listEl).gridTemplateColumns,
+        autoRows: getComputedStyle(listEl).gridAutoRows,
+      };
+    }
     return b;
   }
 
@@ -1452,6 +1487,9 @@
             all: btnInfo('btnAll'),
             refresh: btnInfo('btnRefresh'),
             collapse: btnInfo('btnCollapse'),
+            /* ★ 编辑入口也报（本次功能）：它是新按钮，而"新按钮到底在屏幕的
+               哪个像素上"只有这里能回答 —— 我在真机上靠推断坐标点了三次都没中。 */
+            edit: btnInfo('btnEditCat'),
           },
         },
         filters: box('#filters'),

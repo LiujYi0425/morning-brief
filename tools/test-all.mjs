@@ -2915,6 +2915,80 @@ await (async () => {
 say();
 say('--- 第十六层之五 · 界面侧：面板的"取消勾选"必须真的写回去 ---');
 
+await (async () => {
+  /* ★★ 这一组考 `main/index.js` 里 **IPC 依赖的实现**（那段文件加载不了
+     electron，但依赖本身是纯函数：给一个 id、返回一份数据）。
+     做法：把 `registerIpc(deps)` 的 deps 手写出来 —— 与真实启动时那份
+     逐字同形 —— 然后直接调它。
+     ⚠️ 为什么值得单独造一遍：真机上那个"面板里列出 36 个源（而不是 9 个）"
+        的缺陷就住在这里，而它在离线考裁判里**一声都不响**
+        （假清单只有 9 个源、面板自然装得下）。这条断言就是为了让它响。 */
+  const cats = await import('../src/store/db.js');
+
+  await aok('★★ 面板的源清单只能列**这个类型包含的源**（列全部会把按钮挤出面板）', async () => {
+    const dbFile = tmpDbFile('ipc-sources');
+    const db = await openDb(dbFile);
+    const now = new Date().toISOString();
+    /* 造一个"库里源很多、但某个类型只绑了其中 2 个"的库 —— 真机就是这个形状
+       （库里 36 个源，开源与工程只绑 9 个）。 */
+    upsertSources(
+      db,
+      Array.from({ length: 30 }, (_, i) => ({ name: '源' + (i + 1), feedUrl: `https://s${i + 1}.com/feed`, kind: 'rss' })),
+      now,
+    );
+    const cid = cats.upsertCategory(db, '只绑两个', 0, now);
+    const allIds = cats.listSources(db).map((s) => Number(s.id));
+    cats.setCategorySources(db, cid, [allIds[0], allIds[1]]);
+
+    /* 与 main/index.js 里那段逐字同形（这就是"实现"的副本用于断言） */
+    const impl = (id) => {
+      const bound = cats.getCategorySources(db, id);
+      const boundSet = new Set(bound.map(Number));
+      return {
+        ok: true,
+        categoryId: Number(id),
+        sourceIds: bound,
+        sources: cats
+          .listSources(db)
+          .filter((s) => boundSet.has(Number(s.id)))
+          .map((s) => ({ id: Number(s.id), name: s.name, enabled: !!s.enabled })),
+      };
+    };
+
+    const r = impl(cid);
+    assert.equal(r.sourceIds.length, 2, '这个类型应当只绑了 2 个源（断言本身要有意义）');
+    assert.equal(
+      r.sources.length,
+      2,
+      '面板返回了 ' + r.sources.length + ' 个源，而库里一共 30 个 —— ' +
+        '真机上这会渲染成 30 行，把「喜欢程度」与「删除类型」挤出面板可视区（用户点不到）',
+    );
+    /* 而且给出来的必须正是**绑定的那两个**，不能只是"数量凑巧对" */
+    assert.equal(r.sources.map((s) => Number(s.id)).sort().join(','), r.sourceIds.map(Number).sort().join(','),
+      '给出来的源与绑定的源不是同一批');
+    /* 反向：一个源都没绑的类型必须返回空清单，而不是"全部源" */
+    const empty = cats.upsertCategory(db, '一个都没绑', 1, now);
+    assert.equal(impl(empty).sources.length, 0, '没绑任何源的类型返回了非空清单（等于把全部源倒给界面）');
+    db.close();
+  });
+
+  /* ★ 顺带把 main/index.js 的**源码**也对一遍：上面那段副本可以是对的，
+     而文件里真正的实现仍然写着 listSources(d) —— 那就白考了。
+     ⚠️ 这是静态判据，但它咬的正是最容易退化的那一行。 */
+  await aok('★ main/index.js 里那段实现必须**过滤**源清单（副本对了不算数）', () => {
+    const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+    const body = src.match(/getCategorySources: \(id\) => \{[\s\S]*?\n    \},/);
+    assert.ok(body, '找不到 getCategorySources 的 IPC 实现');
+    assert.ok(/boundSet/.test(body[0]), '实现里没有"已绑定"的集合 —— 很可能是直接 listSources(d)');
+    assert.ok(/\.filter\(/.test(body[0]), '源清单没有被过滤：会把库里**全部**源都倒给界面');
+    assert.ok(!/sources:\s*listSources\(d\)\.map\(/.test(body[0]),
+      '源清单仍然写成 listSources(d).map(...) —— 真机上会渲染成几十行，把面板里的按钮挤出去');
+  });
+})();
+
+say();
+say('--- 第十六层之六 · 界面侧：面板的"取消勾选"必须真的写回去 ---');
+
 ok('★ card.js 的保存失败分支必须**回滚**（静默失败 = 用户以为设置存住了）', () => {
   const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'renderer', 'card.js'), 'utf8');
   const body = src.match(/async function toggleCategorySource\([\s\S]*?\n  \}/);

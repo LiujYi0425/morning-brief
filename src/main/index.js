@@ -988,19 +988,38 @@ async function bootstrap() {
     },
     getCategorySources: (id) => {
       const d = getDb();
+      const bound = getCategorySources(d, id);
+      const boundSet = new Set(bound.map(Number));
+      /* ★★ 清单里**只能有已绑定的源** —— 这一条是真机量出来的缺陷。
+       *
+       * ⚠️ 我第一版写的是 `listSources(d)`（库里全部 36 个源），理由看着挺合理：
+       *    "让用户看到别的源，好把它们勾进来"。真机上的实际后果是：
+       *    打开「开源与工程」（只绑了 9 个）时，面板里列出 **36 行**，
+       *    内容高度 397px 而可视区只有 155px ⇒
+       *    「喜欢程度」三档与「删除类型」整个掉到面板外面，用户**点不到**。
+       *    而这一切在离线考裁判里**一声都不响** —— 那份假清单只有 9 个源，
+       *    面板自然装得下。典型的"只有真实数据规模才会暴露"的缺陷，
+       *    我是靠真机量具（量出 count=36）才看见的。
+       *
+       * ⇒ 口径改成：面板只列**这个类型包含的源**。
+       *    "把别的源加进来"应当是一个独立的"添加源"入口（尚未做），
+       *    不能靠"把所有源都堆在面板里"来兜底 ——
+       *    宁可少一个功能，也不能让主要操作点不到。 */
       return {
         ok: true,
         categoryId: Number(id),
-        sourceIds: getCategorySources(d, id),
+        sourceIds: bound,
         /* 源清单与健康度一起给出去：界面要显示"这个源上次抓成功没有"，
            否则用户会往一个已经死掉的源上勾选。 */
-        sources: listSources(d).map((s) => ({
-          id: Number(s.id),
-          name: s.name,
-          enabled: !!s.enabled,
-          lastStatus: s.last_status || null,
-          lastError: s.last_error || null,
-        })),
+        sources: listSources(d)
+          .filter((s) => boundSet.has(Number(s.id)))
+          .map((s) => ({
+            id: Number(s.id),
+            name: s.name,
+            enabled: !!s.enabled,
+            lastStatus: s.last_status || null,
+            lastError: s.last_error || null,
+          })),
       };
     },
     setCategorySources: (id, sourceIds) => {
