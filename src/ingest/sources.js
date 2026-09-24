@@ -2,7 +2,9 @@
  * src/ingest/sources.js —— 预置源包（可增删）
  * =====================================================================
  * 选源的四条口径：
- *   ① **只要 RSS / Atom**。不抓 HTML 页面 —— 那是反爬与合规风险的入口，
+ *   ① **只要机器能直接读的结构化内容**：RSS / Atom / RDF / JSON Feed，
+ *      或者站点自己的**公开 JSON 接口**（阶段 B 加的，见 ingest/adapters.js）。
+ *      **不抓 HTML 页面** —— 那是反爬与合规风险的入口，
  *      而这个项目明确不做需要登录态或对抗性抓取的内容。
  *   ② **中文科技/新闻优先**（用户是中文读者），配少量英文技术源做补充。
  *   ③ **按类别预打标签**（需求 2 的筛选需要初始分类，否则一上来是空的）。
@@ -18,6 +20,11 @@
  *    失败的会在 `source_state` 里留下 `last_status` / `last_error`。
  * =====================================================================
  */
+
+/* 头条热榜的接口地址来自解析器模块 —— **只有一份**。
+   在这里再抄一遍字符串就是第二份口径：改了适配器而没改这里，
+   表现是"源还在抓，但抓到的东西解析不了"，而两边单看都是对的。 */
+import { TOUTIAO_HOT_API } from './parse-toutiao.js';
 
 /** 预置类别（需求 2：用户自定义固定类别 —— 这是初始值，之后可增删改） */
 export const DEFAULT_CATEGORIES = [
@@ -155,6 +162,89 @@ export const DEFAULT_SOURCES = [
      ⇒ 加进来只会让用户看到一个"最新的新闻是 2018 年"的源。
        要接新浪财经，正路是走 RSSHub（阶段 B），不是这些死 feed。 */
 
+  /* ==================================================================
+   * D. 阶段 B（2026-09-24）：**没有官方 feed** 的站点
+   *
+   * 用户点名要的那批站点里，有官方 feed 的已经在 A/C 组了；剩下这些
+   * 靠两条路接进来。**下面每一个地址 / 路由都是本机实测过的**
+   * （先在本机把 RSSHub 起起来、用它的路由表逐个真抓 ——
+   *  公共镜像返回的 404/429/503 **不能**用来判断路由存不存在，
+   *  详见 HANDOFF-阶段B.md 第 3 节；完整的 B0 实测表也在那里）。
+   *
+   *   ① **本机自建 RSSHub**：地址形如 http://127.0.0.1:1200/<路由>
+   *   ② **原生 JSON 适配器**：见 ingest/adapters.js + parse-toutiao.js
+   *
+   * ⚠️ ①这一组**全部 enabled: false**，理由不是"它们不好用"（实测全通），
+   *    而是**它们依赖用户本机跑着 RSSHub**：
+   *      · 不是每个人本机都有 RSSHub，默认开着会让所有人的"源异常"长期变红
+   *        ——那正是口径⑤要避免的（默认开着但永远失败 = 看起来像 bug）；
+   *      · 失败文案里会写明"是本机那个服务没起来"（见 fetch-feeds.js 的
+   *        explainFetchFailure），否则用户看到"网络错误"根本想不到这一层。
+   * ⚠️ 这一组还受 **MB_ALLOW_LOCAL_FEEDS=1** 那道闸管（见 feed-url.js）：
+   *    没开开关时**抓取层根本不发请求**，直接如实报"本机地址没放行"。
+   *    想用它们，三件事缺一不可：
+   *      ① 本机把 RSSHub 跑起来（默认端口 1200）
+   *      ② 用 MB_ALLOW_LOCAL_FEEDS=1 启动晨报机
+   *      ③ 在「筛选栏 → 编辑」里把它们勾上（默认是关的）
+   * ================================================================== */
+
+  /* —— ② 原生适配器：今日头条**热榜**（不依赖 RSSHub）——
+     实测 2026-09-24：GET /hot-event/hot-board/ → 200 · 117KB · 0.27s · data 50 条。
+     ⚠️ 默认关闭，理由是**这个接口给不出资讯流**，不是它不通：
+        · **没有时间字段**（只有 HotValue 热度）⇒ 条目 published_at 全是 NULL
+        · 没有摘要 / 正文
+        · Url 里会混进抖音直播（解析器会丢掉那些，见 isLiveLink）
+        想要热榜就自己勾上；但按既定排序（没有时间的排最后），
+        它不会挤进精选 —— 它本来就不是"今天有什么新闻"。 */
+  {
+    name: '今日头条热榜',
+    feedUrl: TOUTIAO_HOT_API,
+    kind: 'json',
+    categories: ['行业动态'],
+    enabled: false,
+  },
+
+  /* —— ① 本机自建 RSSHub（实测数字都记在每条后面）—— */
+  { name: '今日头条热点（本机）', feedUrl: 'http://127.0.0.1:1200/toutiao/channel/news_hot', kind: 'rss', categories: ['行业动态'], enabled: false },
+  { name: '网易新闻今日关注（本机）', feedUrl: 'http://127.0.0.1:1200/163/today', kind: 'rss', categories: ['行业动态', '国际要闻'], enabled: false },
+  { name: '财联社电报（本机）', feedUrl: 'http://127.0.0.1:1200/cls/telegraph', kind: 'rss', categories: ['行业动态'], enabled: false },
+  { name: '新浪财经滚动（本机）', feedUrl: 'http://127.0.0.1:1200/sina/finance/rollnews', kind: 'rss', categories: ['行业动态'], enabled: false },
+  { name: '人民日报电子版（本机）', feedUrl: 'http://127.0.0.1:1200/people/paper', kind: 'rss', categories: ['行业动态', '国际要闻'], enabled: false },
+  { name: '36氪快讯（本机）', feedUrl: 'http://127.0.0.1:1200/36kr/newsflashes', kind: 'rss', categories: ['行业动态'], enabled: false },
+  { name: '虎嗅资讯（本机）', feedUrl: 'http://127.0.0.1:1200/huxiu/article', kind: 'rss', categories: ['行业动态', '产品与设计'], enabled: false },
+  { name: 'ZAKER 精读（本机）', feedUrl: 'http://127.0.0.1:1200/zaker/focusread', kind: 'rss', categories: ['行业动态'], enabled: false },
+
+  /* ==================================================================
+   * 阶段 B0 的实测表（本机自建实例，2026-09-24）——把结论钉在这里，
+   * 免得下一个会话再把那些探针重跑一遍。
+   *
+   * 站点            路由                                 结果
+   * 今日头条        /toutiao/hot                        **404 路由不存在**
+   * 今日头条        /toutiao/channel/news_hot            200 · 15 条 · 最新当天
+   * 网易新闻        /netease/...                         **404 命名空间不存在**
+   * 网易新闻        /163/today                           200 ·  8 条 · 最新当天
+   * 网易新闻        /163/news/special/1                  200 · 20 条 · 最新当天
+   * 网易新闻        /163/news/rank/whole/click/day       200 但数据停在 **2021-07**（别用）
+   * 腾讯新闻        /tencent/news/author/:mid            200 · 20 条（**只有按作者**，没有通用流）
+   * 财联社          /cls/telegraph                       200 · 20 条 · 最新当天
+   * 新浪财经        /sina/finance/rollnews                200 · 50 条 · 最新当天
+   * 新浪财经        /sina/finance/china                  200 · 50 条 · 最新当天
+   * 人民日报        /people/paper                        200 · 30 条（电子版，时间是当日 0 点）
+   * 澎湃新闻        /thepaper/featured                   200 · 18 条
+   * 36氪           /36kr/newsflashes                     200 · 20 条
+   * 虎嗅            /huxiu/article                       200 · 20 条
+   * ZAKER          /zaker/focusread                      200 · 46 条
+   *
+   * ⚠️ 三条被推翻/确认的旧结论（接手的人**不用再查**）：
+   *   · 「腾讯新闻首页是 JS 壳」属实，但**不影响** RSSHub 那条作者路由；
+   *   · 「ZAKER 早已停止对外 RSS 输出」是**推断、且推错了**——
+   *     ZAKER 有两条能用的路由（上面那张表）；
+   *   · 「网易要闻 = /netease/news/special/0001」这个地址**从来不存在**：
+   *     RSSHub 的网易命名空间叫 **163**，不叫 netease。
+   *   · Flipboard：RSSHub 里**没有**这个命名空间（确认无解）。
+   *   · 财新：付费墙，不做（绕过它是违规的）。
+   * ================================================================== */
+
   // 实测已死 / 抓不到内容（留档，别浪费时间再试）
   { name: '果壳', feedUrl: 'https://www.guokr.com/rss/', kind: 'rss', categories: ['科学新知'], enabled: false },
   { name: '知乎日报', feedUrl: 'https://www.zhihu.com/rss', kind: 'rss', categories: ['行业动态'], enabled: false },
@@ -165,8 +255,14 @@ export const DEFAULT_SOURCES = [
 /**
  * 选源的六条口径（第三轮返工后补全）
  * =====================================================================
- *   ① **只要 RSS / Atom / JSON Feed**。不抓 HTML 页面 —— 那是反爬与合规风险
- *      的入口，而这个项目明确不做需要登录态或对抗性抓取的内容。
+ *   ① **只要 RSS / Atom / RDF / JSON Feed，或站点自己的公开 JSON 接口**。
+ *      不抓 HTML 页面 —— 那是反爬与合规风险的入口，
+ *      而这个项目明确不做需要登录态或对抗性抓取的内容。
+ *
+ *      ⚠️ 阶段 A 记下来的一处"文档与代码不符"就在这里：口径写着 JSON Feed，
+ *         而 `feed-parse.js` **根本没有 JSON 分支**，拿到 JSON Feed 会一路
+ *         走到"JSON（不是 feed）"。**阶段 B 把那一条分支补上了**
+ *         （见 feed-parse.js 的 parseJsonFeed），文档与代码现在一致。
  *   ② **中文优先**，配少量英文技术源。
  *   ③ **按类别预打标签**（需求 2 的筛选需要初始分类，否则一上来是空的）。
  *   ④ **每个源都要能被单独关掉** —— 源挂了是常态，不能让一个源拖垮整份简报。

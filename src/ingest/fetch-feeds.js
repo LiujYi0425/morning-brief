@@ -24,6 +24,16 @@
  */
 
 import { parseFeed } from './feed-parse.js';
+/* ★ 「这条源其实是个 JSON 接口」的登记处在 adapters.js（阶段 B）。
+   抓取层只问一句"该用哪个解析器"，不掺和"哪个域名用什么解析器"——
+   那段判断放进这个文件就等于跟着 electron 一起变得不可断言。 */
+import { adapterFor } from './adapters.js';
+/* ⚠️ 这个 import 的方向看着别扭（ingest → main），但它是**刻意的**：
+   `feed-url.js` 是一个**零依赖的叶子模块**（它自己不 import 任何东西，
+   尤其不 import electron），而"本机 / 内网地址"这件事的**唯一口径**就在那里。
+   在这里再抄一份 isPrivateHost 等于造第二份口径 —— 本项目已经反复栽在
+   这个模式上（CARD_SIZE / --win-pad / 数据目录口径，前后四处）。 */
+import { feedUrlGateReason, localServiceHint } from '../main/feed-url.js';
 import {
   openDb,
   upsertSources,
@@ -112,6 +122,26 @@ export async function fetchText(url, { timeoutMs = FETCH_TIMEOUT_MS } = {}) {
 }
 
 /**
+ * 抓取失败的**可读原因**（纯函数，可离线穷举）。
+ *
+ * ★ 为什么要单独一个函数（阶段 B2 的验收条件）：
+ *   阶段 B 引入的源地址是本机的（`http://127.0.0.1:1200/…`）。
+ *   用户忘了先启动 RSSHub 时，原始错误是 `fetch failed` / `ECONNREFUSED` ——
+ *   那是**网络错误**的措辞，人会往"网断了""被墙了"的方向排查，
+ *   而真相是"你自己那台服务没开"。**诊断指错方向比没有诊断更糟。**
+ *   ⇒ 本机地址的失败理由里必须把这件事写出来。
+ *
+ * @param {string} feedUrl
+ * @param {{error?:string}} res
+ * @returns {string}
+ */
+export function explainFetchFailure(feedUrl, res) {
+  const base = (res && res.error) || '抓取失败';
+  const hint = localServiceHint(feedUrl);
+  return hint ? base + '　—— ' + hint : base;
+}
+
+/**
  * 跑一轮抓取。
  *
  * @param {object} opts
@@ -121,6 +151,8 @@ export async function fetchText(url, { timeoutMs = FETCH_TIMEOUT_MS } = {}) {
  * @param {number[]} [opts.categoryIds]  只抓这些类型**绑定的源并集**（缺省 = 全部启用源）
  * @param {(msg:string)=>void} [opts.log]
  * @param {typeof fetchText} [opts.fetcher] 便于测试注入（默认真抓）
+ * @param {object} [opts.env] 读"本机地址放行开关"用的环境（默认 process.env；
+ *   测试里注入，免得跑测试的那台机器上恰好设了这个变量而改变结果）
  */
 export async function runIngest(opts) {
   const {
@@ -130,6 +162,7 @@ export async function runIngest(opts) {
     categoryIds = null,
     log = () => {},
     fetcher = fetchText,
+    env = process.env,
   } = opts;
 
   const nowIso = new Date().toISOString();
@@ -272,11 +305,33 @@ export async function runIngest(opts) {
     for (const src of sources) {
       const one = { name: src.name, feedUrl: src.feed_url, status: 'unknown', items: 0, newItems: 0 };
       try {
-        let res = await fetcher(src.feed_url);
+        /* ★★ 本机地址那道闸的**第二端**（阶段 B；第一端在 feed-url.js 的
+         *    validateNewSource 里，管"用户粘进来的地址"）。
+         *
+         *   ⚠️⚠️ 为什么必须有它：阶段 B2 往预置清单里加了一组**本机地址**
+         *      （http://127.0.0.1:1200/…），而预置源是**直接写进库**的、
+         *      根本不经过 validateNewSource —— 用户只要在面板上把那条源勾上，
+         *      程序就会去打 127.0.0.1。
+         *      那样一来 MB_ALLOW_LOCAL_FEEDS 就不再是"唯一入口"了，
+         *      那条安全边界会从**侧门**漏掉。
+         *   ⚠️ 判据必须在**发请求之前** —— 放到请求之后就等于"已经打过了"。 */
+        const gate = feedUrlGateReason(src.feed_url, env);
+        if (gate) {
+          one.status = 'blocked_local';
+          one.error = gate;
+        }
+        let res = gate ? null : await fetcher(src.feed_url);
         let parsed = null;
-        if (res.ok) {
+        /* ★ 这条源是不是"某个站点自己的 JSON 接口"（见 adapters.js）。
+           是的话解析器换成它，否则走通用的 RSS/Atom/RDF/JSON Feed 解析。
+           ⚠️ 两个解析器的返回**同构**（ok/format/items/warnings/contentKind），
+              所以下面那些分支一行都不用改。 */
+        const adapter = gate ? null : adapterFor(src.feed_url);
+        if (res && res.ok) {
           for (let attempt = 0; ; attempt += 1) {
-            parsed = parseFeed(res.text, { sourceId: src.id, sourceName: src.name });
+            parsed = adapter
+              ? adapter.parse(res.text, { sourceId: src.id, sourceName: src.name })
+              : parseFeed(res.text, { sourceId: src.id, sourceName: src.name });
             if (parsed.ok) break;
             /* ⚠️ **只对"人机验证页"重试**，不要对普通 HTML 重试。
                真机日志抓到的过度重试：品玩 / cnBeta / 财新网 返回的都是**普通网页**
@@ -291,15 +346,18 @@ export async function runIngest(opts) {
             if (!res.ok) break;
           }
         }
-        if (!res.ok) {
+        /* ⚠️ 下面三个分支都带 `!gate`：本机地址没放行时**一个都不走** ——
+           原因（one.error / one.status）在上面就写好了，这里再覆盖一次
+           只会把"你没打开那个开关"淹没成"网络错误"。 */
+        if (!gate && !res.ok) {
           one.status = res.status ? 'http_error' : 'network_error';
-          one.error = res.error;
-        } else if (!parsed || !parsed.ok) {
+          one.error = explainFetchFailure(src.feed_url, res);
+        } else if (!gate && (!parsed || !parsed.ok)) {
           one.status = 'parse_error';
           one.error = (parsed && parsed.warnings.join(' / ')) || '解析后没有任何条目';
           // ★ 把"实际拿到的是什么"一并带出来 —— 报错要指向下一步
           if (parsed && parsed.contentKind) one.contentKind = parsed.contentKind;
-        } else {
+        } else if (!gate) {
           one.status = 'ok';
           one.items = parsed.items.length;
           for (const it of parsed.items) {

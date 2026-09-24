@@ -1170,9 +1170,8 @@ async function bootstrap() {
     setCardState: (next) => {
       setCardExpanded(next === 'expanded');
     },
-    minimize: () => {
-      setCardExpanded(false);
-    },
+    /* ⚠️ 这里原来是 minimize: () => setCardExpanded(false) ——
+       它对应的 IPC 通道 card:minimize 渲染层一次都没调用过（死通道），阶段 B 删掉。 */
     drag,
     applyLevel: (mode) => (mode === 'bottom' ? applyBottomLevel(cardWin) : Promise.resolve(levelApplied)),
     markOpened: (id) => {

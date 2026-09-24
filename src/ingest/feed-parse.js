@@ -20,11 +20,17 @@
  *    自己识别到几条、以及有没有"看起来像条目但没解析出来"的迹象。
  *
  * ---------------------------------------------------------------------
- * 支持的三种格式（覆盖绝大多数真实源）
+ * 支持的四种格式（覆盖绝大多数真实源）
  * ---------------------------------------------------------------------
- *   RSS 2.0  <rss><channel><item><title/><link/><pubDate/><description/>
- *   Atom     <feed><entry><title/><link href=""/><updated/><summary/>
- *   RDF/RSS1 <rdf:RDF><item rdf:about=""><title/><link/><dc:date/>
+ *   RSS 2.0   <rss><channel><item><title/><link/><pubDate/><description/>
+ *   Atom      <feed><entry><title/><link href=""/><updated/><summary/>
+ *   RDF/RSS1  <rdf:RDF><item rdf:about=""><title/><link/><dc:date/>
+ *   JSON Feed { "version":"https://jsonfeed.org/version/1.1", "items":[…] }
+ *
+ * ★ JSON Feed 这一条是**阶段 B 补上的**，补它之前这里的注释与
+ *   sources.js 的选源口径（"只要 RSS / Atom / JSON Feed"）**对不上**：
+ *   文档说支持，代码里根本没有 JSON 分支 —— 拿到 JSON Feed 会一路走到
+ *   "JSON（不是 feed）"。这是阶段 A 记下来的三处"文档与代码不符"之一。
  * =====================================================================
  */
 
@@ -127,6 +133,138 @@ export function previewOf(body, n = 120) {
 }
 
 /**
+ * 解析**一个** JSON Feed 条目。
+ *
+ * 字段对照（jsonfeed.org 1.1）：
+ *   title          必需（**没有就返回 null，不编造** —— 与 XML 那条路同一口径）
+ *   url            正文地址；没有就看 external_url，再没有就看 id 像不像 URL
+ *   summary / content_text / content_html   摘要（按信息量从少到多取第一个有的）
+ *   date_published / date_modified          时间
+ *   author.name / authors[0].name           作者
+ *
+ * @param {unknown} raw
+ * @param {{sourceId?:string, sourceName?:string}} ctx
+ */
+function parseJsonItem(raw, ctx) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const title = collapseWhitespace(stripHtml(cleanText(typeof raw.title === 'string' ? raw.title : '')));
+  if (title === '') return null;
+
+  let url = null;
+  for (const key of ['url', 'external_url']) {
+    const v = raw[key];
+    if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) {
+      url = v.trim();
+      break;
+    }
+  }
+  /* ⚠️ id 兜底只接受"看起来像 URL"的：JSON Feed 的 id 常常是
+     tag:xxx / 纯数字，把那种东西当链接会产出一堆打不开的地址
+     —— 与 XML 那边"只接受像 URL 的 guid"逐字同一条口径。 */
+  if (!url && typeof raw.id === 'string' && /^https?:\/\//i.test(raw.id.trim())) url = raw.id.trim();
+
+  let summaryRaw = '';
+  if (typeof raw.summary === 'string') summaryRaw = raw.summary;
+  else if (typeof raw.content_text === 'string') summaryRaw = raw.content_text;
+  else if (typeof raw.content_html === 'string') summaryRaw = raw.content_html;
+  const summary = stripHtml(cleanText(summaryRaw)).trim();
+
+  let author = null;
+  if (raw.author && typeof raw.author.name === 'string') author = collapseWhitespace(raw.author.name) || null;
+  else if (Array.isArray(raw.authors) && raw.authors[0] && typeof raw.authors[0].name === 'string') {
+    author = collapseWhitespace(raw.authors[0].name) || null;
+  }
+
+  const publishedAt = parseDate(raw.date_published) || parseDate(raw.date_modified);
+
+  return {
+    title,
+    url,
+    // 摘要与标题一样长时没信息量，丢掉（与 XML 那条路同一口径）
+    summary: summary && summary !== title ? summary : '',
+    author,
+    publishedAt,
+    sourceId: ctx.sourceId || null,
+    sourceName: ctx.sourceName || null,
+    format: 'json',
+  };
+}
+
+/**
+ * 解析 JSON Feed。
+ *
+ * ⚠️ 与 adapters.js 里的**站点适配器**不是一回事，别合并：
+ *   这里按"内容长什么样"判定（任何站点都可能给 JSON Feed），
+ *   那里按"地址是谁"判定（某个站点的私有接口形状）。
+ *
+ * @param {string} body
+ * @param {{sourceId?:string, sourceName?:string}} ctx
+ * @returns {object} 与 parseFeed 同构
+ */
+function parseJsonFeed(body, ctx) {
+  const out = {
+    ok: false,
+    format: 'json',
+    title: null,
+    items: [],
+    warnings: [],
+    rawBlockCount: 0,
+    contentKind: null,
+    preview: null,
+  };
+
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    /* 是 JSON 的形状，但解析不了（被截断 / 坏掉）。
+       ⚠️ 与"是合法 JSON 但不是 JSON Feed"**分开说** ——
+          这两件事用户要做的下一步完全不同（重试一次 vs 换地址）。 */
+    out.contentKind = 'JSON（坏了或被截断）';
+    out.preview = previewOf(body);
+    out.warnings.push('不是可解析的 feed —— 实际拿到的是【' + out.contentKind + '】。开头：' + out.preview);
+    return out;
+  }
+
+  const items = data && !Array.isArray(data) && Array.isArray(data.items) ? data.items : null;
+  if (!items) {
+    out.contentKind = 'JSON（不是 JSON Feed）';
+    out.preview = previewOf(body);
+    const keys = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).slice(0, 12).join('/') : typeof data;
+    out.warnings.push(
+      '不是可解析的 feed —— 实际拿到的是【' + out.contentKind + '】。' +
+        'JSON Feed 的顶层要有 items 数组（jsonfeed.org），这个 JSON 的顶层是：' + keys +
+        '。开头：' + out.preview,
+    );
+    return out;
+  }
+
+  out.rawBlockCount = items.length;
+  out.title = typeof data.title === 'string' ? collapseWhitespace(cleanText(data.title)) || null : null;
+
+  if (!items.length) {
+    out.warnings.push('feed 合法但没有任何条目（源可能是空的）');
+    return out;
+  }
+
+  for (const raw of items) {
+    const item = parseJsonItem(raw, ctx);
+    if (item) out.items.push(item);
+  }
+
+  if (out.items.length < out.rawBlockCount) {
+    out.warnings.push(
+      '识别到 ' + out.rawBlockCount + ' 个条目块，但只有 ' + out.items.length + ' 条有标题 —— ' +
+        '缺标题的条目被丢弃（不编造标题）',
+    );
+  }
+
+  out.ok = out.items.length > 0;
+  return out;
+}
+
+/**
  * 解析一段 feed。
  *
  * @param {string} xml
@@ -156,6 +294,14 @@ export function parseFeed(xml, ctx = {}) {
   let body = xml.replace(/^\uFEFF/, '').replace(/<\?xml[\s\S]*?\?>/i, '');
   // 注释整块丢掉 —— 有些源用注释包住历史条目
   body = body.replace(/<!--[\s\S]*?-->/g, '');
+
+  /* ★★ JSON Feed（阶段 B 补上的第四条分支）。
+     ⚠️ 位置在**所有 XML 判定之前**：JSON 不该再去过一遍 XML 的正则，
+        否则一个 items 里带尖括号的 JSON 会被当成"像 item 的东西"乱猜。
+     ⚠️ 判据只看"开头是不是 { 或 ["，不看它能不能解析 ——
+        解析失败的那一档也要走 JSON 分支，才能给出"是 JSON 但坏了"这种
+        **指向下一步**的诊断（走 XML 分支只会得到"无法识别的内容类型"）。 */
+  if (/^\s*[[{]/.test(body)) return parseJsonFeed(body, ctx);
 
   /* ---- 判定格式 + 切出条目块 ----
    *

@@ -3,8 +3,10 @@
  * =====================================================================
  * ⚠️ 与 m0-probe 同一处踩坑：`sandbox: true` 下 preload 的 `require`
  * 是受限 polyfill，**不能 require 本地文件** ⇒ 通道名必须在这里内联一份。
- * 那份重复由 `__channels` 暴露出去，主进程启动时逐项比对（漂移就报错），
- * 于是"重复"变成被机器检查的不变量，而不是隐患。
+ * 那份重复由 `__channels` 暴露出去，由**离线断言**（tools/test-all.mjs）
+ * 逐项比对 src/shared/ipc-channels.js 里的 IPC_CHANNELS —— 漂移就红。
+ * ⚠️ 这句话以前写的是"主进程启动时逐项比对"，而实际上**从来没有比过**
+ *    （阶段 A 记下来的"死守卫"）；阶段 B 把它改成了真的会被执行的那种比对。
  * =====================================================================
  */
 
@@ -24,7 +26,8 @@ const IPC = Object.freeze({
   SOURCE_ADD: 'source:add', // ★ 用户粘贴一个 feed 地址加源（主进程先验再存）
 
   CARD_SET_STATE: 'card:setState',
-  CARD_MINIMIZE: 'card:minimize',
+  /* ⚠️ 这里原来是 CARD_MINIMIZE: 'card:minimize' —— 渲染层一次都没调用过
+     （它的作用与 card:setState('collapsed') 完全重复）。阶段 B 删掉了。 */
   CARD_DRAG: 'card:drag', // ★ 坐标只有 x/y/phase
   OPEN_EXTERNAL: 'item:open', // ★ 需求 3：跳转详情页（主进程做协议白名单）
 
@@ -65,7 +68,6 @@ const api = Object.freeze({
 
   card: Object.freeze({
     setState: (next) => ipcRenderer.invoke(IPC.CARD_SET_STATE, next),
-    minimize: () => ipcRenderer.invoke(IPC.CARD_MINIMIZE),
     drag: (payload) => ipcRenderer.invoke(IPC.CARD_DRAG, payload),
   }),
 

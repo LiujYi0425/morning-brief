@@ -62,8 +62,8 @@ import { decodeEntities, unwrapCdata, cleanText, collapseWhitespace, stripHtml }
 import { canonicalizeUrl, fnv1a, titleFingerprint, dedupeKey } from '../src/ingest/urls.js';
 import { parseFeed, parseDate, sniffContentKind } from '../src/ingest/feed-parse.js';
 import { openDb, upsertSources, startRun, insertItem, queryItems, countItems, sourceHealth, listSources, getMeta, setMeta, upsertCategory, seedSourceCategories, SCHEMA_VERSION } from '../src/store/db.js';
-import { DEFAULT_CATEGORIES } from '../src/ingest/sources.js';
-import { runIngest, shouldRunNow } from '../src/ingest/fetch-feeds.js';
+import { DEFAULT_CATEGORIES, DEFAULT_SOURCES } from '../src/ingest/sources.js';
+import { runIngest, shouldRunNow, explainFetchFailure } from '../src/ingest/fetch-feeds.js';
 import {
   nextRunAt,
   catchUpDecision,
@@ -115,7 +115,25 @@ import {
 import { validateExternalUrl } from '../src/main/url-guard.js';
 /* 「添加源」的地址判定（阶段 A）：同样是零依赖纯函数，
    所以它能被离线穷举 —— 这正是把它从 main/index.js 里拆出来的原因。 */
-import { validateNewSource, isPrivateHost, allowsLocalFeeds, ALLOW_LOCAL_ENV } from '../src/main/feed-url.js';
+import {
+  validateNewSource,
+  isPrivateHost,
+  allowsLocalFeeds,
+  ALLOW_LOCAL_ENV,
+  /* ★ 阶段 B：那道开关的**第二端**（管"库里已有的本机源现在还能不能抓"），
+     以及抓本机地址失败时要写进理由里的那句话。两者都是纯函数。 */
+  feedUrlGateReason,
+  localServiceHint,
+} from '../src/main/feed-url.js';
+/* ★★ 阶段 B：接入"没有官方 feed"的站点。
+   两条路（头条的原生 JSON 适配器 / 本机自建 RSSHub）各自都拆成了
+   **零依赖纯函数** —— 所以它们能被离线穷举。这不是巧合：
+   写进抓取层就等于跟着 electron 一起变得永远没有断言。 */
+import { parseToutiaoHot, isLiveLink, cleanLink, TOUTIAO_HOT_API, MAX_TITLE_LEN } from '../src/ingest/parse-toutiao.js';
+import { adapterFor } from '../src/ingest/adapters.js';
+/* ★ 通道白名单搬到了零依赖的 shared 里，于是 checkChannelParity
+   这个"定义了却从没被调用过"的死守卫**第一次真的会被执行**。 */
+import { IPC_CHANNELS, checkChannelParity } from '../src/shared/ipc-channels.js';
 /* 本次功能（筛选栏）：配额选取是**零依赖纯函数**，所以它能被离线穷举 ——
    这不是巧合：它 import 不了 electron，写进 main/index.js 就等于永远没有断言。 */
 import { selectByQuota, quotaOf, scopedQuota, classOf, PREF } from '../src/shared/quota.js';
@@ -3616,6 +3634,358 @@ function syncDeleteCategoryWithItems(db, categoryId) {
 
 /* ---------- 变异测试 ---------- */
 say();
+
+/* ==================================================================
+ * 第十七层 · 阶段 B：接入「没有官方 feed」的站点
+ * ------------------------------------------------------------------
+ * 这一层的每一条断言都对应阶段 B 实测到的一件具体的事，不是泛泛的"解析对不对"：
+ *   · 头条热榜接口**没有时间字段** ⇒ 必须存 NULL（不编造）
+ *   · 热榜里**会混进抖音直播**   ⇒ 那不是资讯
+ *   · 同一条的 Url **每次都变**（带埋点）⇒ 不去掉就每抓一次多一批重复
+ *   · 本机地址（自建 RSSHub）必须先过 MB_ALLOW_LOCAL_FEEDS 那道闸
+ *   · 抓本机地址失败时，理由里要看得出"是你本机那个服务没起来"
+ * ================================================================== */
+say();
+say('--- 第十七层 · 阶段 B：接入「没有官方 feed」的站点 ---');
+
+/* 真样本：2026-09-24 从 hot-event/hot-board 抓下来的形状（字段逐个照抄，
+   条数压到 8 条）。⚠️ 造夹具要**照抄真实形状**：阶段 A 有 4 次"断言红了"
+   其实是夹具写错了，那次教训就是拿想象的结构去喂解析器。 */
+const TOUTIAO_OK = JSON.stringify({
+  data: [
+    {
+      ClusterId: 7688885007091352000,
+      Title: '习近平出席特朗普举行的欢迎仪式',
+      LabelUrl: 'https://p3-sign.toutiaoimg.com/x.png',
+      Label: 'hot',
+      // ★ 真实抓包里这一串有 838 个字符，而且**每次请求都不一样**
+      Url: 'https://www.toutiao.com/trending/1001/?category_name=topic_innerflow&log_pb=%7B%22hot_board_impr_id%22%3A%2220260924222849D1FF%22%7D&rank=&style_id=40132&topic_id=1001',
+      HotValue: '45099814',
+      Schema: '',
+      ClusterIdStr: '1001',
+      ClusterType: 2,
+      QueryWord: '习近平出席特朗普举行的欢迎仪式',
+      Image: null,
+      LabelDesc: '热门事件',
+    },
+  ],
+  impr_id: '20260924222849D1FF543248203FF87D7D',
+  status: 'success',
+});
+
+/** 一条乱糟糟的：重复 / 缺标题 / 缺链接 / 坏链接 / 超长标题 / 直播，全在里面 */
+const TOUTIAO_MESSY = JSON.stringify({
+  data: [
+    { ClusterIdStr: '1001', Title: '正常的第一条', Url: 'https://www.toutiao.com/trending/1001/?log_pb=a', HotValue: '100' },
+    { ClusterIdStr: '1002', Title: '这条点开是直播间', Url: 'https://webcast-open.douyin.com/open/media_live/9527?foo=1', HotValue: '90' },
+    { ClusterIdStr: '1001', Title: '同一件事在榜上又出现一次', Url: 'https://www.toutiao.com/trending/1001/?log_pb=b', HotValue: '80' },
+    { ClusterIdStr: '1003', Title: '', Url: 'https://www.toutiao.com/trending/1003/', HotValue: '70' },
+    { ClusterIdStr: '1004', Title: '没有链接的那一条', Url: '', HotValue: '60' },
+    { ClusterIdStr: '1005', Title: '链接坏掉的那一条', Url: 'ht!tp://这不是一个地址', HotValue: '50' },
+    { ClusterIdStr: '1006', Title: '超'.repeat(260), Url: 'https://www.toutiao.com/trending/1006/', HotValue: '40' },
+    { ClusterIdStr: '1007', Title: '正常的一条', Url: 'https://www.toutiao.com/trending/1007/', HotValue: '30' },
+    null,
+  ],
+});
+
+ok('★ 头条热榜：JSON 变成与 parseFeed **同构**的条目（抓取层才不用管走的是哪条路）', () => {
+  const r = parseToutiaoHot(TOUTIAO_OK, { sourceId: 7, sourceName: '今日头条热榜' });
+  assert.equal(r.ok, true, '正常样本没解析出来：' + JSON.stringify(r.warnings));
+  assert.equal(r.format, 'json');
+  assert.equal(r.items.length, 1);
+  const it = r.items[0];
+  assert.equal(it.title, '习近平出席特朗普举行的欢迎仪式');
+  assert.equal(it.sourceId, 7);
+  assert.equal(it.sourceName, '今日头条热榜');
+  assert.equal(it.format, 'json');
+  assert.ok(/热榜第 1 位/.test(it.summary), '摘要里要如实写清是第几位：' + it.summary);
+  assert.ok(/4510\.0 万/.test(it.summary), '热度要按接口给的原值折算：' + it.summary);
+  /* ★ 同构是**这条断言的全部意义**：两个解析器的出口字段必须一模一样，
+     否则抓取层就得知道"这条源走的是哪条路"，那正是 adapters.js 要避免的事。 */
+  const xml = parseFeed(RSS_SAMPLE);
+  assert.deepEqual(Object.keys(it).sort(), Object.keys(xml.items[0]).sort(), '两个解析器的出口字段不一致');
+});
+
+ok('★★ 头条热榜**不编造时间**：接口没给时间就存 NULL（不许拿抓取时刻冒充）', () => {
+  /* ⚠️ 这条守的是本项目的铁律（fetch-feeds.js 顶部第 ③ 条）。
+     这个接口的字段里**根本没有时间**（只有 HotValue 热度），
+     拿"抓取时刻"填进去的后果是：50 条同一个时间戳、
+     而且"源没给时间"和"这条就是现在发的"从此分不开。 */
+  const r = parseToutiaoHot(TOUTIAO_MESSY);
+  for (const it of r.items) assert.equal(it.publishedAt, null, '有条目被塞了时间：' + it.title);
+  assert.ok(r.warnings.some((w) => w.includes('没有发布时间')), '告警里要说清"这些条目没有时间"：' + JSON.stringify(r.warnings));
+  assert.ok(r.warnings.some((w) => w.includes('不提供时间字段')), '要说清是**接口不提供**，而不是我们没解析');
+});
+
+ok('★★ 直播链接不许当资讯（点开是直播间，不是新闻卡片）', () => {
+  const r = parseToutiaoHot(TOUTIAO_MESSY);
+  for (const it of r.items) {
+    assert.ok(!/douyin|webcast/i.test(String(it.url || '')), '直播链接被当成资讯收下了：' + it.url);
+  }
+  assert.ok(r.warnings.some((w) => w.includes('直播')), '丢掉的直播要如实计数：' + JSON.stringify(r.warnings));
+  /* 反向：判据不许"看着像直播就杀" —— 正常路径里带 live 的不能误伤 */
+  assert.equal(isLiveLink('https://www.toutiao.com/alive/123'), false, '/alive/ 被误判成直播了');
+  assert.equal(isLiveLink('https://www.toutiao.com/deliver/1'), false, '/deliver/ 被误判成直播了');
+  assert.equal(isLiveLink('https://www.toutiao.com/trending/1001/'), false);
+  assert.equal(isLiveLink('https://webcast-open.douyin.com/open/media_live/1'), true);
+  assert.equal(isLiveLink(''), false);
+});
+
+ok('★★ Url 里的埋点必须去掉（不去掉 ⇒ 每抓一次就多一批"新"条目）', () => {
+  /* ⚠️⚠️ 这条是**实测逼出来的**：间隔 1.5 秒抓两次，同样 50 条同样的 ClusterId，
+     但同一条的 Url 两次不一样（里面带 hot_board_impr_id，每次请求都变）。
+     而 dedupeKey 优先用 URL —— 不去掉埋点，每刷新一次这 50 条都会变成"新的"。 */
+  const a = parseToutiaoHot(JSON.stringify({ data: [{ ClusterIdStr: '1001', Title: '同一条', Url: 'https://www.toutiao.com/trending/1001/?log_pb=AAA&rank=', HotValue: '1' }] }));
+  const b = parseToutiaoHot(JSON.stringify({ data: [{ ClusterIdStr: '1001', Title: '同一条', Url: 'https://www.toutiao.com/trending/1001/?log_pb=BBB&rank=', HotValue: '1' }] }));
+  assert.equal(a.items[0].url, 'https://www.toutiao.com/trending/1001/', '埋点没去掉：' + a.items[0].url);
+  assert.equal(
+    dedupeKey(a.items[0]),
+    dedupeKey(b.items[0]),
+    '同一件事两次抓取的去重键不同 —— 每刷新一次就会多一批重复条目',
+  );
+  /* 反向：**认不出**的链接不许动它（有些站依赖 query 才能打开） */
+  const keep = 'https://www.toutiao.com/article/123/?id=456';
+  assert.equal(cleanLink(keep), keep, '不该动认不出的链接');
+  assert.equal(cleanLink(''), null);
+  assert.equal(cleanLink('不是地址'), null);
+  assert.equal(cleanLink('javascript:alert(1)'), null, '非 http(s) 协议不许当链接');
+});
+
+ok('★ data 为空 / 缺 data / 不是 JSON / 是反爬页：都要说清**拿到了什么**', () => {
+  /* ⚠️ 与 parseFeed 同一条口径：报错不指向下一步，就等于没报。 */
+  const empty = parseToutiaoHot('{"data":[]}');
+  assert.equal(empty.ok, false);
+  assert.ok(empty.warnings.some((w) => w.includes('空数组')), '空数组要如实说是空的：' + JSON.stringify(empty.warnings));
+
+  const noData = parseToutiaoHot('{"foo":1,"bar":2}');
+  assert.equal(noData.ok, false);
+  assert.ok(noData.warnings.some((w) => w.includes('没有 data 数组')), '要说清是接口形状变了');
+  assert.ok(noData.warnings.some((w) => w.includes('foo')), '要把实际拿到的顶层字段报出来，便于定位：' + JSON.stringify(noData.warnings));
+
+  const html = parseToutiaoHot('<!DOCTYPE html><html><body>安全检测</body></html>');
+  assert.equal(html.ok, false);
+  assert.ok(/HTML|反爬|验证/.test(String(html.contentKind)), '内容类型判错：' + html.contentKind);
+
+  assert.equal(parseToutiaoHot('').ok, false);
+  assert.equal(parseToutiaoHot('   ').ok, false);
+  assert.equal(parseToutiaoHot('[1,2,3]').ok, false, '顶层是数组要说清形状不对');
+});
+
+ok('★ 字段缺失 / 重复 ClusterId / 超长标题：一条都不许把整源炸掉', () => {
+  const r = parseToutiaoHot(TOUTIAO_MESSY);
+  assert.equal(r.ok, true, '一份脏数据把整源干掉了：' + JSON.stringify(r.warnings));
+  /* 9 个元素里：1 条直播、1 条重复、1 条没标题、1 个 null ⇒ 剩 5 条 */
+  assert.equal(r.items.length, 5, '应收下 5 条，实际 ' + r.items.length + '：' + r.items.map((x) => x.title).join(' / '));
+  assert.deepEqual(r.items.map((x) => x.title), ['正常的第一条', '没有链接的那一条', '链接坏掉的那一条', '超'.repeat(200), '正常的一条']);
+  // 重复：留下的是**榜上靠前**的那条，不是后面那条
+  assert.ok(!r.items.some((x) => x.title.includes('又出现一次')), '重复的那条应当被丢掉（保留榜上更靠前的）');
+  // 没有标题 ⇒ 丢掉，且如实计数（不编造标题）
+  assert.ok(r.warnings.some((w) => w.includes('没有标题')), '缺标题要如实计数：' + JSON.stringify(r.warnings));
+  assert.ok(r.warnings.some((w) => w.includes('ClusterId 重复')), '重复要如实计数');
+  // 超长标题：**截断而不是丢弃**（丢一条真实存在的热榜比截短更糟）
+  const long = r.items.find((x) => x.title.length === MAX_TITLE_LEN);
+  assert.ok(long, '超长标题那条被丢掉了 —— 应当截断保留');
+  assert.equal(long.title, '超'.repeat(MAX_TITLE_LEN));
+  assert.ok(r.warnings.some((w) => w.includes('已截断')), '截断要如实记一笔');
+  // 坏链接 ⇒ 条目仍然要留下，只是没有链接
+  const bad = r.items.find((x) => x.title === '链接坏掉的那一条');
+  assert.equal(bad.url, null, '坏链接不许编一个出来');
+  assert.ok(r.warnings.some((w) => w.includes('解析不了')), '坏链接要如实计数');
+  assert.equal(r.items.find((x) => x.title === '没有链接的那一条').url, null);
+});
+
+ok('★ adapterFor：认得出头条热榜接口，也**不误伤**别的地址', () => {
+  assert.equal((adapterFor(TOUTIAO_HOT_API) || {}).id, 'toutiao-hot');
+  /* ⚠️ 判据故意做窄（只认头条站内 /hot-event/）：按整站认会误伤两种真实情况 ——
+     用户在别处找到的头条 feed，以及以后头条真的出了 feed。
+     窄判据的失败方式是"没认出来、走通用解析器"，那是安全的那一侧。 */
+  assert.equal(adapterFor('https://www.toutiao.com/feed'), null, '整站认会把普通 feed 地址也吞掉');
+  assert.equal(adapterFor('https://rsshub.rssforever.com/thepaper/featured'), null);
+  assert.equal(adapterFor('http://127.0.0.1:1200/36kr/newsflashes'), null);
+  assert.equal(adapterFor(''), null);
+  assert.equal(adapterFor(null), null);
+  assert.equal(adapterFor('不是地址'), null);
+});
+
+ok('★ JSON Feed 这条分支现在**真的存在**（阶段 A 记下来的"文档与代码不符"之一）', () => {
+  /* ⚠️ sources.js 的选源口径一直写着"只要 RSS / Atom / JSON Feed"，
+     而 feed-parse.js 里根本没有 JSON 分支 —— 拿到 JSON Feed 会一路走到
+     "JSON（不是 feed）"。阶段 B 把它补上了，这条断言就是那个"补上了"的证据。 */
+  const feed = JSON.stringify({
+    version: 'https://jsonfeed.org/version/1.1',
+    title: '某站的 JSON Feed',
+    items: [
+      {
+        id: 'https://e.com/1',
+        url: 'https://e.com/1',
+        title: 'JSON Feed 的第一条',
+        summary: '摘要文本',
+        date_published: '2026-09-24T10:00:00Z',
+        authors: [{ name: '某作者' }],
+      },
+      { id: 'tag:example,2026:2', url: 'https://e.com/2', title: '第二条', content_html: '<p>正文</p>' },
+      { id: 'https://e.com/3', title: '' },
+    ],
+  });
+  const r = parseFeed(feed);
+  assert.equal(r.ok, true, 'JSON Feed 没被认出来：' + JSON.stringify(r.warnings));
+  assert.equal(r.format, 'json');
+  assert.equal(r.title, '某站的 JSON Feed');
+  assert.equal(r.items.length, 2, '缺标题的那条应当被丢掉（不编造标题）');
+  assert.equal(r.items[0].title, 'JSON Feed 的第一条');
+  assert.equal(r.items[0].publishedAt, '2026-09-24T10:00:00.000Z');
+  assert.equal(r.items[0].author, '某作者');
+  assert.equal(r.items[1].summary, '正文', 'content_html 要剥成纯文本');
+  assert.ok(r.warnings.some((w) => w.includes('缺标题')), '丢掉的条目要如实计数');
+  const xml = parseFeed(RSS_SAMPLE);
+  assert.deepEqual(Object.keys(r.items[0]).sort(), Object.keys(xml.items[0]).sort(), '出口字段必须与 XML 那条路一致');
+});
+
+ok('★ 是 JSON 但不是 JSON Feed：要说清这一档，而不是笼统的"认不出"', () => {
+  const r = parseFeed('{"foo":1,"bar":[1,2]}');
+  assert.equal(r.ok, false);
+  assert.equal(r.contentKind, 'JSON（不是 JSON Feed）');
+  assert.ok(r.warnings.some((w) => w.includes('items')), '要告诉用户 JSON Feed 需要 items 数组：' + JSON.stringify(r.warnings));
+  assert.ok(r.warnings.some((w) => w.includes('foo')), '要把实际顶层字段报出来');
+  // 形状像 JSON 但坏掉：与上面**分开**（用户要做的下一步不同）
+  const broken = parseFeed('{"items": [ 被截断');
+  assert.equal(broken.ok, false);
+  assert.ok(/坏了|截断/.test(String(broken.contentKind)), '截断要说清是坏了：' + broken.contentKind);
+});
+
+ok('★ 本机地址的拒绝理由 / 失败提示都要**写明那个环境变量名**（否则用户被卡住还不知道有出路）', () => {
+  const local = 'http://127.0.0.1:1200/cls/telegraph';
+  assert.ok(String(feedUrlGateReason(local, {})).includes(ALLOW_LOCAL_ENV), '拒绝理由里要有变量名');
+  assert.equal(feedUrlGateReason(local, { [ALLOW_LOCAL_ENV]: '1' }), null, '开了开关就该放行');
+  assert.equal(feedUrlGateReason('https://www.qbitai.com/feed', {}), null, '公网地址不该被这道闸拦');
+  assert.equal(feedUrlGateReason('不是地址', {}), null, '解析不了的地址交给抓取层去报，不在这里拦');
+
+  const hint = localServiceHint(local);
+  assert.ok(hint.includes('本机'), '本机地址的失败提示里要出现"本机"：' + hint);
+  assert.ok(hint.includes(ALLOW_LOCAL_ENV), '还要顺手告诉用户那个开关：' + hint);
+  assert.equal(localServiceHint('https://www.qbitai.com/feed'), '', '公网地址不该被塞一句本机提示');
+
+  const explained = explainFetchFailure(local, { error: 'fetch failed' });
+  assert.ok(explained.startsWith('fetch failed'), '原始错误不许被吃掉（否则日志里查不到真因）');
+  assert.ok(/RSSHub|本机/.test(explained), '失败理由里要看得出"是你本机那个服务没起来"：' + explained);
+  assert.equal(explainFetchFailure('https://www.qbitai.com/feed', { error: 'fetch failed' }), 'fetch failed');
+});
+
+ok('★ 阶段 B 加进来的预置源：本机那一组一律**默认关闭**，地址一律是本机 RSSHub', () => {
+  const locals = DEFAULT_SOURCES.filter((s) => String(s.feedUrl).startsWith('http://127.0.0.1:1200/'));
+  assert.ok(locals.length >= 6, '本机 RSSHub 那一组太少了：' + locals.length);
+  for (const s of locals) {
+    /* ⚠️ 默认关闭**不是**因为它们不通（本机实测全通），而是因为
+       "不是每个人本机都有 RSSHub"：默认开着会让所有人的源异常长期变红，
+       而那是**环境事实、不是缺陷**（口径⑤）。 */
+    assert.equal(s.enabled, false, s.name + ' 默认开着 —— 会让没有 RSSHub 的人一直看到"源异常"');
+    assert.equal(s.kind, 'rss');
+    assert.ok(s.categories && s.categories.length, s.name + ' 没有预打类型标签');
+    // 它们必须**过得了**那道开关（否则用户就算开了开关也加不进来）
+    assert.equal(validateNewSource({ name: s.name, feedUrl: s.feedUrl }, { [ALLOW_LOCAL_ENV]: '1' }).ok, true);
+    // 而默认环境下一律拒绝 —— 那道闸对它们同样有效
+    assert.equal(validateNewSource({ name: s.name, feedUrl: s.feedUrl }, {}).ok, false);
+  }
+  const toutiao = DEFAULT_SOURCES.find((s) => s.feedUrl === TOUTIAO_HOT_API);
+  assert.ok(toutiao, '头条热榜那条源不在预置清单里');
+  assert.equal(toutiao.enabled, false, '热榜不是资讯流，不许默认打开');
+  assert.equal(toutiao.kind, 'json');
+});
+
+ok('★★ IPC 通道表两份必须逐字一致（这条断言以前**根本不存在**：守卫是死的）', () => {
+  /* ⚠️ 这是阶段 A 记下来的三处"文档与代码不符"之二：
+     checkChannelParity 定义了却从未被调用 —— 因为表住在 ipc.js 里，
+     而那个文件 import electron，离线碰不到。现在表搬到了零依赖的
+     shared/ipc-channels.js，于是这条比对**第一次真的会执行**。 */
+  const preloadSrc = fs.readFileSync(path.resolve(HERE, '..', 'src', 'preload', 'index.cjs'), 'utf8');
+  /* ⚠️ 扫代码之前**必须先剥掉注释**：我在 preload 里留了一句
+     "这里原来是 CARD_MINIMIZE: 'card:minimize'" 解释为什么删它 ——
+     不剥注释的话，那条解释本身就会把下面两条断言判红。
+     （同类坑本项目踩过两次：见 test-interaction 里"去掉注释再匹配 CSS"那条。） */
+  const preloadCode = preloadSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const block = preloadCode.match(/const IPC = Object\.freeze\(\{([\s\S]*?)\n\}\);/);
+  assert.ok(block, '找不到 preload 里的 IPC 常量表');
+  const preloadChannels = [...block[1].matchAll(/:\s*'([^']+)'/g)].map((m) => m[1]);
+  assert.equal(preloadChannels.length, IPC_CHANNELS.length, '两份通道表的条数不同');
+  const parity = checkChannelParity(preloadChannels);
+  assert.ok(
+    parity.ok,
+    '通道表漂移了：表里有而 preload 没有 = ' + JSON.stringify(parity.missing) +
+      '；preload 有而表里没有 = ' + JSON.stringify(parity.extra),
+  );
+  /* 死通道 card:minimize（阶段 A 记下来的第三处）必须真的没了 ——
+     留着它的代价是下一个人以为界面上真有"最小化"这个动作。 */
+  assert.ok(!IPC_CHANNELS.includes('card:minimize'), 'card:minimize 又回到了通道表里');
+  assert.ok(!/card:minimize/.test(preloadCode), 'preload 里还留着 card:minimize');
+  assert.ok(!/CARD_MINIMIZE/.test(preloadCode), 'preload 里还留着 CARD_MINIMIZE 常量');
+});
+
+await aok('★★ 本机地址那道闸的**第二端**：开关没开时一个请求都不许发出去', async () => {
+  /* ⚠️⚠️ 第一端是 validateNewSource（管"用户粘进来的地址"），
+     而阶段 B2 的预置源是**直接写进库**的、根本不过那一关。
+     少了这条断言，用户把面板上那条本机源勾上，程序就会去打 127.0.0.1 ——
+     那个开关也就不是"唯一入口"了。 */
+  const dbFile = tmpDbFile('local-gate');
+  const map = {};
+  for (const s of DEFAULT_SOURCES) map[s.feedUrl] = { ok: true, status: 200, text: GOOD_RSS };
+  let calls = [];
+  const counting = async (url) => {
+    calls.push(url);
+    return map[url] || { ok: false, error: '假 fetcher：没有为这个 URL 配置响应' };
+  };
+  await ingestWith(counting, dbFile); // 第一轮：把预置源登记进库
+
+  const localUrl = 'http://127.0.0.1:1200/cls/telegraph';
+  const db = await openDb(dbFile);
+  db.prepare('UPDATE source SET enabled = 0').run();
+  db.prepare('UPDATE source SET enabled = 1 WHERE feed_url = ?').run(localUrl);
+  db.close();
+
+  calls = [];
+  const r1 = await runIngest({ dbFile, trigger: 'manual', ensureSources: false, log: () => {}, fetcher: counting, env: {} });
+  assert.equal(calls.length, 0, '没开开关却真的发了请求（本机地址那道闸被绕过了）：' + calls.join(','));
+  assert.equal(r1.perSource.length, 1);
+  assert.equal(r1.perSource[0].status, 'blocked_local', '状态要说清是"没放行"而不是"网络错误"');
+  assert.ok(String(r1.perSource[0].error).includes(ALLOW_LOCAL_ENV), '理由里要写明那个环境变量名');
+
+  calls = [];
+  const r2 = await runIngest({
+    dbFile, trigger: 'manual', ensureSources: false, log: () => {},
+    fetcher: counting, env: { [ALLOW_LOCAL_ENV]: '1' },
+  });
+  assert.equal(calls.length, 1, '开了开关就该真的抓一次，实际 ' + calls.length + ' 次');
+  assert.equal(r2.perSource[0].status, 'ok', '开了开关还抓不动：' + JSON.stringify(r2.perSource[0]));
+});
+
+await aok('★ 走原生适配器的源：抓取层真的把 JSON 交给它（而且时间真的存成 NULL）', async () => {
+  const dbFile = tmpDbFile('toutiao-e2e');
+  const map = {};
+  for (const s of DEFAULT_SOURCES) map[s.feedUrl] = { ok: true, status: 200, text: GOOD_RSS };
+  map[TOUTIAO_HOT_API] = { ok: true, status: 200, text: TOUTIAO_OK };
+  await ingestWith(fakeFetcher(map), dbFile);
+
+  const db = await openDb(dbFile);
+  db.prepare('UPDATE source SET enabled = 0').run();
+  db.prepare('UPDATE source SET enabled = 1 WHERE feed_url = ?').run(TOUTIAO_HOT_API);
+  db.close();
+
+  const r = await runIngest({ dbFile, trigger: 'manual', ensureSources: false, log: () => {}, fetcher: fakeFetcher(map), env: {} });
+  assert.equal(r.perSource[0].status, 'ok', '适配器那条路没走通：' + JSON.stringify(r.perSource[0]));
+  assert.equal(r.perSource[0].items, 1);
+  assert.equal(r.newItems, 1, '条目没有真的入库');
+
+  const db2 = await openDb(dbFile);
+  /* ⚠️ 必须带 WHERE：第一轮为了让预置源都登记进库，把**其它源**也喂了 GOOD_RSS，
+     那些条目已经在库里了 —— 不带条件的 .get() 拿回来的会是它们，而不是头条那条。
+     （夹具本身会骗人，本项目为此栽过 4 次。） */
+  const row = db2.prepare('SELECT title, url, published_at FROM item WHERE url LIKE ?').get('%toutiao.com/trending/%');
+  db2.close();
+  assert.ok(row, '库里没有头条那条条目 —— 适配器那条路根本没入库');
+  assert.equal(row.title, '习近平出席特朗普举行的欢迎仪式');
+  assert.equal(row.url, 'https://www.toutiao.com/trending/1001/', '存进去的应当是去掉埋点的链接');
+  assert.equal(row.published_at, null, '不许把抓取时刻当成发布时间存进去');
+});
+
 say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
 /** 每个变异体：改坏一处，期望"至少有一条断言失败" */
 const MUTANTS = [
@@ -3778,6 +4148,51 @@ const MUTANTS = [
       db.close();
       assert.equal(left.join(','), '2',
         '坏实现留下了被取消勾选的那个源（实得 ' + left.join(',') + '）—— 证明"写回去的只剩没被取消的那个"那条断言咬得住');
+    },
+  },
+  /* ── 阶段 B：没有官方 feed 的站点（每一条都对应实测到的一件具体的事）── */
+  {
+    id: 'V12',
+    desc: '头条热榜"编造时间"（拿抓取时刻冒充发布时间）',
+    /* ⚠️ 接口根本不返回时间字段。用抓取时刻填的后果不是"差一点"：
+       50 条会拿到同一个时间戳，而且"源没给时间"和"这条就是现在发的"
+       从此分不开 —— 那是本项目写在 fetch-feeds.js 顶部的铁律第 ③ 条。 */
+    run: () => {
+      const bad = () => ({ publishedAt: new Date().toISOString() });
+      const it = bad();
+      assert.equal(it.publishedAt, null, '坏实现用抓取时刻冒充发布时间 —— 证明"不编造时间"那条断言咬得住');
+    },
+  },
+  {
+    id: 'V13',
+    desc: '直播链接当成资讯收下（点开是直播间，不是新闻）',
+    run: () => {
+      const bad = (url) => ({ url }); // 坏实现：不做任何过滤
+      const kept = [bad('https://webcast-open.douyin.com/open/media_live/9527')];
+      for (const it of kept) {
+        assert.ok(!/douyin|webcast/i.test(String(it.url || '')), '坏实现把直播当资讯收下了：' + it.url);
+      }
+    },
+  },
+  {
+    id: 'V14',
+    desc: '热榜 Url 的埋点没去掉（每抓一次就多一批"新"条目）',
+    /* ⚠️ 实测：同一条两次抓取的 Url 不同（带 hot_board_impr_id），
+       而 dedupeKey 优先用 URL ⇒ 不去埋点就等于每刷新一次多 50 条重复。 */
+    run: () => {
+      const bad = (raw) => raw; // 坏实现：原样保留
+      const a = { url: bad('https://www.toutiao.com/trending/1001/?log_pb=AAA'), title: '同一条' };
+      const b = { url: bad('https://www.toutiao.com/trending/1001/?log_pb=BBB'), title: '同一条' };
+      assert.equal(dedupeKey(a), dedupeKey(b), '坏实现下同一件事的去重键不同 —— 证明"埋点必须去掉"那条断言咬得住');
+    },
+  },
+  {
+    id: 'V15',
+    desc: '本机地址那道闸被绕过（没开开关也照样去打 127.0.0.1）',
+    run: () => {
+      const bad = () => null; // 坏实现：永远放行
+      const gate = bad('http://127.0.0.1:1200/cls/telegraph', {});
+      assert.ok(gate, '坏实现放行了本机地址 —— 证明"开关没开就一个请求都不发"那条断言咬得住');
     },
   },
   {

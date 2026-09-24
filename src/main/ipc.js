@@ -16,6 +16,15 @@ import { ipcMain, shell } from 'electron';
 // ★ 协议白名单拆到零依赖模块（`url-guard.js`）——理由见该文件顶部：
 //   它 import 了 electron 就没法被离线断言，而这是一条**安全边界**。
 import { validateExternalUrl } from './url-guard.js';
+/* ★★ "有哪些通道"这份白名单挪到了零依赖的 shared/ipc-channels.js（阶段 B）。
+   它原先就住在本文件里，而本文件 import 了 electron ⇒
+   `checkChannelParity` 从写下来那天起**一次都没被调用过**（谁也没法离线碰它）。
+   现在表与比对函数都在 shared 里，`tools/test-all.mjs` 拿它逐项比对
+   preload 里那份内联副本 —— 重复终于变成了**被机器检查的不变量**。 */
+import { IPC_CHANNELS, checkChannelParity } from '../shared/ipc-channels.js';
+
+// 兼容：这个函数以前定义在本文件里，现在住 shared/ipc-channels.js
+export { checkChannelParity };
 
 /**
  * 注册全部 IPC。
@@ -33,7 +42,6 @@ import { validateExternalUrl } from './url-guard.js';
  * @param {(payload:{name:string, feedUrl:string, categoryId?:number}) => Promise<object>} deps.addSource
  *   用户粘贴一个 feed 地址加源。**异步**：主进程要先抓一次验证。
  * @param {(next:string) => void} deps.setCardState
- * @param {() => void} deps.minimize
  * @param {(p:object) => object} deps.drag
  * @param {(mode:string) => Promise<object>} deps.applyLevel
  * @param {(db:object, id:number) => void} [deps.markOpened]
@@ -83,11 +91,6 @@ export function registerIpc(deps) {
     deps.setCardState(next);
     return { ok: true, state: next };
   });
-  ipcMain.handle('card:minimize', () => {
-    deps.minimize();
-    return { ok: true };
-  });
-
   ipcMain.handle('card:drag', (_e, payload) => deps.drag(payload));
 
   /* ---- 需求 3：点击跳转 ---- */
@@ -121,38 +124,4 @@ export function registerIpc(deps) {
     console.log('[renderer]', msg);
     return { ok: true };
   });
-}
-
-/** 给自检用：把通道表与 preload 内联副本逐项比对 */
-export function checkChannelParity(rendererChannels) {
-  /* ⚠️⚠️ 这是通道白名单的**第二份副本**（第一份在 `src/preload/index.cjs` 的
-     `IPC` 常量里，那份是因为 `sandbox:true` 下 preload 不能 require 本地文件
-     才内联的）。两处必须同步 —— 只加一处的话，渲染层调用会**静默失败**：
-     preload 里那个方法在、`ipcRenderer.invoke` 也发了，而主进程没有 handler，
-     于是它变成一个永远 pending 或直接 reject 的 promise。
-     ⇒ 新增通道时，**这个数组和 preload 的 IPC 常量都要改**。
-     （`tools/test-all.mjs` 里有一条断言把两份逐项比对，漏一处就红。） */
-  const expected = [
-    'brief:get',
-    'brief:more',
-    'brief:ingest',
-    'brief:updated',
-    'category:list',
-    'category:create',
-    'category:delete',
-    'category:sources',
-    'category:setSources',
-    'category:setPref',
-    'source:add',
-    'card:setState',
-    'card:minimize',
-    'card:drag',
-    'item:open',
-    'level:apply',
-    'app:log',
-  ].sort();
-  const actual = (rendererChannels || []).slice().sort();
-  const missing = expected.filter((c) => !actual.includes(c));
-  const extra = actual.filter((c) => !expected.includes(c));
-  return { ok: missing.length === 0 && extra.length === 0, expected, missing, extra };
 }

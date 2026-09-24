@@ -68,6 +68,8 @@ const DB = 'src/store/db.js'
 const INGEST = 'src/ingest/fetch-feeds.js'
 const MAIN = 'src/main/index.js'
 const FEEDURL = 'src/main/feed-url.js'
+/* 阶段 B 的靶子：把"没有官方 feed 的站点"接进来时，四处**改坏了用户看不出来**的地方 */
+const TOUTIAO = 'src/ingest/parse-toutiao.js'
 
 const MUTANTS = [
   /* ── 打包态数据目录与可写性探测（P0-2）── */
@@ -361,6 +363,46 @@ const MUTANTS = [
     from: "  if (u.protocol !== 'http:' && u.protocol !== 'https:') {",
     to: "  if (!allowLocal && u.protocol !== 'http:' && u.protocol !== 'https:') {",
     expect: '开了开关之后 ftp://127.0.0.1/x 仍然必须被拒',
+  },
+  /* ── 阶段 B：没有官方 feed 的站点 ──
+   *
+   * 这一组守的都是"改坏了**界面看起来一切正常**"的地方 ——
+   * 热榜照常出现在列表里、时间看起来也很正常，只是那时间是编的。 */
+  {
+    file: TOUTIAO,
+    why: '头条热榜"编造时间"（拿抓取时刻冒充发布时间）⇒ "源没给时间"与"这条就是现在发的"从此分不开',
+    /* ⚠️ 接口的字段里**根本没有时间**（只有 HotValue 热度）。
+       用抓取时刻填的后果不是"差一点"：50 条会拿到同一个时间戳，
+       排序与翻页都会失去意义 —— 这是本项目写在 fetch-feeds.js 顶部的铁律第 ③ 条。 */
+    from: '      publishedAt: null,',
+    to: '      publishedAt: new Date().toISOString(),',
+    expect: '不编造时间',
+  },
+  {
+    file: TOUTIAO,
+    why: '直播链接被当成资讯收下（点开是直播间，不是新闻卡片）',
+    from: '    if (url && isLiveLink(url)) {',
+    to: '    if (false) {',
+    expect: '直播链接不许当资讯',
+  },
+  {
+    file: TOUTIAO,
+    why: '热榜 Url 里的埋点没去掉 ⇒ 同一条每次抓取的去重键都不同（每刷新一次多一批"新"条目）',
+    /* ⚠️ 实测：间隔 1.5 秒抓两次，同一条的 Url 两次不一样（带 hot_board_impr_id），
+       而 dedupeKey 优先用 URL。这条是"数据会慢慢变脏、当下看不出来"的典型。 */
+    from: '  if (isToutiao && /^\\/trending\\/\\d+\\/?$/.test(u.pathname)) return u.origin + u.pathname;',
+    to: '',
+    expect: '埋点必须去掉',
+  },
+  {
+    file: INGEST,
+    why: '本机地址那道闸的第二端被绕过 ⇒ 没开 MB_ALLOW_LOCAL_FEEDS 也照样去打 127.0.0.1',
+    /* ⚠️ 这一条守的是**安全边界**：阶段 B2 的预置源是直接写进库的、
+       不过 validateNewSource 那一关。少了抓取层这一端，
+       用户在面板上把那条本机源勾上，程序就会去打本机端口。 */
+    from: '        const gate = feedUrlGateReason(src.feed_url, env);',
+    to: '        const gate = null;',
+    expect: '本机地址那道闸被绕过了',
   },
   {
     file: INGEST,

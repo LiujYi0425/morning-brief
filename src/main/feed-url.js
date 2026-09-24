@@ -138,9 +138,74 @@ export function validateNewSource(input, env) {
     };
   }
 
+
   /* ⚠️ 存的是**归一化之后**的地址（`u.href`），不是用户粘的原文。
      理由：`source.feed_url` 上有 UNIQUE 约束，"同一个地址写成两种形式"
      （末尾多个斜杠、大小写不同的主机名）会绕过去重，存成两个源 ——
      而它们抓的是同一份内容，用户会看到重复条目。 */
   return { ok: true, name, feedUrl: u.href };
 }
+/**
+ * 「这个地址能不能被**定期去抓**」的**第二端**（阶段 B）。
+ *
+ * ---------------------------------------------------------------------
+ * 为什么需要第二端
+ * ---------------------------------------------------------------------
+ * 第一端是 `validateNewSource`：管"用户**粘进来**的地址"。
+ * 但阶段 B2 往预置清单里加了一组**本机地址**，
+ * 而预置源是**直接写进库**的、根本不经过 `validateNewSource` ——
+ * 于是用户只要在面板上把那条源勾上，程序就会去打 127.0.0.1。
+ *
+ * ⇒ 那样一来 `MB_ALLOW_LOCAL_FEEDS` 就不是"唯一入口"了，
+ *   第 8 节那条边界会从**侧门**漏掉（而这正是这一整套设计要防的事）。
+ *   所以抓取层在**每次请求之前**也要问一遍同一个判定。
+ *
+ * @param {string} feedUrl
+ * @param {object} [env] 读开关用的环境（默认 `process.env`；测试里可注入）
+ * @returns {null|string} null = 放行；字符串 = 拒绝理由（**给用户看的正文**）
+ */
+export function feedUrlGateReason(feedUrl, env) {
+  let u;
+  try {
+    u = new URL(String(feedUrl == null ? '' : feedUrl));
+  } catch {
+    /* 解析不了的地址不在这里拦：那是"地址坏了"，由抓取层如实报网络/解析错误。
+       这里只回答一件事：**本机地址 + 开关没开**。 */
+    return null;
+  }
+  if (!isPrivateHost(u.hostname)) return null;
+  if (allowsLocalFeeds(env)) return null;
+  return (
+    '这是本机 / 内网地址（' + u.host + '）—— 本程序默认不去抓本机服务。' +
+    '如果这就是你自己跑的 feed 服务（比如自建 RSSHub），' +
+    '请用环境变量 ' + ALLOW_LOCAL_ENV + '=1 启动晨报机再试。'
+  );
+}
+
+/**
+ * 抓一个**本机**地址失败时，把"是你本机那个服务没起来"这件事说出来。
+ *
+ * ⚠️ 为什么必须说（这一条是阶段 B2 的验收条件）：
+ *    阶段 B 引入的源地址长这样：`http://127.0.0.1:1200/cls/telegraph`。
+ *    用户忘了先启动 RSSHub 时，他看到的是 `fetch failed` / `ECONNREFUSED`
+ *    —— 那是**网络错误**的措辞，人会往"网断了""被墙了"的方向排查，
+ *    而真相是"你自己那台服务没开"。**诊断指错方向比没有诊断更糟。**
+ *
+ * @param {string} feedUrl
+ * @returns {string} 非本机地址返回空串（调用方拼在原始错误后面）
+ */
+export function localServiceHint(feedUrl) {
+  let u;
+  try {
+    u = new URL(String(feedUrl == null ? '' : feedUrl));
+  } catch {
+    return '';
+  }
+  if (!isPrivateHost(u.hostname)) return '';
+  return (
+    '这是本机地址 ' + u.origin + ' —— 抓不到通常**不是网络问题**，' +
+    '而是你本机的那个服务（比如自建 RSSHub）没在跑；' +
+    '确认它起来了，并且晨报机是用 ' + ALLOW_LOCAL_ENV + '=1 启动的。'
+  );
+}
+
