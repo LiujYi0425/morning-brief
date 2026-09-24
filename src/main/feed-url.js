@@ -57,14 +57,50 @@ export function isPrivateHost(hostname) {
   return false;
 }
 
+/** ★★ 允许本机地址的**开关名**（阶段 B：接自建 RSSHub 用）。 */
+export const ALLOW_LOCAL_ENV = 'MB_ALLOW_LOCAL_FEEDS';
+
+/**
+ * 这个运行环境允不允许把**本机地址**当源。
+ *
+ * ---------------------------------------------------------------------
+ * 为什么需要它，以及为什么默认必须是"不允许"
+ * ---------------------------------------------------------------------
+ * 「本机地址一律拒绝」是一条**安全边界**：源是程序会定期主动去抓的地址，
+ * 允许 `127.0.0.1` 就等于给"外部数据 → 本机请求"开了一条路。
+ *
+ * 但阶段 B 要把**用户自己跑在本机的 RSSHub** 接进来
+ * （`http://127.0.0.1:1200/…`）—— 那是这台机器上一个独立的服务，
+ * 地址本来就是本机的。
+ * ⇒ 用一个**显式开关**把这个例外说清楚：
+ *      · 默认（没设）：仍然拒绝，行为与以前逐字一致；
+ *      · 设为 `'1'`：放行本机地址 —— **但仍然只放行 http/https**，
+ *        协议白名单、长度、控制字符那些检查一条都不放松。
+ *
+ * ⚠️ 刻意**不做**成界面上的一个勾选框：一个能让程序去打本机端口的开关，
+ *    应当是"用户明确知道自己开了什么服务"才打开的。环境变量要写进
+ *    启动脚本或快捷方式，这个成本刚好合适。
+ * ⚠️ 只认字符串 `'1'`（不做"truthy"判断）：`'0'` / `'false'` / `'no'`
+ *    一律算**关闭** —— 否则用户以为关掉了、其实还开着。
+ *
+ * @param {object} [env] 默认 `process.env`
+ */
+export function allowsLocalFeeds(env) {
+  const e = env || (typeof process !== 'undefined' ? process.env : null);
+  if (!e) return false;
+  return String(e[ALLOW_LOCAL_ENV] == null ? '' : e[ALLOW_LOCAL_ENV]).trim() === '1';
+}
+
 /**
  * 校验一个待添加的源。
  *
  * @param {{name?:string, feedUrl?:string}} input
+ * @param {object} [env] 读开关用的环境（默认 `process.env`；测试里可注入）
  * @returns {{ok:boolean, reason?:string, name?:string, feedUrl?:string}}
  *   · 失败时 `reason` 是**给用户看的正文**（要能照着改），不是错误码。
  */
-export function validateNewSource(input) {
+export function validateNewSource(input, env) {
+  const allowLocal = allowsLocalFeeds(env);
   const p = input || {};
   const url = String(p.feedUrl == null ? '' : p.feedUrl).trim();
   const name = String(p.name == null ? '' : p.name).trim();
@@ -93,8 +129,13 @@ export function validateNewSource(input) {
     return { ok: false, reason: `只支持 http / https，这个地址是 ${u.protocol} 开头的` };
   }
   if (!u.hostname) return { ok: false, reason: '这个地址里没有主机名' };
-  if (isPrivateHost(u.hostname)) {
-    return { ok: false, reason: '本机 / 内网地址不能作为源（程序会定期去抓它）' };
+  if (isPrivateHost(u.hostname) && !allowLocal) {
+    return {
+      ok: false,
+      reason:
+        '本机 / 内网地址不能作为源（程序会定期去抓它）。' +
+        `如果你确实在本地跑了一个 feed 服务（比如自建 RSSHub），把环境变量 ${ALLOW_LOCAL_ENV}=1 打开再用。`,
+    };
   }
 
   /* ⚠️ 存的是**归一化之后**的地址（`u.href`），不是用户粘的原文。

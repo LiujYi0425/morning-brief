@@ -115,7 +115,7 @@ import {
 import { validateExternalUrl } from '../src/main/url-guard.js';
 /* 「添加源」的地址判定（阶段 A）：同样是零依赖纯函数，
    所以它能被离线穷举 —— 这正是把它从 main/index.js 里拆出来的原因。 */
-import { validateNewSource, isPrivateHost } from '../src/main/feed-url.js';
+import { validateNewSource, isPrivateHost, allowsLocalFeeds, ALLOW_LOCAL_ENV } from '../src/main/feed-url.js';
 /* 本次功能（筛选栏）：配额选取是**零依赖纯函数**，所以它能被离线穷举 ——
    这不是巧合：它 import 不了 electron，写进 main/index.js 就等于永远没有断言。 */
 import { selectByQuota, quotaOf, scopedQuota, classOf, PREF } from '../src/shared/quota.js';
@@ -3399,6 +3399,39 @@ ok('★★ 添加源必须**真的**调用那两个校验、并且**先验再存
      一个坏地址已经进库了才发现——那就留下了一个永远失败的源。 */
   assert.ok(b.indexOf('validateNewSource(p)') < b.indexOf('fetchText(url)'), '校验必须在试抓之前');
   assert.ok(b.indexOf('fetchText(url)') < b.indexOf('addCustomSource('), '试抓必须在入库之前（先验再存）');
+});
+
+ok('★★ 本机地址只有在**显式开关**打开时才放行（阶段 B：接自建 RSSHub）', () => {
+  /* ⚠️ 这条守的是一个"例外"的两端：
+   *    · 默认必须仍然拒绝本机地址（安全边界不动）；
+   *    · 用户明确开了 `MB_ALLOW_LOCAL_FEEDS=1` 时才放行 ——
+   *      因为阶段 B 要接的 RSSHub 就跑在本机。
+   * ⚠️ 开关**只认字符串 '1'**：`'0'` / `'false'` / `'no'` 一律算关闭。
+   *    用"truthy 判断"的话 `'0'` 会被当成开着 —— 用户以为关掉了、其实还开着，
+   *    而这是一个"让程序去打本机端口"的开关，判错的方向不能是这个。 */
+  const local = 'http://127.0.0.1:1200/thepaper/featured';
+  assert.equal(validateNewSource({ name: '本机', feedUrl: local }).ok, false, '默认必须拒绝本机地址');
+  assert.equal(validateNewSource({ name: '本机', feedUrl: local }, { [ALLOW_LOCAL_ENV]: '1' }).ok, true,
+    '开了开关之后应当放行本机地址（否则阶段 B 的自建 RSSHub 接不进来）');
+
+  /* 开关的取值：只有 '1' 算开 */
+  for (const v of ['0', 'false', 'no', '', '  ', 'true', 'yes', '2']) {
+    assert.equal(validateNewSource({ name: 'x', feedUrl: local }, { [ALLOW_LOCAL_ENV]: v }).ok, false,
+      `开关取值 ${JSON.stringify(v)} 不该被当成"打开"`);
+  }
+  assert.equal(allowsLocalFeeds({ [ALLOW_LOCAL_ENV]: '1' }), true);
+  assert.equal(allowsLocalFeeds({ [ALLOW_LOCAL_ENV]: ' 1 ' }), true, '两边空白应当被容忍');
+  assert.equal(allowsLocalFeeds({}), false);
+  assert.equal(allowsLocalFeeds(undefined), false, '没有环境时必须是关闭（保守）');
+
+  /* ★ 开了开关**也不放松**别的检查：协议白名单照旧 */
+  for (const bad of ['ftp://127.0.0.1/x', 'file:///C:/x.xml', 'javascript:alert(1)']) {
+    assert.equal(validateNewSource({ name: 'x', feedUrl: bad }, { [ALLOW_LOCAL_ENV]: '1' }).ok, false,
+      `开了开关之后 ${bad} 仍然必须被拒（开关只放开"本机地址"，不放开协议白名单）`);
+  }
+  /* 拒绝理由要告诉用户怎么打开（否则他只会看到"不能用"） */
+  const r = validateNewSource({ name: 'x', feedUrl: local });
+  assert.ok(r.reason.includes(ALLOW_LOCAL_ENV), '拒绝理由里要写明那个环境变量名：' + r.reason);
 });
 
 say();

@@ -14,11 +14,52 @@
  *    想跑就明确地跑：`npm run test:mutants`
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+/* ─────────────────────────────────────────────────────────────────────
+ * ★★ 崩溃安全：这个脚本会**真的改写** `src/` 下的源文件
+ * ─────────────────────────────────────────────────────────────────────
+ * 正常路径上还原写在 `finally` 里（见文件末尾）—— 但 `finally` 只在进程
+ * **还活着**的时候才跑。外面把进程杀掉（会话被中断、Ctrl+C、任务管理器、
+ * OOM）时，源码就永久停在被改坏的那一行上。
+ *
+ * ⚠️ 这不是假想：本次会话里它**真的发生了一次** ——
+ *    一次被中断的运行把 `src/shared/runtime-state.js`（打包态数据目录分支）
+ *    和 `src/main/index.js`（`prefByCategory` 被改成 `null`）留在工作树里，
+ *    而这两个都**看起来像正常的改动**：`git status` 只多两行 M，
+ *    真去查的时候很容易以为是自己写的。
+ *
+ * ⇒ 每次动文件**之前**，把"正在改哪个文件 + 它原来的内容"写进一个哨兵文件；
+ *   还原之后把它删掉。**下次启动时哨兵还在 = 上一次是横死的** ——
+ *   直接按哨兵里存的原文还原，并大声报出来（而不是带着坏源码接着跑）。
+ *
+ * ⚠️ 哨兵放在系统临时目录（按项目路径取名字），**不放进仓库**：
+ *    放仓库里会污染 `git status`，而 `git status` 正是发现这件事的地方。
+ */
+const SENTINEL = path.join(
+  os.tmpdir(),
+  'mb-mutants-inflight-' + ROOT.replace(/[^A-Za-z0-9]+/g, '_') + '.json',
+)
+if (fs.existsSync(SENTINEL)) {
+  try {
+    const saved = JSON.parse(fs.readFileSync(SENTINEL, 'utf8'))
+    for (const [rel, text] of Object.entries(saved.files || {})) {
+      fs.writeFileSync(path.join(ROOT, rel), text, 'utf8')
+      console.log(`⚠️ 上一次变异测试是**被中断**的（没走到还原），已按哨兵还原：${rel}`)
+    }
+    fs.unlinkSync(SENTINEL)
+    console.log('   接着跑之前先看一眼 `git diff` —— 确认剩下的改动确实是你自己的。\n')
+  } catch (e) {
+    console.log(`✗ 哨兵文件在，但读不出来（${e.message}）：${SENTINEL}`)
+    console.log('  手动处理：确认 src/ 下没有变异体残留，然后删掉这个文件。\n')
+    process.exit(1)
+  }
+}
 const RUNTIME = 'src/shared/runtime-state.js'
 const UPDATE = 'src/shared/update.js'
 /* 本次功能（筛选栏）的三个靶子 —— 都是"改坏了用户会以为功能没做"的地方 */
@@ -257,9 +298,13 @@ const MUTANTS = [
   {
     file: FEEDURL,
     why: '本机 / 内网地址不再拦（程序会变成一个被外部数据牵着走的探测器）',
-    from: '  if (isPrivateHost(u.hostname)) {',
+    /* ⚠️ 锚点必须跟着源码走：这一行在阶段 B 变成了
+       `isPrivateHost(...) && !allowLocal`（多了一个开关），
+       锚点没跟着改的那次，这条变异体报的是"注入失败"——
+       而"守卫还在不在"和"锚点过没过期"是两件事，**注入失败必须当成红的看**。 */
+    from: '  if (isPrivateHost(u.hostname) && !allowLocal) {',
     to: '  if (false) {',
-    expect: '本机 / 内网地址一律拒绝',
+    expect: '应当拒绝本机/内网地址',
   },
   {
     file: FEEDURL,
@@ -267,6 +312,55 @@ const MUTANTS = [
     from: '  if (a === 172 && b >= 16 && b <= 31) return true;',
     to: '  if (a === 172) return true;',
     expect: '172.15 属于公网，被误伤了',
+  },
+  /* ── 阶段 B：把"本机地址"这道边界开成一个**显式开关**（接自建 RSSHub）──
+   *
+   * 这一组守的是同一条边界的**两端**，两端都会以"用户以为做了、其实没做"的形式坏掉：
+   *   · 开关形同虚设 ⇒ 阶段 B 的 RSSHub 永远接不进来（用户按文档设了变量也没用）；
+   *   · 开关判成 truthy ⇒ 用户明明写的是 `=0`，程序却仍然去打本机端口。
+   * ⚠️ 这个开关**只放开"本机地址"**，协议白名单那些一条都不放松 —— 见第三个变异体。 */
+  {
+    file: FEEDURL,
+    why: '放行本机地址的那个开关被读掉了（接自建 RSSHub 时设了环境变量也没用，而报错只说"不能是本机地址"）',
+    /* ⚠️ 注意这条**不是**"把安全检查删掉"，是"把例外删掉"：
+       删掉例外之后默认行为逐字不变（本机地址照样拒绝），
+       所以任何只测"默认必须拒绝"的用例都抓不住它 ——
+       必须有一条**开着开关要放行**的断言，否则这个功能等于没做。 */
+    from: '  if (isPrivateHost(u.hostname) && !allowLocal) {',
+    to: '  if (isPrivateHost(u.hostname)) {',
+    expect: '开了开关之后应当放行本机地址',
+  },
+  {
+    file: FEEDURL,
+    why: '开关用 truthy 判断 ⇒ 用户设成 `=0` / `=false` 以为关掉了，程序却仍然去打本机端口',
+    /* ⚠️ 方向很重要：这是**放开一条安全边界**的开关，
+       "判错"的两个方向不等价 —— 把关闭读成打开是危险的，
+       所以必须逐字等于 '1'（而不是 `Boolean(v)`）。 */
+    from: "  return String(e[ALLOW_LOCAL_ENV] == null ? '' : e[ALLOW_LOCAL_ENV]).trim() === '1';",
+    to: "  return String(e[ALLOW_LOCAL_ENV] == null ? '' : e[ALLOW_LOCAL_ENV]).trim() !== '';",
+    expect: '开关取值 "0" 不该被当成',
+  },
+  {
+    file: FEEDURL,
+    why: '拒绝本机地址时不说那个环境变量名 ⇒ 用户被卡在"不能用"上，而唯一的出路没人告诉他',
+    /* ⚠️ 这条守的是**可发现性**：开关是刻意不做进界面的（要用户明确知道自己在开什么服务），
+       那么"怎么开"就**只能**从这条报错里知道。删掉之后功能还在、但没人找得到。 */
+    from:
+      "        '本机 / 内网地址不能作为源（程序会定期去抓它）。' +\n" +
+      '        `如果你确实在本地跑了一个 feed 服务（比如自建 RSSHub），把环境变量 ${ALLOW_LOCAL_ENV}=1 打开再用。`,',
+    to: "        '本机 / 内网地址不能作为源（程序会定期去抓它）。',",
+    expect: '拒绝理由里要写明那个环境变量名',
+  },
+  {
+    file: FEEDURL,
+    why: '开关被当成"什么都放行" ⇒ 开了它之后 ftp:/file: 这些协议也一起被收下（边界从"放开本机"滑成"放开一切"）',
+    /* ⚠️ 这条守的是**例外的范围**：开关的语义是"我信任本机那个服务"，
+       不是"我信任任何地址"。真实写法里协议判定在本机判定**之前**、
+       而且不带这个开关 —— 所以只要有人"顺手"把开关接到协议那行上，
+       这条就会红。没有它的话，`ftp://127.0.0.1/x` 会被静默收下。 */
+    from: "  if (u.protocol !== 'http:' && u.protocol !== 'https:') {",
+    to: "  if (!allowLocal && u.protocol !== 'http:' && u.protocol !== 'https:') {",
+    expect: '开了开关之后 ftp://127.0.0.1/x 仍然必须被拒',
   },
   {
     file: INGEST,
@@ -320,6 +414,10 @@ for (const m of MUTANTS) {
    *    表现是"变异体注入失败/测试起不来"，看起来像锚点写错了。
    *    （实测：`to` 里带 `${fetchErr}` 的那条直接被改成 `\$&{fetchErr}`。）
    *    ⚠️ 这个坑在本脚本里踩过两次，所以下面这行旁边留着这段注释。 */
+  /* ⚠️ 哨兵必须落在**写坏源码之前** —— 顺序反了就等于没写：
+     进程如果在"已经改了文件、还没写哨兵"的那一瞬间横死，
+     下次启动看不到哨兵，于是带着变异体继续跑（正是要防的那件事）。 */
+  fs.writeFileSync(SENTINEL, JSON.stringify({ file: m.file, files: { [m.file]: original } }), 'utf8')
   fs.writeFileSync(abs, replaceLiteral(original, m.from, m.to), 'utf8')
   let out = ''
   try {
@@ -329,6 +427,7 @@ for (const m of MUTANTS) {
     out = (r.stdout || '') + (r.stderr || '')
   } finally {
     fs.writeFileSync(abs, original, 'utf8')
+    fs.rmSync(SENTINEL, { force: true })
   }
   const ranAtAll = /结论：/.test(out)
   const failed = /结论：❌ FAIL/.test(out)
@@ -365,6 +464,10 @@ for (const [rel, text] of originals) {
     console.log(`\n✗✗✗ ${rel} 没有还原干净，赶快修！`)
   }
 }
+/* 走到这里说明没有任何一个变异体还挂在文件上 ⇒ 哨兵必须已经清掉。
+   留着它的话，下一次运行会以为"上一次是横死的"，去还原一批
+   **本来就是原文**的内容 —— 无害，但会报一句吓人的警告。 */
+fs.rmSync(SENTINEL, { force: true })
 console.log(`\n源码已还原且逐字节一致：${restored ? '✓' : '✗✗✗'}（共 ${originals.size} 个文件）`)
 if (!restored || !allCaught) process.exit(1)
 console.log('全部变异体落网 ✔')
