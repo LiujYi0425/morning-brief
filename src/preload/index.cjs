@@ -13,10 +13,14 @@ const { contextBridge, ipcRenderer } = require('electron');
 const IPC = Object.freeze({
   BRIEF_GET: 'brief:get', // R → M：取当前简报（首页 N 条 + 健康度 + 统计）
   BRIEF_MORE: 'brief:more', // R → M：翻页（游标式）
-  BRIEF_INGEST: 'brief:ingest', // R → M：手动触发抓取
+  BRIEF_INGEST: 'brief:ingest', // R → M：手动触发抓取（可带当前类型）
   BRIEF_UPDATED: 'brief:updated', // M → R：抓取完成后主动推新数据
   CATEGORY_LIST: 'category:list',
   CATEGORY_CREATE: 'category:create',
+  CATEGORY_DELETE: 'category:delete', // ★ 只删分类与绑定，绝不删条目
+  CATEGORY_SOURCES: 'category:sources', // 读「这个类型包含哪些源」
+  CATEGORY_SET_SOURCES: 'category:setSources', // 写「这个类型包含哪些源」
+  CATEGORY_SET_PREF: 'category:setPref', // 喜欢 / 中性 / 不喜欢
 
   CARD_SET_STATE: 'card:setState',
   CARD_MINIMIZE: 'card:minimize',
@@ -39,9 +43,18 @@ const api = Object.freeze({
   brief: Object.freeze({
     get: (opts) => ipcRenderer.invoke(IPC.BRIEF_GET, opts),
     more: (payload) => ipcRenderer.invoke(IPC.BRIEF_MORE, payload),
-    ingest: (trigger) => ipcRenderer.invoke(IPC.BRIEF_INGEST, trigger),
+    /* ★ 刷新可以带当前类型（第二参）：选中类型时只抓**该类型绑定的源并集**，
+       「全部」时不传 ⇒ 抓全部启用源（与改动前逐字一致）。
+       为什么必须带上：不带的话，"我只想看安全类"这个意图与"刷新"这个动作
+       之间没有任何联系 —— 点一次刷新照样把全部源打一遍。 */
+    ingest: (trigger, categoryIds) => ipcRenderer.invoke(IPC.BRIEF_INGEST, trigger, categoryIds),
     categories: () => ipcRenderer.invoke(IPC.CATEGORY_LIST),
     createCategory: (name) => ipcRenderer.invoke(IPC.CATEGORY_CREATE, name),
+    deleteCategory: (id) => ipcRenderer.invoke(IPC.CATEGORY_DELETE, id),
+    categorySources: (id) => ipcRenderer.invoke(IPC.CATEGORY_SOURCES, id),
+    setCategorySources: (categoryId, sourceIds) =>
+      ipcRenderer.invoke(IPC.CATEGORY_SET_SOURCES, { categoryId, sourceIds }),
+    setCategoryPref: (categoryId, pref) => ipcRenderer.invoke(IPC.CATEGORY_SET_PREF, { categoryId, pref }),
     onUpdated: (cb) => subscribe(IPC.BRIEF_UPDATED, cb),
   }),
 

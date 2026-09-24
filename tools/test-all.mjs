@@ -112,6 +112,9 @@ import {
   DEFAULT_MAX_ATTEMPTS,
 } from '../src/shared/update.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
+/* 本次功能（筛选栏）：配额选取是**零依赖纯函数**，所以它能被离线穷举 ——
+   这不是巧合：它 import 不了 electron，写进 main/index.js 就等于永远没有断言。 */
+import { selectByQuota, quotaOf, scopedQuota, classOf, PREF } from '../src/shared/quota.js';
 
 const lines = [];
 const say = (s = '') => {
@@ -2461,6 +2464,560 @@ ok('★ 杂项：字节格式化与状态可序列化（要落盘，不能带函
   assert.deepEqual(normalizeState(round, '0.1.0'), round, '落盘再读回来被判成脏数据');
 });
 
+/* ================================================================== */
+/* 第十六层 · 筛选栏（本次功能）：配额 / 删除类型 / 源↔类型映射不被覆盖     */
+/* ==================================================================
+ * 用户定死的三条语义，每一条都要有一条**咬得住**的断言：
+ *
+ *   ① 类型 = 一组源（可编辑）
+ *   ② 勾选/取消勾选是**可逆的筛选**，不是删除
+ *   ③ 喜欢 / 不喜欢是**配比**不是过滤：
+ *        喜欢 → 多放　不喜欢 → **少放但不能没有**（配额）
+ *
+ * ⚠️ 其中"不能没有"是**集合性质**，不是排序性质 —— 只做降权排序的话，
+ *    精选 15 条里可能一条都不剩。所以断言咬的不是"条数看起来对不对"，
+ *    而是"不喜欢的类里只要有内容，精选里就必须出现至少 1 条"。
+ * ================================================================== */
+say();
+say('--- 第十六层 · 筛选栏：配额（少放但不能没有）---');
+
+/**
+ * 造一批候选：`n` 条，每条属于 `cats` 里的类别。
+ *
+ * ⚠️⚠️ `startId` 必须**每批各不相同**。第一版我在三条队列里都从 1 开始编号，
+ *    于是 `keyOf` 认出去重键重复 ⇒ 后两批**整批被当成重复丢掉** ——
+ *    中性/不喜欢的桶空着，"不能没有"的断言自然全红。
+ *    而当时看起来像配额算法坏了（我为此改了三次算法）。
+ *    ⇒ 教训：**测试夹具本身也要有唯一性**，它出的错和被测代码出的错
+ *      长得一模一样。
+ */
+function cand(tag, n, cats, startId) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: (startId || 0) + i + 1,
+    title: tag + (i + 1),
+    categories: cats,
+  }));
+}
+
+ok('配额 K = max(1, round(CURATED × 0.2))（CURATED=15 → 3）', () => {
+  assert.equal(quotaOf(15), 3);
+  assert.equal(quotaOf(30), 6);
+  /* ★ 下限必须是 1：否则小 CURATED 会算出 0，"少放"直接变成"不放" */
+  assert.equal(quotaOf(3), 1, '小 CURATED 时配额掉到 0 —— 那是"不要"不是"少放"');
+  assert.equal(quotaOf(1), 1);
+  assert.equal(quotaOf(0), 1);
+  assert.equal(quotaOf(NaN), 1, '坏输入不能产出 NaN 配额（会让所有比较都为假）');
+});
+
+ok('★ 不喜欢的类型**有内容时精选里必须至少出现 1 条**（真机上就是这条最容易做成摆设）', () => {
+  /* 构造最恶劣的情形：喜欢与中性的候选**足够填满 15 条**，
+     不喜欢的那条排在**最后**。纯排序实现必然把它挤到第 16 位以后。 */
+  const items = []
+    .concat(cand('like', 40, [1], 0))
+    .concat(cand('mid', 40, [2], 1000))
+    .concat([{ id: 9999, title: '不喜欢的一条', categories: [3] }]); // 排在最后
+  const prefs = new Map([['1', 1], ['2', 0], ['3', -1]]);
+  const r = selectByQuota({ items, limit: 15, prefByCategory: prefs });
+
+  assert.equal(r.picked.length, 15, '必须恰好给出 15 条');
+  assert.equal(r.guaranteed, true, '不喜欢那类有内容，却一条都没选上 ——「少放」被做成了「不放」');
+  assert.equal(r.counts.dislike, 1, '这一档只该出现 1 条（它本来就只有 1 条）');
+  assert.ok(r.picked.some((x) => x.id === 9999), '那条不喜欢的条目不在精选里');
+  /* ★ 中性也必须真的参与 —— 少了这条，"三档轮转退化成只取喜欢"的改动
+     在"总有 1 条不喜欢"的用例里也能蒙混过关。 */
+  assert.ok(r.counts.neutral > 0, '中性一条都没进来（轮转退化成了只取喜欢那一档）');
+});
+
+ok('★ 不喜欢**不超过 K 条**（少放 = 有上限，不是"全放进来再排后面"）', () => {
+  const items = []
+    .concat(cand('like', 40, [1], 0))
+    .concat(cand('mid', 40, [2], 1000))
+    .concat(cand('hate', 40, [3], 2000));
+  const prefs = new Map([['1', 1], ['2', 0], ['3', -1]]);
+  const r = selectByQuota({ items, limit: 15, prefByCategory: prefs });
+  const q = quotaOf(15);
+
+  assert.equal(r.picked.length, 15);
+  assert.equal(r.counts.dislike, q, '不喜欢的条数应当正好等于配额 ' + q + '，实得 ' + r.counts.dislike);
+  assert.ok(r.counts.dislike <= q, '不喜欢的条数超过了配额');
+  assert.ok(r.counts.like > 0 && r.counts.neutral > 0, '喜欢/中性都被不喜欢挤掉了（配额不该有这种副作用）');
+});
+
+ok('★ 喜欢**不设上限**（用户说想看多的那一类，不许在背后替他做配比）', () => {
+  /* 40 条喜欢的 + 各 1 条中性/不喜欢 —— 除了那两条，其余位置都该给喜欢 */
+  const items = []
+    .concat(cand('like', 40, [1], 0))
+    .concat(cand('mid', 1, [2], 1000))
+    .concat(cand('hate', 1, [3], 2000));
+  const prefs = new Map([['1', 1], ['2', 0], ['3', -1]]);
+  const r = selectByQuota({ items, limit: 15, prefByCategory: prefs });
+  assert.equal(r.counts.like, 13, '喜欢那一类被限制了：13 个位置本该全给它，实得 ' + r.counts.like);
+  assert.equal(r.counts.dislike, 1);
+  assert.equal(r.counts.neutral, 1, '中性那条也该在（它只有 1 条）');
+});
+
+ok('候选不够时不会凭空空转、也不会超发（池子比 limit 小）', () => {
+  const items = cand('mid', 4, [2], 0);
+  const r = selectByQuota({ items, limit: 15, prefByCategory: new Map([['2', 0]]) });
+  assert.equal(r.picked.length, 4, '只有 4 条候选，不该变出 15 条');
+  assert.equal(r.guaranteed, true, '这一类里根本没有"不喜欢"的内容，不该算违约');
+});
+
+ok('同一份候选里的重复条目只算一条（去重键按 id）', () => {
+  const one = { id: 7, title: '同一条', categories: [1] };
+  const r = selectByQuota({ items: [one, { ...one }, { id: 8, title: '另一条', categories: [1] }], limit: 15, prefByCategory: new Map([['1', 1]]) });
+  assert.equal(r.picked.length, 2, '重复的那条应当只算一次');
+});
+
+ok('混合归属：一个条目同时属于喜欢与不喜欢 → **喜欢优先**', () => {
+  const prefs = new Map([['1', 1], ['2', -1]]);
+  assert.equal(classOf({ categories: [1, 2] }, prefs), 1, '同时命中两档时应当判给"喜欢"');
+  assert.equal(classOf({ categories: [2] }, prefs), -1);
+  assert.equal(classOf({ categories: [] }, prefs), 0, '没有任何归属 = 中性（不编造偏好）');
+  assert.equal(classOf({}, prefs), 0, '没有 categories 字段 = 中性');
+  assert.equal(classOf({ categories: ['1'] }, prefs), 1, '字符串 id 也要认得（SQLite 给的是数字、状态里是字符串）');
+});
+
+ok('★ 配额算式的两份实现必须一致（view-model 是经典脚本，只能重复一遍）', () => {
+  /* ⚠️ `view-model.js` 不能 import（经典脚本 + CSP 限制），所以 `quotaOf`
+     在那里又写了一遍。两份可以各自漂移 —— 除非有一条断言把它们钉在一起。
+     这条就是那颗钉子。 */
+  const vmSrc = fs.readFileSync(path.resolve(HERE, '..', 'src', 'renderer', 'view-model.js'), 'utf8');
+  const sandbox = {};
+  vm.createContext(sandbox);
+  new vm.Script(vmSrc, { filename: 'view-model.js' }).runInContext(sandbox);
+  const VM = sandbox.MB_VIEW;
+  assert.equal(typeof VM.quotaOf, 'function', 'view-model 没有把 quotaOf 暴露出来，这条断言就没法咬');
+  for (const n of [1, 3, 5, 10, 15, 20, 40, 200]) {
+    assert.equal(VM.quotaOf(n), quotaOf(n), '两份配额算式在 curated=' + n + ' 时不一致');
+  }
+});
+
+ok('★★ 配额要随**筛选范围**的占比缩放：点进那个类型本身时不许把它砍到 3 条', () => {
+  /* ★★ 这条是**在真实库上演练时发现的**，不是假想出来的：
+     把「开源与工程」设成"不喜欢"，然后点进这个类型 ——
+     按写死的配额它会显示 **3 条**（而这一类有 234 条）。
+
+     为什么那是错的：「不喜欢 = 少放但不能没有」是一条**配比**，
+     而配比是相对的。用户点进这个类型说的是"我要看这个类型"，
+     拿"整份精选的 20%"去卡它就是把它变成了**过滤** ——
+     正是"少放但不能没有"这条语义要避免的事。
+
+     口径：把"整份简报里的占比"原样搬到当前范围 ——
+     `want × 范围内不喜欢内容的占比`。范围内的占比趋近 100% 时不设限。
+
+     ⚠️ 同时「全部」那一档**一分都不能松**：那里占比小，仍然是 3 条。 */
+  const want = 15;
+  const base = quotaOf(want);
+  /* 「全部」：957 条里有 234 条属于那个类型 ⇒ 占比 24% ⇒ 允许 ceil(15×0.244)=4 条 */
+  assert.equal(scopedQuota({ limit: want, poolSize: 957, tagged: 234 }), 4, '「全部」下的配额算错了');
+  assert.equal(scopedQuota({ limit: want, poolSize: 1000, tagged: 10 }), base, '占比很小时不该放宽（"少放"松了）');
+  /* ★ 点进那个类型本身：范围内**全是**它 ⇒ 占比 100% ⇒ 不设限 */
+  assert.equal(scopedQuota({ limit: want, poolSize: 234, tagged: 234 }), want, '点进这个类型时仍被砍（"配比"变成了"过滤"）');
+  assert.equal(scopedQuota({ limit: want, poolSize: 8, tagged: 8 }), want, '候选比一份精选还少时不该设限');
+  /* 边界：没有不喜欢的类型 / 没有条目时退回基础配额 */
+  assert.equal(scopedQuota({ limit: want, poolSize: 957, tagged: 0 }), base, '没有不喜欢的内容时配额不该乱动');
+  assert.equal(scopedQuota({ limit: want, poolSize: 0, tagged: 0 }), base, '空范围时配额不该变成 0');
+  assert.ok(scopedQuota({ limit: want, poolSize: 40, tagged: 40 }) <= want, '配额不该超过要选的总条数');
+  /* 单调性：范围内"不喜欢"的占比越高，允许的条数只能更多
+     （反过来的话会出现"点进类型反而更少"这种说不通的行为） */
+  let prev = 0;
+  for (const tagged of [0, 10, 50, 100, 200, 234]) {
+    const q = scopedQuota({ limit: want, poolSize: 234, tagged });
+    assert.ok(q >= prev, 'tagged=' + tagged + ' 时配额（' + q + '）比占比更低时（' + prev + '）还小');
+    prev = q;
+  }
+});
+
+say();
+say('--- 第十六层之二 · 删除类型：**条目一条都不会少** ---');
+
+await (async () => {
+  const cats = await import('../src/store/db.js');
+  const dbFile = tmpDbFile('delcat');
+  const db = await openDb(dbFile);
+  const now = new Date().toISOString();
+  upsertSources(db, [{ name: 'S', feedUrl: 'https://s.com/feed', kind: 'rss' }], now);
+  const cA = cats.upsertCategory(db, '要删的', 0, now);
+  const cB = cats.upsertCategory(db, '留着的', 1, now);
+  const runId = startRun(db, 'manual', now);
+  for (let i = 1; i <= 6; i += 1) {
+    const r = insertItem(
+      db,
+      { title: `条目${i}`, url: `https://e.com/${i}`, publishedAt: `2026-09-22T0${i}:00:00.000Z`, sourceId: 1, sourceName: 'S' },
+      runId,
+      now,
+    );
+    cats.tagItem(db, r.id, i % 2 ? [cA] : [cA, cB]);
+  }
+  cats.setCategorySources(db, cA, [1]);
+  const itemsBefore = db.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+  const tagsBefore = db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n;
+
+  await aok('★★ 删类型之后**条目还在**（只少了分类与绑定）', () => {
+    const r = cats.deleteCategory(db, cA);
+    assert.equal(r.ok, true, '删除应当成功：' + JSON.stringify(r));
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item').get().n, itemsBefore,
+      '删一个分类把条目也带走了 —— 条目是抓来的事实，不该被分类操作带走');
+    assert.equal(r.itemsKept, itemsBefore, '返回值要如实报出条目数（自证字段）');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_category WHERE category_id = ?').get(cA).n, 0,
+      '条目的旧标签没清干净（删掉的类型仍会把条目筛出来）');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE category_id = ?').get(cA).n, 0,
+      '源绑定没清干净（下次抓取又会 tagItem，已删除的类型会悄悄复活成一个没有 UI 入口的孤儿）');
+    assert.equal(cats.listCategories(db).some((c) => Number(c.id) === cA), false, '分类本身没删掉');
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n < tagsBefore, '剩下的标签数应当变少');
+    assert.ok(db.prepare('SELECT COUNT(*) AS n FROM item_category WHERE category_id = ?').get(cB).n > 0, '别的类型的标签不许被误删');
+  });
+
+  await aok('重复删除 / 坏 id：明确失败，不许静默', () => {
+    const again = cats.deleteCategory(db, cA);
+    assert.equal(again.ok, false, '删一个已经不存在的类型应当失败');
+    assert.ok(again.reason.length > 0, '失败必须有原因');
+    assert.equal(cats.deleteCategory(db, 'abc').ok, false, '非数字 id 应当被拒');
+  });
+
+  db.close();
+})();
+
+say();
+say('--- 第十六层之三 · 「源 ↔ 类型」映射：以 DB 为准，不被预置清单覆盖 ---');
+
+await (async () => {
+  const cats = await import('../src/store/db.js');
+  const { DEFAULT_SOURCES } = await import('../src/ingest/sources.js');
+  const dbFile = tmpDbFile('mapping');
+  /* ★ 用**真实的第一次抓取**来造这个库（而不是手工登记源与类别）：
+     播种发生在 `runIngest` 里"源与类别刚登记完"的那一刻 ——
+     手工造的话就跳过了那一步，测的是一个现实中不存在的路径。 */
+  await runIngest({
+    dbFile,
+    trigger: 'manual',
+    ensureSources: true,
+    fetcher: async () => ({ ok: true, text: GOOD_RSS }),
+  });
+  const db = await openDb(dbFile);
+  const now = new Date().toISOString();
+
+  const catId = cats.listCategories(db).find((c) => c.name === '开源与工程').id;
+  const src = cats.listSources(db).find((s) => s.feed_url === 'https://github.blog/feed/');
+  assert.ok(src, '预置源里应当有 GitHub Blog（这条断言本身要有意义）');
+
+  await aok('首次抓取会按预置清单**播种**映射（不播种的话用户改完下次启动就被覆盖）', () => {
+    assert.equal(getMeta(db, 'source_category_seeded'), '1', '播种标记没写上 —— 下次启动会再播一遍，把用户的改动冲掉');
+    assert.ok(cats.getCategorySources(db, catId).length > 0, '开源与工程一个源都没绑 —— 播种没生效');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n > 20, true, '映射行数太少，播种只播了一部分');
+  });
+
+  await aok('★ 用户改过的映射**不会被预置清单覆盖**（重开一次库来验）', async () => {
+    /* 用户从「开源与工程」里**摘掉** GitHub Blog */
+    const kept = cats.getCategorySources(db, catId).filter((id) => id !== Number(src.id));
+    const w = cats.setCategorySources(db, catId, kept);
+    assert.equal(w.ok, true);
+    assert.equal(cats.getCategorySources(db, catId).includes(Number(src.id)), false, '摘掉之后不该还在');
+    db.close();
+
+    /* 重新打开（模拟下次启动：预置清单会再跑一遍） */
+    const db2 = await openDb(dbFile);
+    const after = cats.getCategorySources(db2, catId);
+    assert.equal(after.includes(Number(src.id)), false,
+      '★ 用户摘掉的源被代码里的预置清单加回来了 —— 这正是"两份口径"，用户改完下次启动就白改');
+    db2.close();
+  });
+
+  await aok('★ 播种只在第一次发生（摘掉一个源之后重开，它不许自己回来）', async () => {
+    /* 这条与上一条是**同一件事的两个方向**，各自都不能省：
+       上一条咬"用户摘掉的源被加回来"，这一条咬"映射被**重播**了一遍"。
+       后者是更隐蔽的形态 —— 记录数一样、内容也一样，只是"以 DB 为准"
+       这条口径被换成了"每次启动以代码为准"，而那正是本次功能的立身之本。
+
+       ⚠️ 我第一版这条断言写的是"重开之后行数不变"，结果它**抓不住**
+         那个变异体：播种用的是 `INSERT OR IGNORE`，重播时行数当然不变
+         （主键冲突被忽略）。判据必须落在**内容**上，而且要有**反例**：
+         建一个"预置清单里没有映射"的类型，验证重开之后它仍然是空的。 */
+    const db6 = await openDb(dbFile);
+    const now6 = new Date().toISOString();
+    const probeId = cats.upsertCategory(db6, '探针类型（预置清单里没有它）', 99, now6);
+    const rows = () => db6.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
+    const before = rows();
+    assert.equal(cats.getCategorySources(db6, probeId).length, 0, '新类型一开始不该有任何绑定');
+    db6.close();
+
+    const db7 = await openDb(dbFile);
+    assert.equal(cats.getCategorySources(db7, probeId).length, 0,
+      '★ 重开一次库之后，一个"预置清单里没有映射"的类型被塞进了绑定 —— 播种不再是"一次性的"了');
+    assert.equal(db7.prepare('SELECT COUNT(*) AS n FROM source_category').get().n, before,
+      '重开之后映射总行数变了 ⇒ 播种又跑了一遍');
+    db7.close();
+  });
+
+  await aok('取消勾选是**可逆的筛选**：再勾回去就在了，而且条目不受影响', async () => {
+    const db3 = await openDb(dbFile);
+    const before = db3.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+    const add = cats.getCategorySources(db3, catId).concat([Number(src.id)]);
+    assert.equal(cats.setCategorySources(db3, catId, add).ok, true);
+    assert.equal(cats.getCategorySources(db3, catId).includes(Number(src.id)), true, '勾回去应当立刻生效');
+    assert.equal(db3.prepare('SELECT COUNT(*) AS n FROM item').get().n, before, '改映射不该动条目');
+    db3.close();
+  });
+
+  await aok('★ 升级路径：老库里**已经改过**的映射不许被播种覆盖', async () => {
+    /* ★★ 这条补的是一个**真实的盲区**（被变异测试逼出来的）。
+     *
+     * `seedSourceCategories` 有**两道**守卫：
+     *   ① `meta.source_category_seeded === '1'`  ⇒ 已经播过就退出
+     *   ② `映射表非空 && !fresh`                 ⇒ **老库**（升级上来的）只补标记
+     * 上面那条"播种只发生一次"的断言只咬得住①。把②拆掉，所有断言照样全绿 ——
+     * 而②保护的恰恰是最危险的那条路径：
+     *   老库（v1 升上来的、没有任何标记）里若有用户已经改过的映射，
+     *   没有②就会被"预置清单"整个冲掉，用户侧看到的是"升级之后我的筛选设置没了"。
+     *
+     * ⇒ 造出那个状态：一个**没有播种标记**、但映射表里躺着用户改动的库。 */
+    const db8 = await openDb(dbFile);
+    const now8 = new Date().toISOString();
+    const cat8 = cats.listCategories(db8).find((c) => c.name === '开源与工程').id;
+    const all = cats.listSources(db8).map((s) => Number(s.id));
+    /* 用户把所有源都摘掉，只留第一个 —— 一个绝不会与预置清单重合的状态 */
+    const keptOne = [all[0]];
+    cats.setCategorySources(db8, cat8, keptOne);
+    /* 抹掉标记：模拟"老库升级上来"（v1 → v2 的迁移刚建好映射表，还没有任何标记） */
+    db8.prepare("DELETE FROM meta WHERE key IN ('source_category_seeded','source_category_backfill')").run();
+    db8.prepare("UPDATE meta SET value = '1' WHERE key = 'schema_version'").run();
+    db8.close();
+
+    const db9 = await openDb(dbFile);
+    const after9 = cats.getCategorySources(db9, cat8);
+    assert.equal(after9.join(','), keptOne.join(','),
+      '★ 老库里用户改过的映射被预置清单覆盖了（期望只剩 ' + keptOne.join(',') + '，实得 ' + after9.join(',') +
+        '）—— 升级之后用户的筛选设置会整个消失');
+    /* 顺手确认"只补标记、不重播"这条契约真的落到了库里：
+       标记没写上的话，下一次打开还会再判一次"要不要播种"。 */
+    assert.equal(getMeta(db9, 'source_category_seeded'), '1', '老库升级之后应当补上播种标记');
+    db9.close();
+  });
+
+  await aok('写入只接受库里真实存在的源 id（错 id 不许变成悬挂绑定）', async () => {
+    const db4 = await openDb(dbFile);
+    const r = cats.setCategorySources(db4, catId, [Number(src.id), 999999, 'x']);
+    assert.equal(r.ok, true);
+    assert.equal(r.sourceIds.includes(999999), false, '不存在的源 id 被写进去了');
+    assert.equal(Number.isFinite(Number(r.sourceIds[0])), true, '非数字 id 被写进去了');
+    db4.close();
+  });
+
+  await aok('偏好只认三档（1/0/-1），别的一律拒绝而不是夹取', async () => {
+    const db5 = await openDb(dbFile);
+    assert.equal(cats.setCategoryPref(db5, catId, 1).ok, true);
+    assert.equal(cats.prefByCategory(db5).get(String(catId)), 1);
+    assert.equal(cats.setCategoryPref(db5, catId, -1).ok, true);
+    assert.equal(cats.prefByCategory(db5).get(String(catId)), -1);
+    const bad = cats.setCategoryPref(db5, catId, 0.5);
+    assert.equal(bad.ok, false, '0.5 这样的值应当被拒绝（夹取会把它悄悄变成"中性"，用户以为设置生效了）');
+    assert.equal(cats.prefByCategory(db5).get(String(catId)), -1, '被拒的写入不许改动原值');
+    assert.equal(cats.setCategoryPref(db5, 999999, 1).ok, false, '不存在的类别应当被拒');
+    db5.close();
+  });
+
+  await aok('★ 抓取打标签读的是 DB 里的映射（不是代码里的清单）', async () => {
+    /* 把「行业动态」绑到一个**预置清单里不属于它**的源上，然后抓一次，
+       验证新条目的标签跟着**用户的映射**走。
+       ⚠️ 这条断言盯的是 fetch-feeds.js 里那一行曾经写死的东西：
+          `(DEFAULT_SOURCES.find(...) || {}).categories` ——
+          它意味着用户在界面上勾的东西完全不参与抓取。 */
+    const cats2 = await import('../src/store/db.js');
+    const dbFile2 = tmpDbFile('tagmap');
+    const seed = await openDb(dbFile2);
+    const now2 = new Date().toISOString();
+    upsertSources(seed, [{ name: 'GitHub Blog', feedUrl: 'https://github.blog/feed/', kind: 'rss' }], now2);
+    const cAI = cats2.upsertCategory(seed, 'AI 与算力', 0, now2);   // 预置清单里 GitHub Blog 不在这类
+    cats2.upsertCategory(seed, '开源与工程', 1, now2);
+    const sid = cats2.listSources(seed)[0].id;
+    cats2.setCategorySources(seed, cAI, [sid]);                      // 用户把它勾进了「AI 与算力」
+    seed.close();
+
+    const r = await runIngest({
+      dbFile: dbFile2,
+      trigger: 'manual',
+      ensureSources: false,
+      fetcher: async () => ({ ok: true, text: GOOD_RSS }),
+    });
+    assert.ok(r.newItems > 0, '应当抓到条目（这条断言本身要有意义）');
+
+    const check = await openDb(dbFile2);
+    const tagged = check
+      .prepare('SELECT COUNT(*) AS n FROM item_category WHERE category_id = ?')
+      .get(cAI).n;
+    const items = check.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+    assert.ok(tagged > 0, '新条目没有按**用户改过的**映射打标签（抓取仍然在读代码里的预置清单）');
+    assert.equal(tagged, items, '本该每一条都进「AI 与算力」（它是这个源唯一绑定的类型）');
+    check.close();
+  });
+})();
+
+say();
+say('--- 第十六层之四 · 迁移：老库（有真实数据）不许被要求删库 ---');
+
+await (async () => {
+  const cats = await import('../src/store/db.js');
+  const { DEFAULT_SOURCES } = await import('../src/ingest/sources.js');
+  const dbFile = tmpDbFile('migrate');
+
+  /* —— 造一个 v1 老库：有源、有类别、有条目与标签，schema_version = 1 ——
+     ⚠️ 顺序很关键：先造数据、**最后**把版本号改成 1。
+        反过来的话 openDb 一进来就会走 v1→v2 分支，而那时表还是空的。 */
+  const seed = await openDb(dbFile);
+  const now = new Date().toISOString();
+  upsertSources(seed, DEFAULT_SOURCES, now);
+  const cA = cats.upsertCategory(seed, '开源与工程', 1, now);
+  const runId = startRun(seed, 'manual', now);
+  const sid = cats.listSources(seed).find((s) => s.feed_url === 'https://github.blog/feed/').id;
+  for (let i = 1; i <= 3; i += 1) {
+    const r = insertItem(seed, { title: `老条目${i}`, url: `https://e.com/old/${i}`, publishedAt: '2026-09-20T00:00:00.000Z', sourceId: sid, sourceName: 'GitHub Blog' }, runId, now);
+    cats.tagItem(seed, r.id, [cA]);
+  }
+  const itemsBefore = seed.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+  const tagsBefore = seed.prepare('SELECT COUNT(*) AS n FROM item_category').get().n;
+  seed.prepare("UPDATE meta SET value = '1' WHERE key = 'schema_version'").run();
+  seed.prepare('DELETE FROM source_category').run();          // v1 没有这张表的内容
+  seed.prepare("DELETE FROM meta WHERE key IN ('source_category_seeded','source_category_backfill')").run();
+  seed.close();
+
+  await aok('★ v1 → v2 迁移：不删数据、补上 pref 列、播种映射、回填历史标签', async () => {
+    const db2 = await openDb(dbFile);
+    assert.equal(getMeta(db2, 'schema_version'), '2', '版本号没推进');
+    assert.equal(db2.prepare('SELECT COUNT(*) AS n FROM item').get().n, itemsBefore, '迁移把条目弄丢了');
+    assert.ok(db2.prepare('SELECT COUNT(*) AS n FROM item_category').get().n >= tagsBefore, '标签数不该变少');
+    const cols = db2.prepare('PRAGMA table_info(category)').all().map((c) => c.name);
+    assert.ok(cols.includes('pref'), 'v2 的 category.pref 列没补上');
+    assert.ok(db2.prepare('SELECT COUNT(*) AS n FROM source_category').get().n > 0, '映射没有被播种');
+    assert.equal(getMeta(db2, 'source_category_backfill'), '1', '回填标记没写上（下次启动会重复回填）');
+    db2.close();
+  });
+
+  await aok('★ 迁移要**幂等**：再打开一次不会重复回填、也不会改数据', async () => {
+    const db3 = await openDb(dbFile);
+    const a = {
+      items: db3.prepare('SELECT COUNT(*) AS n FROM item').get().n,
+      tags: db3.prepare('SELECT COUNT(*) AS n FROM item_category').get().n,
+      map: db3.prepare('SELECT COUNT(*) AS n FROM source_category').get().n,
+    };
+    db3.close();
+    const db4 = await openDb(dbFile);
+    const b = {
+      items: db4.prepare('SELECT COUNT(*) AS n FROM item').get().n,
+      tags: db4.prepare('SELECT COUNT(*) AS n FROM item_category').get().n,
+      map: db4.prepare('SELECT COUNT(*) AS n FROM source_category').get().n,
+    };
+    db4.close();
+    assert.deepEqual(b, a, '重复打开改变了数据 —— 迁移不是幂等的');
+  });
+})();
+
+say();
+say('--- 第十六层之五 · 界面侧：面板的"取消勾选"必须真的写回去 ---');
+
+ok('★ card.js 的保存失败分支必须**回滚**（静默失败 = 用户以为设置存住了）', () => {
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'renderer', 'card.js'), 'utf8');
+  const body = src.match(/async function toggleCategorySource\([\s\S]*?\n  \}/);
+  assert.ok(body, '找不到 toggleCategorySource（面板的核心动作）');
+  /* 落库失败时要拿**发出去之前**那一份勾选写回状态：
+     少了它，界面会停在一个"勾着但不生效"的样子上。 */
+  assert.ok(/sourceIds:\s*before/.test(body[0]),
+    '保存源映射失败时没有把界面回滚到"发出去之前"的那一份勾选 —— 用户会看到一个勾着但不生效的界面');
+  assert.ok(/editorSaving/.test(body[0]), '没有保存中的闸门（两次写会互相覆盖）');
+});
+
+ok('★ 取消勾选是**可逆的筛选**：card.js 里不许出现删除条目/删除源的动作', () => {
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'renderer', 'card.js'), 'utf8');
+  /* 面板里唯一允许的"删除"是 `deleteCategory` —— 它只删分类与绑定。
+     任何 deletion 语义的条目/源操作都不该出现。 */
+  const hashes = src.match(/api\.brief\.[A-Za-z]+/g) || [];
+  const forbidden = hashes.filter((h) => /deleteItem|deleteSource|removeItem|removeSource/i.test(h));
+  assert.deepEqual(forbidden, [], '渲染层出现了删除条目/源的动作：' + forbidden.join(', ') + ' —— 勾选/取消勾选是可逆的筛选，不是删除');
+});
+
+say();
+say('--- 第十六层之六 · 配额**真的接在精选上**了吗（接不上 = 逻辑再对也没用）---');
+
+ok('★ main/index.js 的 buildBrief 必须调用 selectByQuota，而且要传**真实的偏好表**', () => {
+  /* ⚠️ 这条断言是**静态**的，我知道它比"跑一遍"弱。它的存在理由很具体：
+     `main/index.js` import 了 electron（离线加载不了），所以 buildBrief
+     永远不可能被离线执行 —— 而"配额逻辑写好了、却没接在精选上"
+     正是这个功能最可能的失败形态（逻辑全对、用户什么也看不到）。
+     能做到的最强静态判据只有三件事，这里逐条咬住：
+       ① 真的调了 selectByQuota
+       ② 传进去的是**从库里读出来的**偏好表，而不是 null / 空表
+       ③ 选完之后 items 真的被换掉了（而不是选完丢掉） */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  const body = src.match(/function buildBrief\([\s\S]*?\n\}/);
+  assert.ok(body, '找不到 buildBrief');
+  assert.ok(/selectByQuota\s*\(/.test(body[0]), 'buildBrief 没有调用 selectByQuota —— 配额逻辑接不上精选');
+  assert.ok(/prefByCategory\s*\(/.test(body[0]), 'buildBrief 没有从库里读偏好表（prefByCategory）');
+  assert.ok(/prefByCategory:\s*prefs/.test(body[0]), 'selectByQuota 收到的不是库里那份偏好表');
+  assert.ok(/items\s*=\s*sel\.picked/.test(body[0]), '选完之后没有把 items 换成选中结果（等于白选）');
+  /* 配额应当**只在真的有偏好时**才多取候选：没有偏好也放大候选池的话，
+     "看今天全部"会变成"看今天的一部分"（这是个静默的观感变化）。 */
+  assert.ok(/hasPref/.test(body[0]), '没有"是否有偏好"的判断 —— 没偏好时也会多取候选池');
+});
+
+/* ------------------------------------------------------------------
+ * 变异体用的**同步**夹具（变异体的 run() 不能是 async）
+ *
+ * ⚠️ 这里刻意把"删类型"与"写映射"的**真实实现**再写一遍（而不是调用
+ *    db.js 里那两个函数）—— 变异体要能**独立地**把某一步改坏，
+ *    然后看刚才那两条断言抓不抓得住。调用真实现就等于"拿实现验证实现"。
+ *    所以下面这两段是**故意的副本**，不是重复代码：它们就是"坏实现"的宿主。
+ * ------------------------------------------------------------------ */
+function syncQuotaDb() {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  db.exec(
+    'CREATE TABLE item (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT);' +
+      'CREATE TABLE category (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);' +
+      'CREATE TABLE item_category (item_id INTEGER, category_id INTEGER, PRIMARY KEY (item_id, category_id));' +
+      'CREATE TABLE source (id INTEGER PRIMARY KEY AUTOINCREMENT, feed_url TEXT UNIQUE, name TEXT);' +
+      'CREATE TABLE source_category (source_id INTEGER, category_id INTEGER, PRIMARY KEY (source_id, category_id));',
+  );
+  db.prepare("INSERT INTO category (id, name) VALUES (1, '甲'), (2, '乙')").run();
+  db.prepare("INSERT INTO source (id, feed_url, name) VALUES (1, 'https://a/feed', 'A'), (2, 'https://b/feed', 'B')").run();
+  const tag = db.prepare('INSERT INTO item_category (item_id, category_id) VALUES (?, ?)');
+  for (let i = 1; i <= 6; i += 1) {
+    db.prepare('INSERT INTO item (id, title) VALUES (?, ?)').run(i, '条目' + i);
+    tag.run(i, 1);
+    if (i % 2 === 0) tag.run(i, 2);
+  }
+  db.prepare('INSERT INTO source_category (source_id, category_id) VALUES (1, 1), (2, 1)').run();
+  return db;
+}
+
+/** 「删类型」的**正确**形状：只删分类与绑定，条目一条不动 */
+function syncDeleteCategory(db, categoryId) {
+  db.prepare('DELETE FROM item_category WHERE category_id = ?').run(categoryId);
+  db.prepare('DELETE FROM source_category WHERE category_id = ?').run(categoryId);
+  db.prepare('DELETE FROM category WHERE id = ?').run(categoryId);
+}
+
+/**
+ * 「写映射」的**正确**形状：先清后写（覆盖式）。
+ * ⚠️ 只增不减会让"取消勾选"变成空操作 —— 用户以为改好了，其实没有。
+ */
+function syncSetCategorySources(db, categoryId, sourceIds) {
+  db.prepare('DELETE FROM source_category WHERE category_id = ?').run(categoryId);
+  const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
+  for (const id of sourceIds) ins.run(id, categoryId);
+}
+
+/** 「写映射」的**坏**形状：只增不减 —— V10 变异体的宿主 */
+function syncSetCategorySourcesAppendOnly(db, categoryId, sourceIds) {
+  const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
+  for (const id of sourceIds) ins.run(id, categoryId); // 坏实现：没有先清
+}
+
+/** 「删类型」的**坏**形状：顺手把条目也删了（用户整理一下类型就永久丢数据） */
+function syncDeleteCategoryWithItems(db, categoryId) {
+  db.prepare('DELETE FROM item WHERE id IN (SELECT item_id FROM item_category WHERE category_id = ?)').run(categoryId);
+  syncDeleteCategory(db, categoryId);
+}
+
 /* ---------- 变异测试 ---------- */
 say();
 say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
@@ -2556,6 +3113,89 @@ const MUTANTS = [
       };
       const results = [{ ok: false }, { ok: true }];
       assert.doesNotThrow(() => bad(results), '坏实现会抛 —— 证明失败隔离用例有判别力');
+    },
+  },
+
+  /* ==================================================================
+   * V7–V11：本次功能（筛选栏）。
+   * 每一条都对应一个"用户看不见、后果却很重"的坏法 —— 这正是变异测试
+   * 存在的理由：普通断言只证明"现在是对的"，证明不了"改坏了会被发现"。
+   * ================================================================== */
+  {
+    id: 'V7',
+    desc: '配额退化成"降权排序"：不喜欢的有内容也可能一条都不剩（「少放」被做成「不放」）',
+    run: () => {
+      /* 坏实现：把三档各排一队、按顺序取满 15 条 —— 看起来"把不喜欢的排到最后"，
+         实际上喜欢与中性足够填满时，不喜欢的一条都进不来。 */
+      const rank = { 1: 0, 0: 1, '-1': 2 };
+      const prefs = new Map([['1', 1], ['2', 0], ['3', -1]]);
+      const items = []
+        .concat(cand('like', 40, [1], 0))
+        .concat(cand('mid', 40, [2], 1000))
+        .concat([{ id: 9999, title: '不喜欢的一条', categories: [3] }]);
+      const picked = items
+        .slice()
+        .sort((a, b) => rank[String(classOf(a, prefs))] - rank[String(classOf(b, prefs))])
+        .slice(0, 15);
+      const hasDislike = picked.some((x) => classOf(x, prefs) === -1);
+      assert.ok(picked.length === 15, '坏实现也给出 15 条 ⇒ **光看条数抓不住这个坏法**');
+      assert.equal(hasDislike, true,
+        '坏实现把不喜欢的那一条挤掉了 —— 证明"不能没有"那条断言咬得住（它要求的正是"里面有不喜欢的那条"）');
+    },
+  },
+  {
+    id: 'V8',
+    desc: '不喜欢不设上限：配额被放开（"少放"变回"全放进来"）',
+    run: () => {
+      const prefs = new Map([['1', 1], ['2', 0], ['3', -1]]);
+      const items = []
+        .concat(cand('like', 40, [1], 0))
+        .concat(cand('mid', 40, [2], 1000))
+        .concat(cand('hate', 40, [3], 2000));
+      /* 坏实现：把配额放开到 15（= 等于没有配额） */
+      const r = selectByQuota({ items, limit: 15, prefByCategory: prefs, quota: 15 });
+      assert.ok(r.counts.dislike <= quotaOf(15),
+        '坏实现让不喜欢占了 ' + r.counts.dislike + ' 条（配额是 ' + quotaOf(15) + '）—— 证明"不超过 K 条"那条断言有判别力');
+    },
+  },
+  {
+    id: 'V9',
+    desc: '删类型顺手删条目（用户整理一下类型就永久丢数据）',
+    run: () => {
+      const db = syncQuotaDb();
+      const before = db.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+      syncDeleteCategoryWithItems(db, 1);          // 坏实现
+      const after = db.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+      db.close();
+      assert.equal(after, before,
+        '坏实现把条目也删了（' + before + ' → ' + after + '）—— 证明"删类型之后条目还在"那条断言咬得住');
+    },
+  },
+  {
+    id: 'V10',
+    desc: '写「源 ↔ 类型」映射时只增不减（取消勾选变成空操作，用户以为改好了）',
+    run: () => {
+      const db = syncQuotaDb();
+      /* 用户此刻只想留源 2（源 1 已经被他取消勾选）—— 走**坏实现** */
+      syncSetCategorySourcesAppendOnly(db, 1, [2]);
+      const left = db.prepare('SELECT source_id FROM source_category WHERE category_id = 1 ORDER BY source_id').all().map((r) => Number(r.source_id));
+      db.close();
+      assert.equal(left.join(','), '2',
+        '坏实现留下了被取消勾选的那个源（实得 ' + left.join(',') + '）—— 证明"写回去的只剩没被取消的那个"那条断言咬得住');
+    },
+  },
+  {
+    id: 'V11',
+    desc: '用户改动被预置清单覆盖（每次启动都按代码里的清单重播一遍映射）',
+    run: () => {
+      const db = syncQuotaDb();
+      syncSetCategorySources(db, 1, [2]);          // 用户把源 1 从「甲」里摘掉，只留源 2
+      /* 坏实现：每次启动都按预置清单**无脑重播**（不看清里面已经有什么） */
+      for (const sid of [1, 2]) db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, 1)').run(sid);
+      const after = db.prepare('SELECT source_id FROM source_category WHERE category_id = 1 ORDER BY source_id').all().map((r) => Number(r.source_id));
+      db.close();
+      assert.equal(after.includes(1), false,
+        '坏实现把用户摘掉的源加回来了（实得 ' + after.join(',') + '）—— 证明"不会被预置清单覆盖"那条断言咬得住');
     },
   },
 ];

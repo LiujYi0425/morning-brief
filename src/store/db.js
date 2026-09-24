@@ -30,9 +30,19 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { canonicalizeUrl, dedupeKey } from '../ingest/urls.js';
+/* ★★ 「源 ↔ 类型」的**预置清单**只在这里被读一次，用来**播种**（见 migrate 的说明）。
+ *
+ * ⚠️ 播种之后**以 DB 为准**，代码里的这份清单不再参与任何决策。
+ *    不这么做的话，用户改完映射、下次启动就被代码里的预置清单覆盖回去 ——
+ *    又是一处"两份口径"，而本项目已经反复栽在这个模式上
+ *    （CARD_SIZE / --win-pad / createLogSink / 数据目录口径，四处都是）。
+ *
+ * ⚠️ 方向是 db → ingest（而不是反过来）：ingest 不许反向依赖 db 的判断，
+ *    否则"谁说了算"又要靠约定维持，而约定会腐烂。 */
+import { DEFAULT_SOURCES, DEFAULT_CATEGORIES } from '../ingest/sources.js';
 
 /** schema 版本。改结构时 +1，并在 migrate() 里加一段 —— 否则老库会静默少字段 */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const DDL = `
 PRAGMA journal_mode = WAL;
@@ -99,7 +109,10 @@ CREATE TABLE IF NOT EXISTS category (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   name       TEXT NOT NULL UNIQUE,
   sort_order INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- ★ 偏好（需求 2 的"配比"）：1 喜欢 / 0 中性 / -1 不喜欢
+  --   ⚠️ 语义是**配比**不是过滤：不喜欢 = 少放但**不能没有**（配额见 shared/quota.js）
+  pref       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS item_category (
@@ -108,6 +121,27 @@ CREATE TABLE IF NOT EXISTS item_category (
   PRIMARY KEY (item_id, category_id)
 );
 CREATE INDEX IF NOT EXISTS idx_itemcat_cat ON item_category (category_id);
+
+/* ★★ 用户可编辑的「源 ↔ 类型」映射（本次功能的核心）。
+ *
+ * 为什么必须单独一张表：在这之前，"源属于哪个类型"**硬编码在
+ * src/ingest/sources.js 里**（每个源带一个 categories 数组）。
+ * 硬编码的清单没法被用户编辑 —— 改完下次启动就被代码覆盖，
+ * 那正是本项目反复栽过的"两份口径"。
+ * ⇒ 代码里的清单降级为**一次性播种源**，此后 DB 是唯一真相。
+ *
+ * ⚠️ 这张表是**绑定**，不是"条目的标签"：条目的标签仍然是 item_category
+ *    （抓取那一刻按当时的映射打上，历史事实、不回溯改写）。
+ *    两者的分工：source_category 决定**以后**抓来的条目进哪个类型，
+ *    item_category 决定**已经抓到的**条目在筛选里出不出现。
+ *    混成一张表的后果是"改一下映射，历史条目全部换类" —— 那等于伪造历史。
+ */
+CREATE TABLE IF NOT EXISTS source_category (
+  source_id   INTEGER NOT NULL REFERENCES source(id) ON DELETE CASCADE,
+  category_id INTEGER NOT NULL REFERENCES category(id) ON DELETE CASCADE,
+  PRIMARY KEY (source_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_srccat_cat ON source_category (category_id);
 
 -- 每天一份简报：默认精选 N 条，其余作为"当日存档"可展开
 CREATE TABLE IF NOT EXISTS brief (
@@ -133,7 +167,9 @@ CREATE TABLE IF NOT EXISTS brief (
  * @returns {Promise<object>} 数据库连接
  */
 export async function openDb(file) {
+  let isNewFile = false;
   if (file !== ':memory:') {
+    isNewFile = !fs.existsSync(file);
     fs.mkdirSync(path.dirname(file), { recursive: true });
   }
 
@@ -145,16 +181,136 @@ export async function openDb(file) {
   if (cur === null) {
     setMeta(db, 'schema_version', String(SCHEMA_VERSION));
   } else if (Number(cur) !== SCHEMA_VERSION) {
-    /* ⚠️ 这里**不自动迁移**，而是明确报错 —— 静默迁移是"数据悄悄变形"的温床。
-       真实迁移要写在 migrate() 里逐版推进；M1 阶段 schema 还在动，
-       宁可让用户看到一句"库版本不匹配"也不要让数据半新半旧。 */
-    throw new Error(
-      `数据库 schema 版本不匹配：文件是 ${cur}，代码要求 ${SCHEMA_VERSION}。` +
-        `请删除该库文件后重新抓取（M1 阶段 schema 仍在变动）。`,
-    );
+    migrate(db, Number(cur));
+    setMeta(db, 'schema_version', String(SCHEMA_VERSION));
   }
+  /* ★ 播种必须在**版本检查之后**：老库要先补上 `pref` 列才能被使用，
+     而迁移本身要读 `category` 表；映射表也要先经过 DDL。 */
+  seedSourceCategories(db, new Date().toISOString(), { fresh: isNewFile });
   return db;
 }
+
+/**
+ * 逐版推进的结构迁移。
+ *
+ * ⚠️⚠️ 这里**不再抛错让用户删库**（初版是那样的，理由是"M1 阶段 schema 还在动"）。
+ *    现在不能那么干了：库里已经有**真实的用户数据**（近千条条目、
+ *    几十个源的抓取历史），而"请删除该库文件后重新抓取"等于让用户
+ *    亲手扔一次数据 —— 一个功能升级不该有这种代价。
+ *
+ * ⚠️ 迁移的每一步都必须**幂等**：迁移完才写 schema_version，中途崩掉的话
+ *    下次启动会从同一个版本重来。用"列在不在"判断而不是"版本号是多少"，
+ *    这样重跑不会炸（`ALTER TABLE ADD COLUMN` 重复执行会报 duplicate column）。
+ *
+ * @param {object} db 连接
+ * @param {number} from 文件里的版本号
+ */
+function migrate(db, from) {
+  const hasColumn = (table, col) =>
+    db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+
+  /* ---- v1 → v2：类型偏好 + 用户可编辑的「源 ↔ 类型」----
+   * DDL 用的是 `CREATE TABLE IF NOT EXISTS`，所以新表上面已经建好了；
+   * 这里只需要补老表上**新增的列**，以及把历史条目的标签补上。 */
+  if (from < 2) {
+    if (!hasColumn('category', 'pref')) {
+      db.exec('ALTER TABLE category ADD COLUMN pref INTEGER NOT NULL DEFAULT 0');
+    }
+    /* ★ 历史条目的标签回填（**只有这一次**，用 meta 标记记住）。
+     *
+     * 为什么需要：在本次改动之前，一个条目标着哪些类型，取决于抓它那一刻
+     * `sources.js` 里那个源的 `categories` 数组。现在映射搬进了 DB，
+     * 若不对历史条目做一次回填，用户在"安全与隐私"里会**看不到任何已有条目**
+     * —— 他甚至会以为筛选坏了，而这只是"标签还没跟过来"。
+     *
+     * ⚠️ 只跑一次（而不是每次启动都同步）：用户改映射之后，历史条目的标签
+     *    不该跟着改 —— 标签是"抓取那一刻的事实"，跟着映射漂移就等于伪造历史。
+     *    这一次回填只是把**迁移前那套硬编码映射**（与播种进 DB 的映射逐字相同）
+     *    落到历史条目上，不引入任何新的判断。 */
+    if (getMeta(db, 'source_category_backfill') !== '1') {
+      const n = db
+        .prepare(
+          `INSERT OR IGNORE INTO item_category (item_id, category_id)
+           SELECT i.id, sc.category_id FROM item i JOIN source_category sc ON sc.source_id = i.source_id`,
+        )
+        .run();
+      setMeta(db, 'source_category_backfill', '1');
+      if (Number(n.changes) > 0) {
+        console.log(`[db] 已把「源 ↔ 类型」映射回填到 ${n.changes} 条历史标签上（只做这一次）`);
+      }
+    }
+  }
+  console.log(`[db] schema ${from} → ${SCHEMA_VERSION} 迁移完成（数据未删除）`);
+}
+
+/**
+ * 用代码里的预置清单**播种**「源 ↔ 类型」映射。
+ *
+ * ⚠️⚠️ 三条口径，缺一条这个功能就会变成"改了不生效"或"改了被覆盖"：
+ *
+ *   ① **播种只发生一次**（`meta.source_category_seeded`）。
+ *      用户从某个类型里摘掉的源，绝不能在下次启动时被代码里的清单加回来 ——
+ *      那正是"两份口径"最典型的形态，也正是本项目反复栽过的模式。
+ *      ⇒ 首次播种之后，`sources.js` 里那份 `categories` 数组就只是**初始值**，
+ *        任何决策（抓取时打标签、界面上勾选）都读 DB。
+ *
+ *      ⚠️ 我第一版写的是"只加不减"（`INSERT OR IGNORE`），以为那就够了 ——
+ *        **不够**：`INSERT OR IGNORE` 只保护"已经存在的行"，而用户删掉的那一行
+ *        恰恰**不存在**，于是它每次启动都被重新插回来。用户侧看到的是
+ *        "我取消勾选的那个源，重启之后自己又勾上了"。
+ *        （这条是被 test-all 里那条"重开一次库"的断言当场咬住的。）
+ *
+ *   ② **新库第一次打开就播种**：类别表、源表这时可能还是空的 ⇒ 播不下去。
+ *      没关系，第一次抓取会把预置源与预置类别登记进来，那时**同一个进程里**
+ *      还会再播一次（`fresh` 为真时允许），于是新库的初始映射是完整的。
+ *
+ *   ③ **只读不写**：播种永远不删、不覆盖任何已有行。
+ */
+export function seedSourceCategories(db, nowIso, opts = {}) {
+  /* ⚠️ `fresh` 的判据是"这次调用之前 `source_category` 是空的"，
+     而不是"文件是新建的" —— 新库第一次打开时源表通常还是空的，
+     真正能播下去的时刻是**第一次抓取之后**（同一个新建库、但已经不是空表）。 */
+  const already = db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
+  const seeded = getMeta(db, 'source_category_seeded');
+  if (seeded === '1') return { seeded: 0, skipped: 'already-seeded' };
+  if (already > 0 && !opts.fresh) {
+    /* 有映射、但没有播种标记 ⇒ 这是一个**升级上来的老库**
+       （v1 → v2 的迁移刚建好映射表并回填过）。
+       ⇒ 只补标记，**绝不重播**：重播会把用户已经改过的映射覆盖掉。 */
+    setMeta(db, 'source_category_seeded', '1');
+    return { seeded: 0, skipped: 'legacy-keep-user' };
+  }
+
+  const cats = new Map();
+  for (const c of listCategories(db)) cats.set(c.name, c.id);
+
+  /* 预置类别也一并登记（新库第一次打开时类别表是空的，
+     而映射的种子依赖类别名 → id；不先建类别，种子会全部落空）。 */
+  DEFAULT_CATEGORIES.forEach((name, i) => {
+    if (!cats.has(name)) cats.set(name, upsertCategory(db, name, i, nowIso));
+  });
+
+  const srcIds = new Map();
+  for (const s of listSources(db)) srcIds.set(s.feed_url, s.id);
+
+  const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
+  let seededCount = 0;
+  let everythingResolvable = true;
+  for (const s of DEFAULT_SOURCES) {
+    const sid = srcIds.get(s.feedUrl);
+    if (sid == null) { everythingResolvable = false; continue; } // 这个源还没登记，下次再播
+    for (const name of s.categories || []) {
+      const cid = cats.get(name);
+      if (cid == null) { everythingResolvable = false; continue; }
+      seededCount += Number(ins.run(sid, cid).changes);
+    }
+  }
+  /* ⚠️ **只有全部播下去之后才写标记**。否则第一次抓取之后那次机会就没了 ——
+     而那时映射表还是空的，用户会看到一个"什么源都没勾"的空筛选栏。 */
+  if (everythingResolvable) setMeta(db, 'source_category_seeded', '1');
+  return { seeded: seededCount, complete: everythingResolvable };
+}
+
 
 export function getMeta(db, key) {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
@@ -333,6 +489,7 @@ export function insertItem(db, it, runId, nowIso) {
  * @param {{publishedAt:string|null, id:number}} [opts.cursor] 上一页最后一条
  * @param {number[]} [opts.categoryIds] 筛选：命中任一类别即可
  * @param {number[]} [opts.sourceIds]
+ * @param {number[]} [opts.skipIds] 明确排除的条目 id（见下面"配额翻页"的说明）
  * @returns {{rows: Array<object>, nextCursor: object|null, hasMore: boolean}}
  */
 export function queryItems(db, opts = {}) {
@@ -387,6 +544,20 @@ export function queryItems(db, opts = {}) {
   if (opts.excludeNullDate) {
     where.push('published_at IS NOT NULL');
   }
+  /* ★ 配额翻页的"跳过"（本次改动）。
+     有偏好时，首页取的是一个**比页大的候选池**、再按配额挑出 N 条 ——
+     于是游标指向"最后一条选中项"，而池子里被跳过的那些条目
+     会在下一页被重新取到（同一条出现两次）。
+     ⇒ 由 buildBrief 把"本页已经在池子里见过的 id"放进游标带回来，
+        这里显式排除。**这是有据可查的跳过，不是 UI 层的顺手去重** ——
+        后者会把口径问题藏进界面，日志里彻底消失。 */
+  if (opts.skipIds && opts.skipIds.length) {
+    const ids = opts.skipIds.map(Number).filter((n) => Number.isFinite(n));
+    if (ids.length) {
+      where.push(`id NOT IN (${ids.map(() => '?').join(',')})`);
+      params.push(...ids);
+    }
+  }
   /* 「看今天全部」模式：把结果**真的**限制在今天之内。
      ⚠️ 为什么需要它：按钮上写着"看今天全部（N）"，而 N 是**当日**总数；
         如果查询不按日期收口，点下去会翻出一堆前几天的条目 ——
@@ -435,6 +606,10 @@ export function countItems(db, opts = {}) {
     );
     params.push(...opts.categoryIds);
   }
+  if (opts.sourceIds && opts.sourceIds.length) {
+    where.push(`source_id IN (${opts.sourceIds.map(() => '?').join(',')})`);
+    params.push(...opts.sourceIds);
+  }
   const sql = 'SELECT COUNT(*) AS n FROM item ' + (where.length ? 'WHERE ' + where.join(' AND ') : '');
   return db.prepare(sql).get(...params).n;
 }
@@ -458,6 +633,15 @@ export function sourceHealth(db) {
 /* 类别（需求 2 的筛选）                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 登记/更新一个类别（幂等）。
+ *
+ * ⚠️ `ON CONFLICT` 分支里**刻意不碰 `pref`**（本次改动的要点之一）：
+ *    首次抓取会用预置清单把 8 个类别的名字再登记一遍，
+ *    若这里顺手把 pref 写成默认值，用户设的"喜欢/不喜欢"会被
+ *    **每次抓取**清掉 —— 用户侧看到的是"配比设了没用"，
+ *    而原因埋在一句看起来无害的 upsert 里。
+ */
 export function upsertCategory(db, name, sortOrder, nowIso) {
   db.prepare(
     'INSERT INTO category (name, sort_order, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET sort_order = excluded.sort_order',
@@ -473,3 +657,134 @@ export function tagItem(db, itemId, categoryIds) {
   const ins = db.prepare('INSERT OR IGNORE INTO item_category (item_id, category_id) VALUES (?, ?)');
   for (const cid of categoryIds) ins.run(itemId, cid);
 }
+
+/**
+ * 删除一个类别。
+ *
+ * ★★ **只删分类与绑定，绝不删 item**（这是本次改动里最要紧的一条边界）。
+ *    条目是"抓来的事实"：它属于哪个类型是个**视图**，而条目本身不是。
+ *    把分类操作做成"连带删条目"的话，用户整理一下类型就会永久丢数据，
+ *    而且丢得毫无提示 —— 这类错误在桌面应用里是不可挽回的。
+ *
+ * ⚠️ 三张表要清干净，缺一张就会留下悬挂引用：
+ *      item_category  —— 条目的标签（不删的话，删掉的类别仍会把条目筛出来）
+ *      source_category—— 源 ↔ 类型绑定（不删的话，下次抓取又会 tagItem，
+ *                        于是"已删除的类型"悄悄复活成一个没有任何 UI 入口的孤儿）
+ *      category       —— 分类本身
+ *
+ * @returns {{ok:boolean, removed?:object, reason?:string}}
+ */
+export function deleteCategory(db, categoryId) {
+  const id = Number(categoryId);
+  if (!Number.isFinite(id)) return { ok: false, reason: '类别 id 不是数字' };
+  const row = db.prepare('SELECT id, name FROM category WHERE id = ?').get(id);
+  if (!row) return { ok: false, reason: '这个类别不存在' };
+
+  /* ⚠️ 计数必须在删除**之前**取：删完再 count 永远是 0，
+     调用方（与日志）就拿不到"影响面"这个唯一的反馈。 */
+  const tagged = db.prepare('SELECT COUNT(*) AS n FROM item_category WHERE category_id = ?').get(id).n;
+  const bound = db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE category_id = ?').get(id).n;
+  const itemsBefore = db.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+
+  db.prepare('DELETE FROM item_category WHERE category_id = ?').run(id);
+  db.prepare('DELETE FROM source_category WHERE category_id = ?').run(id);
+  db.prepare('DELETE FROM category WHERE id = ?').run(id);
+
+  const itemsAfter = db.prepare('SELECT COUNT(*) AS n FROM item').get().n;
+  /* ★ 这一条是**自证**：如果哪天有人把外键改成级联删条目，这里当场就报出来，
+     而不是等到用户发现条目少了。返回给上层的数字不会说谎。 */
+  if (itemsAfter !== itemsBefore) {
+    return { ok: false, reason: `删除类别时条目数从 ${itemsBefore} 变成了 ${itemsAfter}（这是缺陷，已中止）` };
+  }
+  return { ok: true, removed: { id, name: row.name, tags: tagged, bindings: bound }, itemsKept: itemsAfter };
+}
+
+/** 某个类别绑定了哪些源 id（用户可编辑的那份映射） */
+export function getCategorySources(db, categoryId) {
+  const id = Number(categoryId);
+  if (!Number.isFinite(id)) return [];
+  return db
+    .prepare('SELECT source_id FROM source_category WHERE category_id = ? ORDER BY source_id')
+    .all(id)
+    .map((r) => Number(r.source_id));
+}
+
+/**
+ * 覆盖式设置某个类别绑定了哪些源。
+ *
+ * ★ 用"先清后写"而不是"只增不减"：界面上是一组勾选框，用户**取消勾选**
+ *   必须真的解绑 —— 只增不减的写法会让"取消勾选"变成一个静默的空操作，
+ *   而用户以为已经改好了（这与 `upsertSources` 那个"只加不减"的坑同源，
+ *   区别是那里要保留用户选择，这里正是用户在表达选择）。
+ *
+ * ⚠️ 全过程在一个事务里：中途失败留下"清了一半"的映射，
+ *    表现是随机几个源莫名不再抓取 —— 最难查的那种。
+ *
+ * @returns {{ok:boolean, categoryId:number, sourceIds:number[], reason?:string}}
+ */
+export function setCategorySources(db, categoryId, sourceIds) {
+  const id = Number(categoryId);
+  if (!Number.isFinite(id)) return { ok: false, reason: '类别 id 不是数字' };
+  if (!db.prepare('SELECT id FROM category WHERE id = ?').get(id)) {
+    return { ok: false, reason: '这个类别不存在' };
+  }
+  const list = Array.isArray(sourceIds) ? sourceIds : [];
+  const known = new Set(listSources(db).map((s) => Number(s.id)));
+  /* 只接受库里真实存在的源 id：界面上传错一个 id 不该变成一行悬挂绑定 */
+  const clean = [...new Set(list.map(Number).filter((n) => Number.isFinite(n) && known.has(n)))];
+
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM source_category WHERE category_id = ?').run(id);
+    const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
+    for (const sid of clean) ins.run(sid, id);
+    db.exec('COMMIT');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* 已经回滚过了 */
+    }
+    return { ok: false, reason: `写入映射失败：${err && err.message}` };
+  }
+  return { ok: true, categoryId: id, sourceIds: clean };
+}
+
+/**
+ * 设置类别的偏好档位（1 喜欢 / 0 中性 / -1 不喜欢）。
+ * 语义见 `src/shared/quota.js`：喜欢多放、中性正常、**不喜欢少放但不能没有**。
+ */
+export function setCategoryPref(db, categoryId, pref) {
+  const id = Number(categoryId);
+  if (!Number.isFinite(id)) return { ok: false, reason: '类别 id 不是数字' };
+  const row = db.prepare('SELECT id, name FROM category WHERE id = ?').get(id);
+  if (!row) return { ok: false, reason: '这个类别不存在' };
+  const n = Number(pref);
+  /* 只认三档，别的一律拒绝（而不是夹取）：
+     夹取会把一个拼错的参数悄悄变成"中性"，用户以为设置生效了。 */
+  if (n !== 1 && n !== 0 && n !== -1) return { ok: false, reason: `偏好只能是 1 / 0 / -1，收到 ${pref}` };
+  db.prepare('UPDATE category SET pref = ? WHERE id = ?').run(n, id);
+  return { ok: true, categoryId: id, pref: n, name: row.name };
+}
+
+/** 类别 id → 偏好。配额选取（shared/quota.js）要的就是这一份。 */
+export function prefByCategory(db) {
+  const m = new Map();
+  for (const c of listCategories(db)) m.set(String(c.id), Number(c.pref) || 0);
+  return m;
+}
+
+/** 某个类别绑定的源（**已启用**的那些）—— 刷新时"只抓这个类型的源"靠它 */
+export function listEnabledSourcesOfCategories(db, categoryIds) {
+  const ids = (Array.isArray(categoryIds) ? categoryIds : [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n));
+  if (!ids.length) return listSources(db, true);
+  const sql =
+    'SELECT DISTINCT s.* FROM source s ' +
+    'JOIN source_category sc ON sc.source_id = s.id ' +
+    `WHERE s.enabled = 1 AND sc.category_id IN (${ids.map(() => '?').join(',')}) ` +
+    'ORDER BY s.id';
+  return db.prepare(sql).all(...ids);
+}
+

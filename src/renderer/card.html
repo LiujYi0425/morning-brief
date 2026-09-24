@@ -85,6 +85,23 @@
         <button class="catbar__step" id="catNext" type="button" aria-label="下一个类型">›</button>
         <span class="catbar__now" id="catLabel" aria-live="polite">全部</span>
         <!--
+          筛选栏编辑入口（本次功能）：点开一个就地浮层，勾选「这个类型包含哪些源」
+          并设置三档喜好（喜欢 / 中性 / 不喜欢）。
+          ★ 为什么是**独立的按钮**而不是"点 chip 直接展开"：chip 已经是
+            `role="radio"`（选类型），再让同一个控件承担"编辑"，它就会变成一个
+            有时开面板、有时不开的动作 —— 用户无法预期。
+            命令按钮与选择控件分开，是下面那条注释里已经定过的规矩。
+          ★ 初始 hidden，由 card.js 按 `derive().editorButton.visible` 决定 ——
+            选中「全部」时它不出现（「全部」不是一个类型，没有可编辑的东西）。
+        -->
+        <button
+          class="chip chip--edit"
+          id="btnEditCat"
+          type="button"
+          hidden
+          title="编辑这个类型：包含哪些源、喜欢程度"
+        >编辑</button>
+        <!--
           「＋新增类型」放在这里而**不是**放进上面那条 tablist。
           ⚠️ 这是无障碍上的硬约束，不是审美：`role="tablist"` 里只允许放
              `role="tab"`，而"新增"是一个命令按钮（没有对应的 tabpanel，
@@ -92,6 +109,16 @@
              语义是错的。⇒ 命令按钮与选择控件分开两条视觉语言。
         -->
         <button class="chip chip--add" id="btnAddCat" type="button" title="新增一个自定义类型">＋</button>
+
+        <!--
+          编辑面板：**空容器**，内容全部由 card.js 每次从 `derive().editor` 重建。
+          ⚠️ 面板住在 .catbar 里（而不是 .filters 里）：`.filters` 有
+             `overflow-x: auto`，放进去会被裁成一个横向滚动条里的小方块。
+          ⚠️ 不用 <dialog> / window.confirm：前者在无边框透明窗口里会带上一整套
+             原生外观（与"不得改变现有观感"直接冲突），后者在 Electron 渲染进程里
+             与当初的 window.prompt 同源、不可靠。
+        -->
+        <div class="catpanel" id="catPanel" role="group" aria-label="编辑类型的源与喜好" hidden></div>
       </div>
 
       <!-- ============ 列表 ============ -->

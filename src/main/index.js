@@ -38,7 +38,24 @@ import { createBootMark, teeConsole, createLogSink } from '../shared/run-log.js'
 import { bootWatchdog, markHealthy, rollbackNow, checkForUpdate, downloadUpdate, applyUpdate } from './updater.js';
 import { formatBytes } from '../shared/update.js';
 import { runIngest } from '../ingest/fetch-feeds.js';
-import { openDb, queryItems, countItems, sourceHealth, listCategories, getMeta, setMeta, upsertCategory, upsertSources } from '../store/db.js';
+import {
+  openDb,
+  queryItems,
+  countItems,
+  sourceHealth,
+  listCategories,
+  listSources,
+  getCategorySources,
+  setCategorySources,
+  setCategoryPref,
+  deleteCategory,
+  prefByCategory,
+  getMeta,
+  setMeta,
+  upsertCategory,
+  upsertSources,
+} from '../store/db.js';
+import { selectByQuota, quotaOf, scopedQuota } from '../shared/quota.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -306,6 +323,16 @@ const PAGE = Number(process.env.MB_PAGE || 15);
 /** "看今天全部"模式一次最多取多少条（上限 200 由 db.queryItems 夹取） */
 const ALL_LIMIT = Number(process.env.MB_ALL_LIMIT || 120);
 
+/**
+ * 有偏好时，候选池取 `want × 这个倍数`（再与 200 夹取）。
+ *
+ * 为什么需要多取：配额要**从池子里挑**。只取 15 条的话，
+ * 池子里可能一条"不喜欢"都没有（它们排在更后面），
+ * 于是"不能没有"这条又变成了空话 —— 而这次它连报错都不会有。
+ * 取 4 倍是个折中：足够覆盖"不喜欢排得很靠后"的常见情形，
+ * 又不至于每次请求都扫全表。 */
+const QUOTA_POOL_FACTOR = 4;
+
 /* ---------------- 抓取时刻（默认 07:30，可用环境变量覆盖） ----------------
  *
  * ⚠️ 解析逻辑在 `scheduler.js` 的 `parseFetchTime` 里，**不在这里** ——
@@ -380,7 +407,119 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
   start.setHours(0, 0, 0, 0);
   const sinceIso = start.toISOString();
 
-  const page = queryItems(d, { limit: want, categoryIds, todayOnly: !!todayOnly, sinceIso });
+  /* ★★ 配额（本次改动，"少放但不能没有"的落点）。
+   *
+   * ⚠️⚠️ 为什么不能只做"降权排序"：排序保证不了「不能没有」——
+   *     只要喜欢/中性的候选够填满 15 条，不喜欢的那条就被挤到第 16 位以后，
+   *     精选里一条都不剩。用户说的是"少放"，而排序给他的是"不放"，
+   *     这两件事在用户眼里完全不同。
+   * ⇒ 必须**先多取一批候选、再按配额选取**（选取逻辑在 shared/quota.js，
+   *   纯函数、可离线穷举 —— 它 import 不了 electron，所以不能写在这个文件里）。
+   *
+   * ⚠️ 只在**真的有偏好**时才多取：没有任何"喜欢/不喜欢"时，
+   *    多取一批纯属浪费（每次请求多扫几百行），而且会让 allMode 的
+   *    "看今天全部"变成"看今天的一部分"。 */
+  const prefs = prefByCategory(d);
+  const hasPref = [...prefs.values()].some((p) => p !== 0);
+  const pool = hasPref ? Math.min(200, Math.max(want * QUOTA_POOL_FACTOR, want + 60)) : want;
+
+  const page = queryItems(d, { limit: pool, categoryIds, todayOnly: !!todayOnly, sinceIso });
+
+  let items = page.rows;
+  let hasMore = page.hasMore;
+  let nextCursor = page.nextCursor;
+  let quotaCounts = null;
+  let seenIds = null;
+  /** 本次实际生效的配额（回给界面做解释用）。没偏好时就是默认那一档。 */
+  let quotaUsed = quotaOf(CURATED);
+  if (hasPref) {
+    /* 条目的偏好归属：一个条目可能同时属于多个类型（多对多），
+       口径是"喜欢 > 不喜欢 > 中性"（见 quota.js 的 classOf）。 */
+    const byItem = new Map();
+    for (const it of page.rows) byItem.set(it.id, []);
+    /* ⚠️ 用一条 SQL 把候选的类别一次取出来，而不是每个条目查一次 ——
+       200 条 × 1 次查询在冷启动路径上是肉眼可见的卡顿。 */
+    if (page.rows.length) {
+      const ids = page.rows.map((r) => r.id);
+      const rows = d
+        .prepare(
+          `SELECT item_id, category_id FROM item_category WHERE item_id IN (${ids.map(() => '?').join(',')})`,
+        )
+        .all(...ids);
+      for (const r of rows) {
+        const list = byItem.get(r.item_id);
+        if (list) list.push(r.category_id);
+      }
+    }
+    const candidates = page.rows.map((r) => ({ ...r, categories: byItem.get(r.id) || [] }));
+    /* ★ 配额随**筛选范围**的占比缩放（理由见 shared/quota.js 的 scopedQuota）：
+       在「全部」下它就是 quotaOf(15) = 3，"少放"一分不松；
+       点进那个类型本身时放宽到不设限 —— 用户点的是"我要看这个类型"，
+       拿整份精选的 20% 去卡它会把"配比"变成"过滤"。
+
+       ⚠️⚠️ 缩放的**两个输入必须来自同一套筛选口径**，而且分母要是
+          "范围内一共有多少条"：我第一版用 `candidates.length`（本次取的候选页）
+          当分母 —— 那是个**摆设**，候选页永远是固定上限，点进类型时它不变
+          ⇒ 缩放算出来还是 3 条。真实库上的演练（957 条）当场把这个错抓了出来。 */
+    const scopeWhere = [];
+    const scopeParams = [];
+    scopeWhere.push('(published_at >= ? OR (published_at IS NULL AND fetched_at >= ?))');
+    scopeParams.push(sinceIso, sinceIso);
+    if (categoryIds && categoryIds.length) {
+      scopeWhere.push(
+        `id IN (SELECT item_id FROM item_category WHERE category_id IN (${categoryIds.map(() => '?').join(',')}))`,
+      );
+      scopeParams.push(...categoryIds);
+    }
+    const scopeSql = scopeWhere.join(' AND ');
+    /* 范围内一共多少条（与列表同一套口径） */
+    const poolSize = d.prepare(`SELECT COUNT(*) AS n FROM item WHERE ${scopeSql}`).get(...scopeParams).n;
+    /* 范围内属于"不喜欢"那些类型的**条目数**。
+       ⚠️ 一个条目可能同时属于多类，所以这里是"命中任一不喜欢的类型"，
+          与 `classOf` 的判定（喜欢优先）刻意**不完全等价** ——
+          它只是个缩放的估计量，多算一点点只会让配额略宽，
+          而偏向"少算"会让用户点进类型时被莫名砍掉几条（那才是坏的方向）。 */
+    const dislikedIds = [];
+    for (const [k, v] of prefs.entries()) {
+      const n = Number(k);
+      if (Number(v) === -1 && Number.isFinite(n)) dislikedIds.push(n);
+    }
+    const tagged = dislikedIds.length
+      ? d
+          .prepare(
+            `SELECT COUNT(*) AS n FROM item WHERE ${scopeSql} ` +
+              `AND id IN (SELECT item_id FROM item_category WHERE category_id IN (${dislikedIds.map(() => '?').join(',')}))`,
+          )
+          .get(...scopeParams, ...dislikedIds).n
+      : 0;
+    const effQuota = scopedQuota({ limit: want, poolSize, tagged });
+    const sel = selectByQuota({ items: candidates, limit: want, prefByCategory: prefs, quota: effQuota });
+    items = sel.picked;
+    quotaCounts = sel.counts;
+    quotaUsed = sel.quota;
+
+    /* ★ 游标与"还有更多"的处置（配额把池子掐掉之后，这两件事都要重算）。
+     *
+     * 池子里的候选被跳过了一部分，而游标指向"最后一条**选中**项" ——
+     * 于是下一页会**从池子中段重新开始**，把被跳过的那批再取一遍，
+     * 用户看到的是同一条出现两次（"翻页坏了"的典型观感）。
+     *
+     * ⚠️ 我刻意**不**在渲染层顺手去重：那是把口径问题藏进 UI，
+     *    日志里会彻底消失（本项目已经栽过两次同类：靠 UI 兜底 = 没有证据）。
+     *    ⇒ 正确的处置是把"本页已经在池子里见过的 id"记进游标，
+     *      翻页时显式跳过它们 —— 跳过是**有据可查**的行为，去重是掩盖。
+     *
+     * ⚠️ 只在有偏好时才这么做：没有偏好时池子就是页本身，
+     *    多带一份 id 列表只会让游标变胖。 */
+    seenIds = page.rows.map((r) => r.id);
+    hasMore = page.hasMore || candidates.length > items.length;
+    const last = items[items.length - 1];
+    nextCursor =
+      hasMore && last
+        ? { publishedAt: last.published_at, id: last.id, pendingNull: last.published_at === null, seenIds }
+        : null;
+  }
+
   const health = sourceHealth(d);
   const lastIngest = getMeta(d, 'last_ingest_at');
   /* ★ "今天到底抓到没有"（本轮修复的另一半）。
@@ -403,17 +542,25 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
   const filteredTotal = categoryIds && categoryIds.length ? countItems(d, { sinceIso, categoryIds }) : todayTotal;
 
   return {
-    items: page.rows,
-    hasMore: page.hasMore,
-    nextCursor: page.nextCursor,
+    items,
+    hasMore,
+    nextCursor,
     todayTotal,
     filteredTotal,
-    totalShown: page.rows.length,
+    totalShown: items.length,
     health,
     categories: listCategories(d),
     lastIngestAt: lastIngest,
     lastSuccessAt: lastSuccess,
     fetchedToday,
+    /* ★ 配额口径随简报一起给出去（本次改动）：界面要能说出
+       "不喜欢的最多 3 条" —— 用户设了"不喜欢"却看不到任何解释的话，
+       他会以为设置没生效。数字**只有这一个来源**（shared/quota.js）。
+       ⚠️ 这里给的是**本次实际用的**那一档（它随筛选范围缩放，见 scopedQuota），
+          而不是写死的 quotaOf(CURATED) —— 否则界面上的解释与实际行为对不上，
+          那正是本项目反复栽过的"文案与行为不符"。 */
+    quota: quotaUsed,
+    quotaCounts,
     /* ★★ `curated` 是**服务端口径常量**，不是"本次请求的 limit"（真机第三轮返工）。
      *
      * 旧代码写的是 `curated: limit` —— 一个回显。渲染层拿它去判断
@@ -645,12 +792,27 @@ async function bootstrap() {
      ⚠️ 不这么做的后果是"两份口径"：托盘那份漏了 `serialize`、
      或者漏了推 `brief:updated`，于是从托盘刷新时界面不更新，
      而用户会以为"托盘的刷新不管用"。 */
-  const doIngest = (trigger) =>
+  const doIngest = (trigger, categoryIds = null) =>
     serialize(async () => {
-      const r = await runIngest({ dbFile: DB_FILE, trigger, log: (m) => console.log('[ingest]', m) });
+      const r = await runIngest({
+        dbFile: DB_FILE,
+        trigger,
+        /* ★ 界面刷新时带当前选中的类型 ⇒ 只抓**该类型绑定的源并集**；
+           托盘刷新不带（= null）⇒ 抓全部启用源 —— 托盘是"我现在就要
+           最新的一份"，不该被卡片上的筛选状态影响。 */
+        categoryIds,
+        log: (m) => console.log('[ingest]', m),
+      });
       // 抓完通知界面刷新
       if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
-      return { ok: r.ok, failed: r.failed, newItems: r.newItems, health: r.health };
+      return {
+        ok: r.ok,
+        failed: r.failed,
+        newItems: r.newItems,
+        health: r.health,
+        scope: r.scope,
+        scopedEmpty: !!r.scopedEmpty,
+      };
     });
 
   const setCardExpanded = (on) => {
@@ -783,6 +945,9 @@ async function bootstrap() {
         categoryIds: categoryIds || null,
         todayOnly: !!todayOnly,
         sinceIso: sinceIso || null,
+        /* ⚠️ 配额翻页：游标里带着"首页已经在池子里见过的 id"，
+           翻页必须显式跳过它们，否则同一条会出现两次（见 db.queryItems 的说明）。 */
+        skipIds: (cursor && cursor.seenIds) || null,
       });
       return { items: page.rows, hasMore: page.hasMore, nextCursor: page.nextCursor };
     },
@@ -797,6 +962,73 @@ async function bootstrap() {
       console.log(`[category] 新增「${clean}」`);
       return { ok: true, name: clean, categories: listCategories(d) };
     },
+
+    /* ---------------- 筛选栏（本次功能） ----------------
+     * 四件事：删除类型 / 读「类型包含哪些源」/ 写「类型包含哪些源」/ 三档偏好。
+     *
+     * ⚠️ 四条都要**把结果说清楚**（ok + 原因 + 最新状态）：
+     *    渲染层拿它决定提示文案，而且**失败必须说出来** ——
+     *    静默失败在这里的表现是"用户勾了、界面也勾上了、但库里没变"，
+     *    下次启动那个勾就没了，用户会以为"设置存不住"。 */
+    deleteCategory: (id) => {
+      const d = getDb();
+      const r = deleteCategory(d, id);
+      if (!r.ok) {
+        console.log(`[category] ✗ 删除失败：${r.reason}`);
+        return { ok: false, reason: r.reason };
+      }
+      /* ★★ 删除只影响分类与绑定，**条目一条都不动** ——
+         这是"勾选/取消勾选是可逆的筛选，不是删除"这条语义的边界。
+         这里把条目数**如实报出来**（rs.itemsKept），日志与提示都能自证。 */
+      console.log(
+        `[category] 已删除「${r.removed.name}」：解除 ${r.removed.tags} 条条目标签、` +
+          `${r.removed.bindings} 个源绑定；条目仍然保留 ${r.itemsKept} 条`,
+      );
+      return { ok: true, removed: r.removed, itemsKept: r.itemsKept, categories: listCategories(d) };
+    },
+    getCategorySources: (id) => {
+      const d = getDb();
+      return {
+        ok: true,
+        categoryId: Number(id),
+        sourceIds: getCategorySources(d, id),
+        /* 源清单与健康度一起给出去：界面要显示"这个源上次抓成功没有"，
+           否则用户会往一个已经死掉的源上勾选。 */
+        sources: listSources(d).map((s) => ({
+          id: Number(s.id),
+          name: s.name,
+          enabled: !!s.enabled,
+          lastStatus: s.last_status || null,
+          lastError: s.last_error || null,
+        })),
+      };
+    },
+    setCategorySources: (id, sourceIds) => {
+      const d = getDb();
+      const r = setCategorySources(d, id, sourceIds);
+      if (!r.ok) {
+        console.log(`[category] ✗ 写入源映射失败：${r.reason}`);
+        return r;
+      }
+      const c = listCategories(d).find((x) => Number(x.id) === r.categoryId);
+      console.log(`[category] 「${c ? c.name : r.categoryId}」现在包含 ${r.sourceIds.length} 个源`);
+      return { ...r, categories: listCategories(d) };
+    },
+    setCategoryPref: (id, pref) => {
+      const d = getDb();
+      const r = setCategoryPref(d, id, pref);
+      if (!r.ok) {
+        console.log(`[category] ✗ 写入偏好失败：${r.reason}`);
+        return r;
+      }
+      const label = r.pref === 1 ? '喜欢' : r.pref === -1 ? '不喜欢' : '中性';
+      /* ⚠️ 这里报的是**「全部」口径下**的配额（3 条）。点进这个类型本身时
+         配额会随范围缩放（见 shared/quota.js 的 scopedQuota），所以文案里
+         必须带上"在全部里"，否则用户点进类型看到不止 3 条时会以为配额坏了。 */
+      console.log(`[category] 「${r.name}」的偏好 = ${label}（在「全部」里最多 ${quotaOf(CURATED)} 条，且至少 1 条）`);
+      return { ...r, categories: listCategories(d), quota: quotaOf(CURATED), quotaScope: 'all' };
+    },
+
     runIngest: doIngest,
     listCategories: () => listCategories(getDb()),
     setCardState: (next) => {

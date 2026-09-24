@@ -82,6 +82,8 @@
   var elCatPrev = $('catPrev');
   var elCatNext = $('catNext');
   var btnAddCat = $('btnAddCat');
+  var btnEditCat = $('btnEditCat');
+  var elCatPanel = $('catPanel');
   var elList = $('list');
   var elFoot = $('foot');
   var elToast = $('toast');
@@ -180,7 +182,7 @@
    *   真机反馈"一收起类型选项就没了"的病根就是旧版把这个判断放在了 CSS 里。
    */
   function renderChips(d) {
-    var sig = d.chips.map(function (c) { return c.id + ':' + c.name + ':' + (c.on ? 1 : 0); }).join('|');
+    var sig = d.chips.map(function (c) { return c.id + ':' + c.name + ':' + (c.on ? 1 : 0) + ':' + c.pref; }).join('|');
     if (memo.chips === sig) return;
     var prevIndex = memo.chipsIndex;
     memo.chips = sig;
@@ -208,6 +210,12 @@
       b.tabIndex = c.on ? 0 : -1;
       b.dataset.index = String(i);
       if (c.on) b.setAttribute('data-on', 'on');
+      /* ★ 偏好标记（本次功能）：让"这个类型是我不喜欢的"在导轨上就看得见。
+         用户设完之后如果界面上完全没有痕迹，"设了"与"没设"在他眼里是一样的。
+         ⚠️ 只加一个属性、不新增颜色：样式复用现有的 --state-ok / --state-bad
+            与 accent（见 card.css 里 .chip[data-pref] 那一段）。 */
+      if (c.pref === 1) b.setAttribute('data-pref', 'like');
+      else if (c.pref === -1) b.setAttribute('data-pref', 'dislike');
       b.addEventListener('click', function () {
         api.log('[card] 点击类型 chip「' + c.name + '」');
         dispatch({ type: 'setCategory', id: c.id });
@@ -378,6 +386,125 @@
     }
   }
 
+  /**
+   * 筛选栏编辑面板（本次功能）。
+   *
+   * 回答两个问题：「这个类型**包含哪些源**」+「我对它是什么态度」。
+   *
+   * ★ 这里**没有一行自己的判断**：显示什么、勾了什么、哪一档亮着、
+   *   删除按钮是"删除类型"还是"确认删除"，全部来自 `derive().editor`。
+   *   DOM 只负责把那份数据画出来 —— 于是"点了没反应""点了两次结果不同"
+   *   这两类老问题在**状态层**就不可能存在，而不是靠这里小心一点。
+   *   （这个文件被重写过一整轮，就是为了把判断从 DOM 里挪出去。）
+   *
+   * ⚠️ 每次全量重建（`textContent = ''`），不走 memo：
+   *    源清单一屏也就三十来个节点，重建代价可以忽略；而 memo 的 key
+   *    一旦漏进一个字段（比如"某一个勾变了"），界面就会停在旧状态上 ——
+   *    那正是本项目栽过两次的形态。省下来的那点时间不值这个风险。
+   */
+  function renderPanel(d) {
+    if (!elCatPanel) return;
+    var ed = d.editor;
+
+    setShown(elCatPanel, ed.visible);
+    if (btnEditCat) {
+      setShown(btnEditCat, d.editorButton.visible);
+      if (d.editorButton.open) btnEditCat.setAttribute('data-open', 'on');
+      else btnEditCat.removeAttribute('data-open');
+      btnEditCat.setAttribute('aria-expanded', d.editorButton.open ? 'true' : 'false');
+    }
+    if (!ed.visible) {
+      /* ⚠️ 关掉时**必须清空**，否则下次打开会先闪一眼上一次的内容 */
+      elCatPanel.textContent = '';
+      return;
+    }
+
+    var frag = document.createDocumentFragment();
+
+    /* —— 第 1 行：标题 + 已勾数量 —— */
+    var head = el('div', 'catpanel__row');
+    head.appendChild(el('span', 'catpanel__title', '「' + ed.categoryName + '」包含的源'));
+    head.appendChild(el('span', 'catpanel__hint', ed.selectedCount + '/' + ed.sources.length));
+    frag.appendChild(head);
+
+    /* —— 第 2 行：源清单（两列小勾选）——
+       ⚠️ 取消勾选是**可逆的筛选**，不是删除：这里只是不再抓/不再归入这个类型，
+          条目本身一条都不会少。文案里也这么说，免得用户不敢点。 */
+    if (ed.loading) {
+      frag.appendChild(el('div', 'catpanel__row catpanel__hint', '正在读取源清单…'));
+    } else {
+      var list = el('div', 'catpanel__list');
+      ed.sources.forEach(function (s) {
+        var label = el('label', 'catpanel__src');
+        if (!s.enabled) label.setAttribute('data-off', 'on');
+        if (s.bad) label.setAttribute('data-bad', 'on');
+        if (s.title) label.title = s.title;
+        var box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = !!s.selected;
+        box.disabled = !!ed.saving;
+        box.dataset.sourceId = s.id;
+        box.addEventListener('change', function () { toggleCategorySource(s.id); });
+        label.appendChild(box);
+        label.appendChild(el('span', 'catpanel__srcname', s.name));
+        list.appendChild(label);
+      });
+      frag.appendChild(list);
+    }
+
+    frag.appendChild(el('div', 'catpanel__sep'));
+
+    /* —— 第 3 行：三档喜好 ——
+       ★ 语义必须在界面上说清（用户定死的那三条）：
+         喜欢 = 多放、中性 = 正常、**不喜欢 = 少放但不会没有**。
+         只写"不喜欢"三个字的话，用户会以为它等于"过滤掉"，
+         然后发现"怎么还能看到" —— 那是文案与行为不符。 */
+    var prefRow = el('div', 'catpanel__row');
+    prefRow.appendChild(el('span', 'catpanel__label', '喜欢程度'));
+    ed.prefOptions.forEach(function (o) {
+      var b = el('button', 'chip', o.label);
+      b.type = 'button';
+      b.title = o.hint;
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', ed.pref === o.value ? 'true' : 'false');
+      if (ed.pref === o.value) b.setAttribute('data-on', 'on');
+      b.disabled = !!ed.saving;
+      b.addEventListener('click', function () { setCategoryPref(o.value); });
+      prefRow.appendChild(b);
+    });
+    frag.appendChild(prefRow);
+
+    frag.appendChild(el('div', 'catpanel__hint', ed.prefHint));
+
+    /* —— 第 4 行：删除 / 关闭 ——
+       ⚠️ 删除是**两步**（第一次点变成「确认删除」，再点才真的删）。
+          理由见 view-model.js 的 askDelete：一次点击就删掉的话，
+          误触的代价是"我辛苦分的类没了"，而这里没有撤销。 */
+    var foot = el('div', 'catpanel__foot');
+    var del = el('button', 'btn catpanel__del', ed.deleteLabel);
+    del.type = 'button';
+    del.disabled = !!ed.saving;
+    if (ed.deleting) del.setAttribute('data-armed', 'on');
+    del.title = '删除这个类型（条目本身不会被删除）';
+    del.addEventListener('click', function () {
+      if (VM.derive(view).editor.deleting) deleteCurrentCategory();
+      else {
+        dispatch({ type: 'askDelete' });
+        toast('再点一次「确认删除」才真的删除（条目会保留）');
+      }
+    });
+    foot.appendChild(del);
+    foot.appendChild(el('span', 'catpanel__spacer'));
+    var close = el('button', 'btn', '关闭');
+    close.type = 'button';
+    close.addEventListener('click', function () { closeEditor(); });
+    foot.appendChild(close);
+    frag.appendChild(foot);
+
+    elCatPanel.textContent = '';
+    elCatPanel.appendChild(frag);
+  }
+
   function render() {
     var d = VM.derive(view);
     lastDerived = d;
@@ -389,6 +516,7 @@
     renderHeadline(d);
     renderChips(d);
     renderSlider(d);
+    renderPanel(d);
     renderList(d);
     renderFoot(d);
     selfCheckSoon();
@@ -707,6 +835,165 @@
     }
   }
 
+  /* ---------------- 筛选栏编辑面板（本次功能） ----------------
+   *
+   * 四条动作，各自只做一件事：**先改状态（立刻看得见），再落库（失败了就说）**。
+   *
+   * ⚠️ 为什么不是"等库里写成功再改界面"：这个卡片是常驻桌面的，
+   *    勾一个框要等一次 IPC 往返才变色的话，手感是"点了没反应"。
+   * ⚠️ 为什么不是"改完就不管了"：静默失败在这里的表现最坏 ——
+   *    用户勾了、界面也勾上了、库里其实没写进去，下次启动那个勾就没了，
+   *    而他会以为"设置存不住"（这是一种无法自证的坏法）。
+   * ⇒ 乐观更新 + **失败回滚 + 说出原因**，两边都要。
+   *
+   * ⚠️ `editorSaving` 是把并发的写挡在门外的那道闸：两次写会互相覆盖，
+   *    后写的赢，而用户看到的是自己最后点的那个结果 —— 一致只是巧合。
+   */
+  function openEditor() {
+    dispatch({ type: 'openEditor' });
+    var d = VM.derive(view);
+    if (!d.editor.visible) {
+      api.log('[card] 编辑面板：没有选中任何类型，忽略');
+      return;
+    }
+    loadEditorData(d.editor.categoryId);
+    api.log('[card] 打开编辑面板：' + d.editor.categoryName);
+  }
+
+  function closeEditor() {
+    dispatch({ type: 'closeEditor' });
+    if (btnEditCat && !btnEditCat.hidden && typeof btnEditCat.focus === 'function') btnEditCat.focus();
+  }
+
+  async function loadEditorData(categoryId) {
+    dispatch({ type: 'editorSaving', on: true });
+    try {
+      var r = await api.brief.categorySources(categoryId);
+      if (!r || !r.ok) {
+        dispatch({ type: 'editorSaving', on: false });
+        toast((r && r.reason) || '读取源清单失败');
+        return;
+      }
+      /* ⚠️ 期间用户可能已经切了类型 / 关掉了面板 ⇒ 这份数据就不该再写进去
+         （写进去的表现是"面板里出现另一个类型的勾"）。 */
+      var now = VM.derive(view).editor;
+      if (!now.visible || String(now.categoryId) !== String(categoryId)) {
+        api.log('[card] 源清单回来时面板已经换了语境，丢弃（' + categoryId + '）');
+        return;
+      }
+      dispatch({ type: 'editorData', sources: r.sources || [], sourceIds: r.sourceIds || [] });
+    } catch (err) {
+      dispatch({ type: 'editorSaving', on: false });
+      api.log('[card] ❌ 读取源清单失败：' + (err && err.message));
+      toast('读取源清单失败');
+    }
+  }
+
+  /** 勾选 / 取消勾选一个源。**可逆**：再点一次就回来，条目一条都不会少。 */
+  async function toggleCategorySource(sourceId) {
+    var ed = VM.derive(view).editor;
+    if (!ed.visible || ed.saving) {
+      api.log('[card] 勾选被跳过：面板不可用或正在保存');
+      return;
+    }
+    /* 先算目标集合（用状态机算，不在 DOM 里读 checkbox）：
+       DOM 是渲染的产物，拿它当输入就等于让界面变成第二份真相。 */
+    var next = [];
+    var had = false;
+    for (var i = 0; i < view.editorSelected.length; i += 1) {
+      if (String(view.editorSelected[i]) === String(sourceId)) { had = true; continue; }
+      next.push(String(view.editorSelected[i]));
+    }
+    if (!had) next.push(String(sourceId));
+    var before = view.editorSelected.slice();
+
+    dispatch({ type: 'editorToggleSource', id: sourceId });
+    dispatch({ type: 'editorSaving', on: true });
+    try {
+      var r = await api.brief.setCategorySources(ed.categoryId, next);
+      if (!r || !r.ok) {
+        /* ★ 回滚：把界面拉回库里真实的样子，并把原因说出来。
+           不回滚的话，用户看到的是一个"勾着但不生效"的界面。 */
+        dispatch({ type: 'editorData', sources: VM.derive(view).editor.sources, sourceIds: before });
+        dispatch({ type: 'editorSaving', on: false });
+        toast((r && r.reason) || '保存失败');
+        api.log('[card] ❌ 保存源映射失败：' + ((r && r.reason) || '未知原因'));
+        return;
+      }
+      dispatch({ type: 'editorData', sources: VM.derive(view).editor.sources, sourceIds: r.sourceIds || next });
+      dispatch({ type: 'categories', list: r.categories || VM.derive(view).categories });
+      /* ⚠️ 这里**不 refresh 列表**：勾选改变的是"以后抓来的条目进哪个类型"，
+         对**已经抓到的**条目没有影响（标签是抓取那一刻的事实，不回溯改写）。
+         顺手刷一下只会让用户以为"改了映射，历史条目就换类了"。 */
+      api.log('[card] 「' + ed.categoryName + '」的源已保存：' + (r.sourceIds || next).length + ' 个');
+    } catch (err) {
+      dispatch({ type: 'editorData', sources: VM.derive(view).editor.sources, sourceIds: before });
+      dispatch({ type: 'editorSaving', on: false });
+      api.log('[card] ❌ 保存源映射抛错：' + (err && err.message));
+      toast('保存失败：' + (err && err.message));
+    }
+  }
+
+  /** 三档喜好。落库之后**必须重取一次**：配额在服务端（buildBrief），本地改不了。 */
+  async function setCategoryPref(pref) {
+    var ed = VM.derive(view).editor;
+    if (!ed.visible || ed.saving) return;
+    var before = ed.pref;
+    dispatch({ type: 'editorPref', pref: pref });
+    dispatch({ type: 'editorSaving', on: true });
+    try {
+      var r = await api.brief.setCategoryPref(ed.categoryId, pref);
+      if (!r || !r.ok) {
+        dispatch({ type: 'editorPref', pref: before });
+        dispatch({ type: 'editorSaving', on: false });
+        toast((r && r.reason) || '设置失败');
+        api.log('[card] ❌ 设置偏好失败：' + ((r && r.reason) || '未知原因'));
+        return;
+      }
+      dispatch({ type: 'categories', list: r.categories || VM.derive(view).categories });
+      dispatch({ type: 'editorSaving', on: false });
+      /* ★ 配额是**服务端**执行的（buildBrief），所以必须重取一份才能看到效果。
+         不重取的话用户设完"不喜欢"、列表一动不动，他会以为设置没生效。 */
+      dispatch({ type: 'invalidate' });
+      var label = pref === 1 ? '喜欢（多放）' : pref === -1 ? '不喜欢（少放但不会没有）' : '中性（正常）';
+      toast('「' + ed.categoryName + '」已设为 ' + label);
+      api.log('[card] 「' + ed.categoryName + '」偏好 = ' + pref + '（配额上限 ' + VM.quotaOf(r.quota) + ' 条）');
+    } catch (err) {
+      dispatch({ type: 'editorPref', pref: before });
+      dispatch({ type: 'editorSaving', on: false });
+      api.log('[card] ❌ 设置偏好抛错：' + (err && err.message));
+      toast('设置失败：' + (err && err.message));
+    }
+  }
+
+  /** 删除类型（已经过二次确认）。**条目一条都不会少** —— 这条是硬边界。 */
+  async function deleteCurrentCategory() {
+    var ed = VM.derive(view).editor;
+    if (!ed.visible || ed.saving) return;
+    var id = ed.categoryId;
+    var name = ed.categoryName;
+    dispatch({ type: 'editorSaving', on: true });
+    try {
+      var r = await api.brief.deleteCategory(id);
+      if (!r || !r.ok) {
+        dispatch({ type: 'editorSaving', on: false });
+        dispatch({ type: 'cancelDelete' });
+        toast((r && r.reason) || '删除失败');
+        api.log('[card] ❌ 删除类型失败：' + ((r && r.reason) || '未知原因'));
+        return;
+      }
+      dispatch({ type: 'categoryDeleted', list: r.categories || [], removedId: id });
+      dispatch({ type: 'invalidate' }); // 类别表变了 ⇒ 重新取一份（口径回到「全部」）
+      toast('已删除类型「' + name + '」（条目保留 ' + (r.itemsKept != null ? r.itemsKept : '') + ' 条）');
+      api.log('[card] 已删除类型「' + name + '」，条目保留 ' + r.itemsKept + ' 条');
+    } catch (err) {
+      dispatch({ type: 'editorSaving', on: false });
+      dispatch({ type: 'cancelDelete' });
+      api.log('[card] ❌ 删除类型抛错：' + (err && err.message));
+      toast('删除失败：' + (err && err.message));
+    }
+  }
+
   /* ---------------- 需求 3：打开原文 ---------------- */
   async function openItem(it) {
     /* ★ 无条件留痕（真机踩过）：用户报"点击没反应"时，渲染层与主进程**各自**
@@ -934,6 +1221,13 @@
   if (elCatPrev) elCatPrev.addEventListener('click', function () { selectByOffset(-1); });
   if (elCatNext) elCatNext.addEventListener('click', function () { selectByOffset(1); });
   if (btnAddCat) btnAddCat.addEventListener('click', function () { openCategoryInput(); });
+  /* 编辑入口（本次功能）：已经开着就关掉 —— 同一个按钮两态是用户最省心的约定 */
+  if (btnEditCat) {
+    btnEditCat.addEventListener('click', function () {
+      if (VM.derive(view).editor.visible) closeEditor();
+      else openEditor();
+    });
+  }
 
   /* ---------------- 底栏按钮 ---------------- */
   if (btnMore) btnMore.addEventListener('click', function () { loadMore(); });
@@ -982,10 +1276,25 @@
       ingestRunning = true;
       memo.foot = null; // 让 renderFoot 重新算一次（它把 ingestRunning 算进 disabled）
       renderFoot(VM.derive(view));
-      toast('正在抓取…（19 个源，可能要几十秒）');
+      /* ★ 刷新时把**当前选中的类型**一起传下去（本次功能）：
+         在此之前 `brief:ingest('manual')` 不带任何范围，于是"我只想看安全类"
+         这个意图与"刷新"这个动作之间没有任何联系 —— 点一次刷新照样把
+         全部启用源打一遍。现在选中类型时只抓该类型绑定的源并集。
+         ⚠️ 提示文案也要跟着变：说"19 个源"而实际只抓 3 个，是另一种撒谎。 */
+      var scopeCats = VM.derive(view).fetch.categoryIds;
+      var scopeName = d.activeChip && d.activeChip.id != null ? d.activeChip.name : null;
+      toast(scopeCats && scopeCats.length && scopeName
+        ? '正在抓取「' + scopeName + '」的源…'
+        : '正在抓取…（全部源，可能要几十秒）');
       try {
-        var r = await api.brief.ingest('manual');
-        toast('抓取完成：新增 ' + (r.newItems || 0) + ' 条' + (r.failed ? '，' + r.failed + ' 个源失败' : ''));
+        var r = await api.brief.ingest('manual', scopeCats && scopeCats.length ? scopeCats : undefined);
+        if (r && r.scopedEmpty) {
+          /* ⚠️ "这个类型一个源都没绑"必须单独说：混进"新增 0 条"里的话，
+             用户会以为源挂了，而他真正要做的是给这个类型勾上源。 */
+          toast('「' + scopeName + '」还没有勾选任何源 —— 点「编辑」给它勾上');
+        } else {
+          toast('抓取完成：新增 ' + (r.newItems || 0) + ' 条' + (r.failed ? '，' + r.failed + ' 个源失败' : ''));
+        }
         dispatch({ type: 'invalidate' });
       } catch (err) {
         api.log('[card] ❌ 手动抓取失败：' + (err && err.message));
@@ -1001,7 +1310,16 @@
   }
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && view.expanded) dispatch({ type: 'expand', on: false });
+    if (e.key !== 'Escape') return;
+    /* ⚠️ 顺序是刻意的：**先关面板、再收卡片**。
+       反过来的话，用户在面板里按 Esc 会连卡片一起收起来 ——
+       而他只是想把这一层关掉（面板是浮层，Esc 的语义是"退出最上面那层"）。 */
+    if (VM.derive(view).editor.visible) {
+      api.log('[card] Esc：关闭编辑面板');
+      closeEditor();
+      return;
+    }
+    if (view.expanded) dispatch({ type: 'expand', on: false });
   });
 
   /* ---------------- 主进程推来的更新 ---------------- */
@@ -1061,6 +1379,26 @@
       '(w=' + Math.round(r.width) + ',x=' + Math.round(r.left) + ',y=' + Math.round(r.top) + ')';
   }
 
+  /**
+   * 编辑面板的可读快照。
+   *
+   * ⚠️ 用 `hidden` **属性**判断"该不该显示"，不用尺寸 ——
+   *    与 `box()` 一样的道理：尺寸为 0 也可能是"刚渲染完还没排版"，
+   *    把两种情况混成一句会把排查引向错误的方向。
+   * ⚠️ 另外把"面板下沿有没有越过卡片下沿"算出来：面板是浮层，
+   *    越界就是被 `.card` 的 overflow:hidden 切掉一截（收起态最容易）。
+   */
+  function panelBox() {
+    var n = document.getElementById('catPanel');
+    if (!n) return { exists: false };
+    var b = box('#catPanel');
+    b.hidden = !!n.hidden;
+    var cardEl = document.querySelector('.card');
+    b.cardBottom = cardEl ? Math.round(cardEl.getBoundingClientRect().bottom) : null;
+    b.clippedBy = b.cardBottom != null && b.exists ? Math.max(0, b.bottom - b.cardBottom) : null;
+    return b;
+  }
+
   function domSelfCheck(tag) {
     try {
       var d = lastDerived || VM.derive(view);
@@ -1116,6 +1454,11 @@
         },
         filters: box('#filters'),
         catbar: box('#catbar'),
+        /* ★ 编辑面板（本次功能）：它是**浮层**，所以"有没有被裁掉"要单独报。
+           面板贴着 catbar 下沿、绝对定位，靠 .card 的 overflow:hidden 收口 ——
+           收起态卡片只有 340px 高，面板一旦超出去就会被切掉下半截，
+           而那种"看起来像渲染坏了"的问题在离屏自检里必须能一眼看出来。 */
+        panel: panelBox(),
         list: box('#list'),
         foot: box('.foot'),
         /* 底栏下沿越过卡片下沿多少（>0 = 真的被挤出可视区） */
@@ -1185,6 +1528,18 @@
         if (want.more.split('/')[0] === 'true' && /hidden/.test(b.more)) verdict.push('❌ 展开更多：该显示却被藏了');
         if (want.all && /hidden/.test(b.all)) verdict.push('❌ 看今天全部：该显示却被藏了（自持性被破坏）');
         if (want.collapse && /hidden/.test(b.collapse)) verdict.push('❌ 收起：展开态却没有收起按钮');
+
+        /* 编辑面板（本次功能）。四种判据分开说 —— 与上面那套同一口径：
+           "没开"是正常状态，"开了却看不见/被裁"才是缺陷。 */
+        var pn = report.panel;
+        if (pn.exists === false) verdict.push('❌ 编辑面板容器不存在（card.html 里少了 #catPanel）');
+        else if (pn.hidden) verdict.push('· 编辑面板未展开（正常）');
+        else if (!pn.visible) verdict.push('❌ 编辑面板已展开但尺寸为 0（w=' + pn.w + ' h=' + pn.h + '）');
+        else if (pn.clippedBy != null && pn.clippedBy > 0) {
+          verdict.push('❌ 编辑面板被卡片裁掉 ' + pn.clippedBy + 'px（下沿 ' + pn.bottom + ' > 卡片底 ' + pn.cardBottom + '）—— 收起态要能装下它');
+        } else {
+          verdict.push('✔ 编辑面板可见且完整（' + pn.w + '×' + pn.h + '，下沿距卡片底 ' + (pn.cardBottom - pn.bottom) + 'px）');
+        }
 
         // 三条轴 —— 任何"界面不一致"都能靠它定位是哪条轴错了
         verdict.push(

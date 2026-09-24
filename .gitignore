@@ -115,3 +115,6 @@ m0-probe/report/selftest-log.txt
 #   m0-probe/report/ 里的结论类产物：_selftest-report.md / M0-验收记录_*.md /
 #     calibration-focus-referee.md / test-*.txt / winsize*.txt / boot-heartbeat.txt
 #   docs/ agents/ tools/  项目治理体系本身：单一权威源 + 铁律 + 自动同步校验 + 带变异测试的考裁判
+
+# ── 交接文档（含本机路径与内部工作记录，不进公开仓库）──
+HANDOFF.md

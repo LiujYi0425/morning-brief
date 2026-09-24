@@ -89,6 +89,22 @@
     return v;
   }
 
+  /**
+   * 「不喜欢」在精选里最多占几条。
+   *
+   * ⚠️ 这个算式与 `src/shared/quota.js` 的 `quotaOf` **必须逐字一致**。
+   *    为什么在这里又写一遍而不是 import：本文件是经典脚本（不能有 import/export，
+   *    见文件顶部的说明），而那个模块是 ESM。
+   *    ⇒ 只允许**这一处**重复，且两边的断言都由离线考裁判盯着
+   *      （test-all.mjs 里有一条把两个结果并排比 —— 它们漂移就红）。
+   *    ⚠️ 下限必须是 1：0 会把"少放"变成"不放"。
+   */
+  function quotaOf(curated) {
+    var n = num(curated, CURATED_DEFAULT);
+    var q = Math.round(n * 0.2);
+    return q < 1 ? 1 : q;
+  }
+
   function copy(v, patch) {
     var out = {};
     for (var k in v) if (Object.prototype.hasOwnProperty.call(v, k)) out[k] = v[k];
@@ -171,6 +187,33 @@
        *  否则跨过午夜之后第 2 页会换一个日期边界、与第 1 页接不上。 */
       sinceIso: null,
 
+      /* —— 筛选栏编辑面板（本次功能） ——
+       *
+       * 面板回答两个问题：「这个类型**包含哪些源**」与「我对它是什么态度」。
+       * ⚠️ 全部由这里的状态决定（而不是 card.js 里的临时变量）——
+       *    理由与整个文件同源：界面上的每一处都必须能从状态推出来，
+       *    否则"点了没反应/点了两次结果不同"又会以新的形式回来。
+       *    放进状态机还带来一件事：它可以被离线考裁判**穷举**。 */
+      /** 面板是否展开（false = 收起，界面与改动前逐字一致） */
+      editorOpen: false,
+      /** 面板正在编辑哪个类型（null = 就是当前选中的那个） */
+      editorCategory: null,
+      /** 该类型绑定的源 id（**字符串**，与 activeCategory 同口径，避免 1 !== "1"） */
+      editorSelected: [],
+      /** 面板里的偏好档位。
+       *  ⚠️ 它与 `categories[i].pref` 是**两份**数据，必须一起写 ——
+       *     只写 categories 的话，`categories` 那条 action（新增类型/保存映射
+       *     之后主进程会回一份新的类别表）会把界面上的档位打回服务端的旧值，
+       *     而服务端的这次响应本来就不含刚刚那次偏好写入。
+       *     归一化时用它覆盖 categories 里的 pref（见 normalize）。 */
+      editorPref: null,
+      /** 可勾选的源清单（来自主进程；空 = 还没读到） */
+      editorSources: [],
+      /** 保存中：期间不许再改，否则两次写会互相覆盖（后写的赢，用户看到的却相反） */
+      editorSaving: false,
+      /** 删除的二次确认：只有一个类型会处于"等你再点一次"的状态 */
+      pendingDelete: null,
+
       /* —— 模式面（用户意图） —— */
       /** 数据口径：false = 只看精选，true = 看今天全部 */
       showingAll: false,
@@ -237,6 +280,55 @@
     out.cursorKey = out.cursorKey == null ? null : String(out.cursorKey);
     out.cursorRev = Math.max(0, Math.round(num(out.cursorRev)));
 
+    /* —— 筛选栏面板的收敛 ——
+       ⚠️ `editorCategory` 与「当前选中的类别」是**两个不同的东西**：
+          前者是"面板在为哪个类型编辑"，后者是"列表在筛哪个类型"。
+          面板只该为**当前选中的**那个类型编辑（否则用户会在 A 的高亮下
+          改到 B 的源，而界面上没有任何东西提示这件事）。
+       ⇒ 一旦当前类别变了，面板要么跟着走、要么关掉。这里选**关掉**：
+          跟着走会让用户"点了另一个类型，面板里的勾突然换了一批"，
+          看起来像勾选丢了。关掉是唯一不会骗人的处置。 */
+    out.editorOpen = !!out.editorOpen;
+    out.editorSaving = !!out.editorSaving;
+    /* ⚠️ 面板的偏好档位覆盖 `categories` 里的那一份（见 createView 的说明）：
+       两者都是"这个类型的态度"，而面板那份更新（用户刚点的就是这个）。 */
+    if (out.editorOpen && out.editorPref != null) {
+      var prefWant = num(out.editorPref);
+      out.categories = out.categories.map(function (c) {
+        if (c && String(c.id) === String(out.activeCategory) && num(c.pref) !== prefWant) {
+          var nc = {};
+          for (var kk in c) if (Object.prototype.hasOwnProperty.call(c, kk)) nc[kk] = c[kk];
+          nc.pref = prefWant;
+          return nc;
+        }
+        return c;
+      });
+    }
+    out.editorSources = arr(out.editorSources).filter(function (s) {
+      return s && typeof s === 'object' && s.id != null;
+    });
+    out.editorSelected = arr(out.editorSelected).map(String);
+    if (out.editorCategory != null) out.editorCategory = String(out.editorCategory);
+    /* 面板开着一个**已经不存在**的类别（被删掉了）⇒ 关掉它。
+       ⚠️ 判据用"类别表非空"（与上面 activeCategory 的收敛同一口径）：
+          启动瞬间类别表还是空的，这时关掉用户刚开的面板就是"点了又自己关"。
+       ⚠️ "全部"（activeCategory = null）**没有**可编辑的东西（它不是一个真类别）
+          ⇒ 面板跟着关掉，而 card.js 里的入口按钮在那个状态下本来也不显示。 */
+    if (out.categories.length && out.editorOpen) {
+      if (out.activeCategory == null) out.editorOpen = false;
+      else if (out.editorCategory != null && out.editorCategory !== String(out.activeCategory)) {
+        out.editorOpen = false;
+      }
+      if (out.editorOpen) {
+        var stillThere = false;
+        for (var ci = 0; ci < out.categories.length; ci += 1) {
+          if (String(out.categories[ci].id) === String(out.activeCategory)) { stillThere = true; break; }
+        }
+        if (!stillThere) out.editorOpen = false;
+      }
+    }
+    if (out.pendingDelete != null) out.pendingDelete = String(out.pendingDelete);
+
     return out;
   }
 
@@ -282,6 +374,9 @@
         sinceIso: p.sinceIso === undefined ? v.sinceIso : p.sinceIso,
         /* 服务端若知道"用户上次选的类别"而本地还没选，采纳它；否则尊重本地 */
         activeCategory: v.activeCategory == null ? (p.activeCategory == null ? null : p.activeCategory) : v.activeCategory,
+        /* 取数回来 ⇒ 撤销"等你再点一次删除"（用户不点就等于放弃，别让一个
+           危险按钮在那里等着，几秒后回来点一下就删了）。 */
+        pendingDelete: null,
         phase: 'ready',
         error: null,
         dataSeq: a.seq != null ? Math.max(v.dataSeq, num(a.seq)) : v.dataSeq,
@@ -396,9 +491,141 @@
       return copy(v, { categories: arr(a.list) });
     },
 
+    /* ------------------------------------------------------------------
+     * 筛选栏编辑面板（本次功能）
+     *
+     * ★ 为什么这一组要住在状态机里，而不是 card.js 的临时变量里：
+     *   面板的每一个可见结果（勾了几个源、哪个档位亮着、删除按钮是不是
+     *   在等你再点一次）都必须是**状态的函数**。写成 DOM 里的临时变量，
+     *   就又回到"每个处理器自己改一处、顺序不同结果不同"那条老路上去了
+     *   —— 那正是第三轮返工花了一整轮才拆掉的东西。
+     * ------------------------------------------------------------------ */
+
+    /** 打开面板：把**当前选中的类型**作为编辑对象（绝不为别的类型开） */
+    openEditor: function (v) {
+      if (v.activeCategory == null) return v; // 「全部」不是一个类型，没有可编辑的东西
+      var cur = null;
+      for (var i = 0; i < arr(v.categories).length; i += 1) {
+        if (String(v.categories[i].id) === String(v.activeCategory)) { cur = num(v.categories[i].pref); break; }
+      }
+      return copy(v, {
+        editorOpen: true,
+        editorCategory: String(v.activeCategory),
+        /* 打开时清掉上一次的残留：勾选与源清单都还没读到，
+           留着上一次的会让用户看到"另一个类型的勾"闪一下。 */
+        editorSelected: [],
+        editorSources: [],
+        editorPref: cur,
+        editorSaving: false,
+        pendingDelete: null,
+      });
+    },
+
+    closeEditor: function (v) {
+      return copy(v, { editorOpen: false, editorSaving: false, pendingDelete: null, editorPref: null });
+    },
+
+    /** 面板数据到位（主进程回的源清单 + 该类型当前绑定的源） */
+    editorData: function (v, a) {
+      return copy(v, {
+        editorSources: arr(a.sources),
+        editorSelected: arr(a.sourceIds).map(String),
+        editorSaving: false,
+      });
+    },
+
+    /**
+     * 勾选 / 取消勾选一个源。
+     *
+     * ⚠️ **保存中不许再改**（`editorSaving`）：两次写会互相覆盖 ——
+     *    后写的那次赢，而用户看到的是自己最后点的那个结果，
+     *    两者一致只是巧合。真正危险的是"第一次写返回失败"那条路径：
+     *    界面已经把第二次的勾画上了，于是用户以为成了。
+     */
+    editorToggleSource: function (v, a) {
+      if (!v.editorOpen || v.editorSaving) return v;
+      if (v.editorCategory == null || String(v.editorCategory) !== String(v.activeCategory)) return v;
+      var id = a.id == null ? null : String(a.id);
+      if (id == null) return v;
+      var next = [];
+      var had = false;
+      for (var i = 0; i < v.editorSelected.length; i += 1) {
+        if (v.editorSelected[i] === id) { had = true; continue; }
+        next.push(v.editorSelected[i]);
+      }
+      if (!had) next.push(id); // 取消勾选 = 从数组里摘掉（可逆：再勾一次就回来）
+      next.sort();
+      return copy(v, { editorSelected: next });
+    },
+
+    /** 设置偏好档位（1 喜欢 / 0 中性 / -1 不喜欢）—— 只改本地，持久化由调用方发起 */
+    editorPref: function (v, a) {
+      if (!v.editorOpen || v.editorSaving) return v;
+      if (v.editorCategory == null || String(v.editorCategory) !== String(v.activeCategory)) return v;
+      var p = Number(a.pref);
+      if (p !== 1 && p !== 0 && p !== -1) return v; // 三档之外一律无操作（不夹取、不猜测）
+      var list = arr(v.categories).map(function (c) {
+        if (c && String(c.id) === String(v.activeCategory)) {
+          var n = {};
+          for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) n[k] = c[k];
+          n.pref = p;
+          return n;
+        }
+        return c;
+      });
+      /* ⚠️ 两份都要写（见 createView 里 editorPref 的说明）：
+         categories 那份给 chip 用，editorPref 那份给面板用，
+         少写一份会出现"chip 上是不喜欢、面板里还是中性"这种自相矛盾的界面。 */
+      return copy(v, { categories: list, editorPref: p });
+    },
+
+    /** 面板进入/离开"保存中"（保存期间禁用整块控件） */
+    editorSaving: function (v, a) {
+      return copy(v, { editorSaving: !!a.on });
+    },
+
+    /**
+     * 删除的**二次确认**。
+     *
+     * ⚠️ 为什么必须是两步：删除类型是不可逆的（虽然条目不会跟着走）。
+     *    一次点击就删掉的话，误触的代价是"我辛苦分的类没了"；
+     *    而弹一个系统确认框（`dialog`/`confirm`）在这个无边框小卡片上
+     *    既突兀又不可控（`window.confirm` 在 Electron 渲染进程里同样不可靠，
+     *    与当初 `window.prompt` 那个坑同源）。
+     * ⇒ 就地两步：第一次点进入"等你再点一次"，同一个按钮上的文字变成
+     *   「确认删除」。再点才真的删；点别处（任何其它动作）就撤销。
+     */
+    askDelete: function (v) {
+      if (!v.editorOpen) return v;
+      if (v.activeCategory == null) return v;
+      return copy(v, { pendingDelete: String(v.activeCategory) });
+    },
+    cancelDelete: function (v) {
+      return copy(v, { pendingDelete: null });
+    },
+
+    /** 删除完成（主进程确认了）：并入最新的类别表，并关掉面板 */
+    categoryDeleted: function (v, a) {
+      return copy(v, {
+        categories: arr(a.list),
+        /* ★ 当前选中的类型被删掉了 ⇒ 回到「全部」。
+           不做这一步的话，activeCategory 会指向一个不存在的 id，
+           随后 normalize 虽然会清掉它，但中间的取数会用那个 id 查一次空 ——
+           用户看到的是一次莫名其妙的"这个口径下没有条目"。 */
+        activeCategory: a.removedId != null && String(v.activeCategory) === String(a.removedId) ? null : v.activeCategory,
+        editorOpen: false,
+        editorCategory: null,
+        editorSelected: [],
+        editorSources: [],
+        editorPref: null,
+        editorSaving: false,
+        pendingDelete: null,
+      });
+    },
+
     /** 强制重取（刷新按钮 / 主进程推来更新） */
     invalidate: function (v) {
-      return copy(v, { forceToken: v.forceToken + 1 });
+      return copy(v, { forceToken: v.forceToken + 1, pendingDelete: null });
     },
   };
 
@@ -505,7 +732,7 @@
        （真机反馈"收起后类型选项消失"：那是 CSS 把 .filters 在收起态设成
          display:none 造成的。现在 chips 的**存在性**由这里保证，
          收起态只允许压缩它的高度，不允许把它拿掉。） */
-    var chips = [{ id: null, name: '全部', on: v.activeCategory == null, custom: false }];
+    var chips = [{ id: null, name: '全部', on: v.activeCategory == null, custom: false, pref: 0 }];
     for (var i = 0; i < v.categories.length; i += 1) {
       var c = v.categories[i];
       chips.push({
@@ -513,6 +740,10 @@
         name: String(c.name == null ? '' : c.name),
         on: v.activeCategory === String(c.id),
         custom: true,
+        /* ★ 偏好随 chip 一起给出去（本次功能）：界面上要能一眼看出
+           "这个类型是我不喜欢的"，否则用户设完就再也看不到它 ——
+           而"设了看不见"与"没设"在用户眼里完全一样。 */
+        pref: num(c.pref),
       });
     }
     var activeIndex = 0;
@@ -592,6 +823,62 @@
     };
     d.headline = headlineOf(v, d);
 
+    /* —— 筛选栏编辑面板（本次功能）——
+     * ★ 面板的**每一个**可见结果都在这里决定（没有一个字来自 card.js 里的临时变量）：
+     *     open      要不要显示
+     *     sources   勾选框的清单与勾选状态
+     *     pref      三档里哪一档亮着
+     *     delete    按钮文案（第一次「删除类型」/ 第二次「确认删除」）
+     *   这样"点了没反应""点了两次结果不同"这两类问题在**状态层**就不可能存在，
+     *   而不是靠 DOM 那边小心一点。 */
+    var editingChip = null;
+    if (v.editorOpen && v.activeCategory != null) {
+      for (var ei = 0; ei < chips.length; ei += 1) {
+        if (chips[ei].id === String(v.activeCategory)) { editingChip = chips[ei]; break; }
+      }
+    }
+    var selSet = {};
+    for (var si = 0; si < v.editorSelected.length; si += 1) selSet[v.editorSelected[si]] = true;
+    d.editor = {
+      visible: !!editingChip,
+      categoryId: editingChip ? editingChip.id : null,
+      categoryName: editingChip ? editingChip.name : '',
+      /* 勾选框：**按源名排序**（而不是按 id）。
+         源表是按 id 排的（= 登记顺序），对用户没有意义；他要找的是"某个站"。 */
+      sources: v.editorSources
+        .slice()
+        .sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'zh-Hans-CN'); })
+        .map(function (s) {
+          var sid = String(s.id);
+          return {
+            id: sid,
+            name: String(s.name == null ? '' : s.name),
+            selected: !!selSet[sid],
+            /* 已停用的源仍然列出来（用户可以勾，但它不会被抓）——
+               直接藏掉的话，用户会以为"这个源不见了"，而真相是它被停用了。 */
+            enabled: s.enabled !== false,
+            bad: !!s.lastStatus && s.lastStatus !== 'ok',
+            title: (s.enabled === false ? '已停用（不会被抓取）' : '') + (s.lastError ? '　上次失败：' + s.lastError : ''),
+          };
+        }),
+      selectedCount: v.editorSelected.length,
+      loading: v.editorSources.length === 0,
+      saving: !!v.editorSaving,
+      pref: editingChip ? num(editingChip.pref) : 0,
+      /* 三档的文案与"亮没亮"都在这里定，card.js 只负责照着画 */
+      prefOptions: [
+        { value: 1, label: '喜欢', hint: '多放' },
+        { value: 0, label: '中性', hint: '正常参与' },
+        { value: -1, label: '不喜欢', hint: '少放但不会没有' },
+      ],
+      prefHint: '喜欢：多放　中性：正常　不喜欢：少放但不会没有（在「全部」里最多 ' + quotaOf(curatedLimit) + ' 条）',
+      /* 删除：二次确认由状态承担（见 REDUCERS.askDelete 的说明） */
+      deleting: v.pendingDelete != null && String(v.pendingDelete) === String(v.activeCategory),
+      deleteLabel: v.pendingDelete != null && String(v.pendingDelete) === String(v.activeCategory) ? '确认删除' : '删除类型',
+    };
+    /* 面板的入口按钮：只为**一个真实的类型**出现（「全部」不是类型，没有可编辑的东西） */
+    d.editorButton = { visible: v.activeCategory != null, open: d.editor.visible };
+
     /* —— 查询参数：**唯一**的取数口径来源 ——
        ⚠️ 必须是 fetchPlan 的结果，不许在这里另算一份（理由见 fetchPlan 的说明：
           另写一份会让考裁判的两个变异体失去靶子，而且两处可以各自漂移）。 */
@@ -631,6 +918,7 @@
     PAGE_LIMIT: PAGE_LIMIT,
     ACTION_TYPES: Object.keys(REDUCERS),
     clampCurated: clampCurated,
+    quotaOf: quotaOf,
     createView: createView,
     reduce: reduce,
     derive: derive,

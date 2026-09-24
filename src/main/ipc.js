@@ -23,8 +23,13 @@ import { validateExternalUrl } from './url-guard.js';
  * @param {object} deps
  * @param {() => object} deps.getBrief
  * @param {(cursor:object) => object} deps.getMore
- * @param {(trigger:string) => Promise<object>} deps.runIngest
+ * @param {(trigger:string, categoryIds:number[]|null) => Promise<object>} deps.runIngest
  * @param {() => object} deps.listCategories
+ * @param {(name:string) => object} deps.createCategory
+ * @param {(id:number) => object} deps.deleteCategory
+ * @param {(id:number) => object} deps.getCategorySources
+ * @param {(id:number, sourceIds:number[]) => object} deps.setCategorySources
+ * @param {(id:number, pref:number) => object} deps.setCategoryPref
  * @param {(next:string) => void} deps.setCardState
  * @param {() => void} deps.minimize
  * @param {(p:object) => object} deps.drag
@@ -42,9 +47,25 @@ export function registerIpc(deps) {
     return deps.getMore(p);
   });
   ipcMain.handle('category:create', (_e, name) => deps.createCategory(name));
-  ipcMain.handle('brief:ingest', async (_e, trigger) => {
-    log(`[ipc] 手动触发抓取（${trigger || 'manual'}）`);
-    return deps.runIngest(trigger || 'manual');
+  ipcMain.handle('category:delete', (_e, id) => deps.deleteCategory(id));
+  ipcMain.handle('category:sources', (_e, id) => deps.getCategorySources(id));
+  ipcMain.handle('category:setSources', (_e, payload) => {
+    const p = payload || {};
+    return deps.setCategorySources(p.categoryId, p.sourceIds);
+  });
+  ipcMain.handle('category:setPref', (_e, payload) => {
+    const p = payload || {};
+    return deps.setCategoryPref(p.categoryId, p.pref);
+  });
+  /* ⚠️ 手动刷新要**带上当前选中的类型**（本次改动）：
+      在此之前 `brief:ingest` 只收一个 trigger，于是"我只想看安全类"
+      这个意图与"刷新"这个动作之间没有任何联系 —— 点一次刷新照样把
+      全部启用源打一遍。渲染层现在把 categoryIds 一起传下来。
+      ⚠️ 兼容旧调用方：第二个参数缺省时 = 抓全部源（与改动前逐字一致）。 */
+  ipcMain.handle('brief:ingest', async (_e, trigger, categoryIds) => {
+    const ids = Array.isArray(categoryIds) ? categoryIds.map(Number).filter((n) => Number.isFinite(n)) : null;
+    log(`[ipc] 手动触发抓取（${trigger || 'manual'}${ids && ids.length ? '，类型 ' + ids.join('/') : '，全部源'}）`);
+    return deps.runIngest(trigger || 'manual', ids && ids.length ? ids : null);
   });
   ipcMain.handle('category:list', () => deps.listCategories());
 
@@ -94,6 +115,13 @@ export function registerIpc(deps) {
 
 /** 给自检用：把通道表与 preload 内联副本逐项比对 */
 export function checkChannelParity(rendererChannels) {
+  /* ⚠️⚠️ 这是通道白名单的**第二份副本**（第一份在 `src/preload/index.cjs` 的
+     `IPC` 常量里，那份是因为 `sandbox:true` 下 preload 不能 require 本地文件
+     才内联的）。两处必须同步 —— 只加一处的话，渲染层调用会**静默失败**：
+     preload 里那个方法在、`ipcRenderer.invoke` 也发了，而主进程没有 handler，
+     于是它变成一个永远 pending 或直接 reject 的 promise。
+     ⇒ 新增通道时，**这个数组和 preload 的 IPC 常量都要改**。
+     （`tools/test-all.mjs` 里有一条断言把两份逐项比对，漏一处就红。） */
   const expected = [
     'brief:get',
     'brief:more',
@@ -101,6 +129,10 @@ export function checkChannelParity(rendererChannels) {
     'brief:updated',
     'category:list',
     'category:create',
+    'category:delete',
+    'category:sources',
+    'category:setSources',
+    'category:setPref',
     'card:setState',
     'card:minimize',
     'card:drag',

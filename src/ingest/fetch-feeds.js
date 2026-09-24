@@ -28,6 +28,10 @@ import {
   openDb,
   upsertSources,
   listSources,
+  listEnabledSourcesOfCategories,
+  listCategories,
+  getCategorySources,
+  seedSourceCategories,
   recordSourceResult,
   startRun,
   finishRun,
@@ -112,6 +116,7 @@ export async function fetchText(url, { timeoutMs = FETCH_TIMEOUT_MS } = {}) {
  * @param {string} opts.dbFile          数据库路径
  * @param {'schedule'|'manual'|'catchup'} [opts.trigger]
  * @param {boolean} [opts.ensureSources] 是否在库里没有源时写入预置源包
+ * @param {number[]} [opts.categoryIds]  只抓这些类型**绑定的源并集**（缺省 = 全部启用源）
  * @param {(msg:string)=>void} [opts.log]
  * @param {typeof fetchText} [opts.fetcher] 便于测试注入（默认真抓）
  */
@@ -120,6 +125,7 @@ export async function runIngest(opts) {
     dbFile,
     trigger = 'manual',
     ensureSources = true,
+    categoryIds = null,
     log = () => {},
     fetcher = fetchText,
   } = opts;
@@ -140,19 +146,75 @@ export async function runIngest(opts) {
       }
       // 预置类别（用户之后可增删改）
       DEFAULT_CATEGORIES.forEach((name, i) => upsertCategory(db, name, i, nowIso));
+      /* ★ 源与类别登记完，**立刻再播一次**「源 ↔ 类型」映射。
+       *
+       * 为什么需要这一步：`openDb` 里的播种发生在**源表还空着**的时候
+       * （一个新库第一次打开，预置源还没登记）⇒ 那次播种一个源都解析不到，
+       * 映射表是空的，用户在界面上会看到一个"什么源都没勾"的空筛选栏。
+       * 而播种标记只在**全部播下去之后**才写，所以这一次真的会生效。
+       *
+       * ⚠️ 为什么不在 openDb 里"多开一会儿"等源表：那是把抓取层的事
+       *    塞进数据层 —— 数据层不该知道"预置源什么时候会被登记"。 */
+      const seed = seedSourceCategories(db, nowIso);
+      if (seed.seeded) log(`首次运行：写入 ${seed.seeded} 条「源 ↔ 类型」映射（此后以数据库为准）`);
+      if (seed.complete === false) log('「源 ↔ 类型」映射还没播完（有源或类别尚未登记），下次抓取会继续');
     }
 
-    const sources = listSources(db, true);
+    /* ⚠️ 选源的口径（本次改动）：**用户选了什么类型，就抓那个类型绑定的源并集**。
+     *
+     * 在这之前这里写死 `listSources(db, true)`（抓全部启用源），于是
+     * "我只想看安全类"这个意图与"刷新"这个动作之间没有任何联系 ——
+     * 用户点刷新，程序照样把 36 个源全打一遍，其中大多数与当前类型无关。
+     *
+     * ⚠️ `categoryIds` 为空 = 「全部」⇒ 仍然抓全部启用源（这是默认行为，不许变）。
+     * ⚠️ 映射来自 **DB**（`source_category`），不是代码里的预置清单 ——
+     *    用户编辑完就必须生效，否则这个功能等于没做。 */
+    const wantCats = Array.isArray(categoryIds)
+      ? categoryIds.map(Number).filter((n) => Number.isFinite(n))
+      : [];
+    const sources = wantCats.length ? listEnabledSourcesOfCategories(db, wantCats) : listSources(db, true);
     summary.sources = sources.length;
+    summary.scope = wantCats.length ? { categoryIds: wantCats } : { all: true };
+    if (wantCats.length) {
+      log(`本次只抓类型 ${wantCats.join('/')} 绑定的源，共 ${sources.length} 个`);
+    }
     if (!sources.length) {
+      /* ★ 两种"没有源"要分开说，别混成一句：
+       *   ① 一个源都没启用 —— 界面该提示去添加源
+       *   ② 这个类型**一个源都没绑**（用户把勾全取消了）—— 界面该提示去勾选
+       *   混成一句的话，用户看到"没有任何启用的源"会去翻源配置，
+       *   而他真正要做的只是给这个类型勾上一个源。 */
+      if (wantCats.length) {
+        log(`类型 ${wantCats.join('/')} 没有绑定任何启用的源 —— 什么都不做（去「筛选栏」给它勾上源）`);
+        return { ...summary, scopedEmpty: true, health: sourceHealth(db) };
+      }
       log('没有任何启用的源 —— 什么都不做（不是错误，但界面应当提示去添加源）');
       return { ...summary, health: sourceHealth(db) };
     }
 
     const runId = startRun(db, trigger, nowIso);
-    const catIds = new Map();
-    for (const c of DEFAULT_CATEGORIES) {
-      catIds.set(c, upsertCategory(db, c, DEFAULT_CATEGORIES.indexOf(c), nowIso));
+
+    /* ★★ 打标签的口径：**读 DB 里的「源 ↔ 类型」映射**，不再读代码里的预置清单。
+     *
+     * ⚠️⚠️ 这一行就是本次功能的关键落点。改之前是：
+     *       const wanted = (DEFAULT_SOURCES.find(d => d.feedUrl === src.feed_url) || {}).categories || [];
+     *     它意味着：**用户在界面上勾的东西完全不参与抓取** ——
+     *     用户把"安全客"勾进「AI 与算力」之后，新抓来的条目仍然按硬编码清单
+     *     进「安全与隐私」。用户侧看到的是"我改了，但一点也不生效"，
+     *     而代码里每一行看起来都是对的。这正是"两份口径"最典型的形态。
+     *
+     * 现在：DB 说这个源属于哪些类型，条目就进哪些类型。
+     *      映射为空（用户全取消勾选）⇒ 条目**不打任何标签**，这是如实反映。
+     * ⚠️ 每次抓取前读一次，而不是循环里现读：一轮抓取期间用户改映射的话，
+     *    同一轮里有的条目按新映射、有的按旧映射，那是"半新半旧"的状态。 */
+    const catOfSource = new Map();
+    const catIdByName = new Map();
+    for (const c of listCategories(db)) {
+      catIdByName.set(c.name, c.id);
+      for (const sid of getCategorySources(db, c.id)) {
+        if (!catOfSource.has(sid)) catOfSource.set(sid, []);
+        catOfSource.get(sid).push(c.id);
+      }
     }
 
     for (const src of sources) {
@@ -197,9 +259,8 @@ export async function runIngest(opts) {
             if (r.isNew) {
               summary.newItems += 1;
               one.newItems += 1;
-              // 按源类别打初始标签（阶段 2 会叠加用户自定义规则）
-              const wanted = (DEFAULT_SOURCES.find((d) => d.feedUrl === src.feed_url) || {}).categories || [];
-              const ids = wanted.map((n) => catIds.get(n)).filter((x) => x != null);
+              // 按**用户编辑过的**「源 ↔ 类型」映射打初始标签（见 catOfSource 的说明）
+              const ids = catOfSource.get(src.id) || [];
               if (ids.length) tagItem(db, r.id, ids);
             } else {
               summary.duplicates += 1;

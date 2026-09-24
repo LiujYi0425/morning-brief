@@ -37,7 +37,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 /* 真管线装置（把 card.js 装进 vm）。放在单独文件里，因为它也是
    "本轮 blocker 只在管线里现形"这件事的**工具化**载体。 */
-import { bootedRig, firstPayload } from './card-rig.mjs';
+import { bootedRig, bootedRigOnChip, firstPayload } from './card-rig.mjs';
 
 /**
  * 一笔 more 载荷的"自洽"判据：cursor 的出处必须与它声明的筛选一致。
@@ -385,6 +385,11 @@ function checkAll(VMx) {
           const d = VMx.derive({ ...V0, showingAll: sa, activeCategory: cat, items });
           if (!d.chips.length) fail('chips', 'chips 为空（收起后类型选项消失的病根）');
           if (d.chips[0].id !== null) fail('chips', '第一项不是「全部」');
+          /* ★ 第一项必须**真的叫「全部」**（不只是 id 为 null）。
+             少了这一条，一个"把名字清空"的改动可以整片活下来 ——
+             因为它仍然满足"有一项、id 为 null"，而用户看到的是一片空白。
+             （这不是假想：M10 那个变异体第一版就是空操作，正是被这条抓出来的。） */
+          if (d.chips[0].name !== '全部') fail('chips', '第一项的名字不是「全部」：' + JSON.stringify(d.chips[0].name));
           if (d.slider.max !== d.chips.length - 1) fail('chips', '滑动条 max 与 chips 数量不一致');
           if (d.slider.value !== d.activeIndex) fail('chips', '滑动条 value 与选中项不一致');
           if (!d.chips[d.activeIndex] || !d.chips[d.activeIndex].on) fail('chips', 'activeIndex 没指向被选中的那一项');
@@ -601,7 +606,11 @@ const MUTANTS = [
   ],
   [
     'M10 chips 可能为空：类别表为空时连「全部」都不给',
-    (s) => s.replace("var chips = [{ id: null, name: '全部', on: v.activeCategory == null, custom: false }];", 'var chips = [];'),
+    /* ⚠️ 锚点只取到 `}];` 之前 ——「全部」那一项后来多了一个 `pref` 字段
+       （筛选栏功能），把整行当锚点的话这个变异算子会变成**空操作**，
+       而空操作的表现是"变异体存活"，看起来像断言失效。
+       这条注释留着：锚点越短越不容易被后续改动碰到。 */
+    (s) => s.replace("var chips = [{ id: null, name: '全部', on: v.activeCategory == null, custom: false", 'var chips = [{ id: null, name: "", on: v.activeCategory == null, custom: false'),
   ],
   [
     'M11 滑动条序号与选中项脱钩',
@@ -997,6 +1006,161 @@ await (async () => {
     const last = r.calls[r.calls.length - 1];
     assert.equal(last.opts.todayOnly, true, '最后一个意图（今天全部）必须真的被发出去');
     assert.equal(last.opts.limit, 120);
+  });
+}
+})();
+
+/* ==================================================================
+ * 第四层之二：筛选栏编辑面板（本次功能）
+ * ==================================================================
+ * 为什么这一组必须走**真管线**（而不是只考 reducer）：
+ *   面板有一半的行为发生在 reducer 与 IPC **之间**那段顺序里 ——
+ *   "勾一下 → 发一笔写 → 等它回来"、"写失败要回滚"、
+ *   "换类型时在途的那笔回来要丢掉"。单看 reduce 或单看 card.js
+ *   都是对的，错只可能出现在它们的交错里 —— 与上一轮 blocker 同源。
+ * ================================================================== */
+say('');
+say('【第四层之二】筛选栏编辑面板：勾选 / 偏好 / 删除，走真管线');
+
+await (async () => {
+const PANEL_SOURCES = [
+  { id: 1, name: '量子位', enabled: true, lastStatus: 'ok', lastError: null },
+  { id: 2, name: '安全客', enabled: true, lastStatus: 'ok', lastError: null },
+  { id: 3, name: '已停用的源', enabled: false, lastStatus: null, lastError: null },
+];
+
+{
+  const r = await bootedRig();
+  ok('编辑入口只在选中**真实类型**时出现（「全部」没有可编辑的东西）', async () => {
+    assert.equal(r.editBtn().hidden, true, '选中「全部」时不该有编辑入口');
+    r.clickChip(1);                        // 「AI」
+    await r.sleep(20);
+    await r.ok('get', firstPayload(r, 'AI'));
+    assert.equal(r.editBtn().hidden, false, '选中一个类型之后编辑入口必须出现');
+    assert.equal(r.panel().hidden, true, '没点之前面板不该展开');
+    r.click('btnEditCat');
+    await r.sleep(20);
+    assert.equal(r.panel().hidden, false, '点了编辑之后面板必须展开');
+    assert.equal(r.editBtn().open, true, '入口按钮应当进入"已打开"态');
+    /* 「全部」要把面板关掉：它不是一个类型 */
+    r.clickChip(0);
+    await r.sleep(20);
+    await r.ok('get', firstPayload(r, '全部'));
+    assert.equal(r.panel().hidden, true, '切回「全部」之后面板必须关掉（没有可编辑的东西）');
+    assert.equal(r.editBtn().hidden, true, '选中「全部」时编辑入口不该出现');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);      // 「开源」
+  ok('打开面板 → 读源清单 → 勾选状态来自主进程（不是本地猜的）', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    const req = r.calls[r.calls.length - 1];
+    assert.equal(req.kind, 'categorySources', '打开面板必须去读这个类型绑定的源');
+    assert.equal(String(req.id), '2');
+    assert.equal(r.panelSources().length, 0, '数据还没回来时不该凭空画出勾选框');
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [2], sources: PANEL_SOURCES });
+    const src = r.panelSources();
+    assert.equal(src.length, 3, '三个源都要列出来（**包括已停用的那个** —— 藏掉会让用户以为源不见了）');
+    assert.equal(src.filter((s) => s.checked).map((s) => s.id).join(), '2', '勾选状态必须与主进程给的一致');
+    assert.ok(r.panel().text.includes('「开源」'), '面板要说清在编辑哪个类型：' + r.panel().text);
+    /* 三档偏好都要在，且当前亮的是"中性" */
+    const prefs = r.panelPrefs();
+    assert.equal(prefs.length, 3, '偏好必须恰好三档');
+    assert.equal(prefs.filter((p) => p.on).map((p) => p.label).join(), '中性', '默认该是中性');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★ 取消勾选一个源：写回主进程的是**去掉它之后**的集合（只增不减会让取消变成空操作）', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1, 2], sources: PANEL_SOURCES });
+    assert.equal(r.panelSources().filter((s) => s.checked).length, 2);
+    r.clickPanelBoxById(1);                // 取消勾选「量子位」
+    await r.sleep(20);
+    const w = r.calls[r.calls.length - 1];
+    assert.equal(w.kind, 'setCategorySources');
+    assert.equal(String(w.id), '2');
+    /* ⚠️ 这里刻意用 join(',') 而不是 deepEqual：payload 里的数组来自 vm 沙箱，
+       它的 Array.prototype 与测试进程的不是同一个 —— `deepStrictEqual` 会因为
+       **原型不同**判定不等，而两个数组的元素完全一样。
+       （报错信息长得一模一样，我在这上面看过两遍才反应过来。） */
+    assert.equal(w.sourceIds.map(String).sort().join(','), '2', '写回去的必须只剩没被取消的那个：' + JSON.stringify(w.sourceIds));
+    await r.ok('setCategorySources', { ok: true, categoryId: 2, sourceIds: [2], categories: CATS.map((c) => ({ ...c, pref: 0 })) });
+    assert.equal(r.panelSources().filter((s) => s.checked).map((s) => s.id).join(), '2', '勾选状态应当收敛到主进程确认的那份');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★ 保存失败必须**回滚**并说出来（静默失败 = "设置存不住"）', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    r.clickPanelBoxById(2);                // 再勾一个
+    await r.sleep(20);
+    assert.equal(r.panelSources().filter((s) => s.checked).length, 2, '乐观更新：点了就该立刻看见');
+    await r.ok('setCategorySources', { ok: false, reason: '库里写不进去' });
+    assert.equal(r.panelSources().filter((s) => s.checked).map((s) => s.id).join(), '1',
+      '写失败之后界面必须回到库里真实的样子（不许留下一个"勾着但不生效"的界面）');
+    assert.ok(r.logs.some((l) => /保存源映射失败/.test(l)), '失败必须在日志里留下痕迹');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★ 设"不喜欢"之后必须**重新取数**（配额在服务端执行，不重取就看不到效果）', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    const n = r.calls.length;
+    r.clickPanelPref(2);                   // 「不喜欢」
+    await r.sleep(20);
+    const w = r.calls[r.calls.length - 1];
+    assert.equal(w.kind, 'setCategoryPref');
+    assert.equal(w.pref, -1, '不许把 -1 夹成 0');
+    assert.equal(String(w.id), '2');
+    await r.ok('setCategoryPref', { ok: true, categoryId: 2, pref: -1, quota: 3, categories: CATS.map((c) => ({ ...c, pref: c.id === 2 ? -1 : 0 })) });
+    await r.sleep(30);
+    /* 配额是服务端的事 ⇒ 必须真的再问一次服务端 */
+    assert.equal(r.has('get'), true, '设完偏好必须重新取数（否则列表一动不动，用户以为没生效）');
+    await r.ok('get', firstPayload(r, '配额后'));
+    assert.equal(r.view.phase, 'ready');
+    assert.equal(r.panelPrefs().filter((p) => p.on).map((p) => p.label).join(), '不喜欢', '面板上的档位必须停在新值上');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★★ 删除类型是**两步**，而且条目一条都不会少', async () => {
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    assert.ok(r.panelButtons().some((b) => b.text === '删除类型'), '面板里应当有「删除类型」：' + JSON.stringify(r.panelButtons()));
+
+    /* 第一步：只是"等你再点一次"，**不许**真的发删除请求 */
+    r.clickPanelButton(/^删除类型$/);
+    await r.sleep(20);
+    assert.ok(!r.calls.some((c) => c.kind === 'deleteCategory'), '第一次点就发删除请求 = 没有二次确认');
+    assert.ok(r.panelButtons().some((b) => b.text === '确认删除' && b.armed), '第一次点之后按钮应当变成「确认删除」：' + JSON.stringify(r.panelButtons()));
+
+    /* 第二步：这次才真的删 */
+    r.clickPanelButton(/^确认删除$/);
+    await r.sleep(20);
+    const w = r.calls[r.calls.length - 1];
+    assert.equal(w.kind, 'deleteCategory');
+    assert.equal(String(w.id), '2');
+    await r.ok('deleteCategory', { ok: true, removed: { id: 2, name: '开源' }, itemsKept: 957, categories: CATS.filter((c) => c.id !== 2) });
+    await r.sleep(30);
+    /* 界面必须收敛：面板关掉、选中项回到「全部」（否则会拿一个不存在的 id 去查一次空） */
+    assert.equal(r.panel().hidden, true, '删除之后面板必须关掉');
+    assert.equal(r.view.activeCategory, null, '被删掉的类型不该还留在选中态上');
+    assert.equal(r.chips().filter((c) => c.on).map((c) => c.name).join(), '全部', '应当回到「全部」');
+    assert.ok(!r.chips().some((c) => c.name === '开源'), '被删掉的类型不该还在导轨上');
+    if (r.has('get')) await r.ok('get', firstPayload(r, '删后'));
   });
 }
 })();

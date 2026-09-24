@@ -275,6 +275,30 @@ body {
   background: var(--chip-bg-on);
 }
 
+/* 「编辑」入口（本次功能）：与「＋」同属"命令按钮"那条视觉语言 ——
+   同样的 accent 文字 + accent-soft 底，只是它是文字按钮、宽度自适应。
+   ★ 刻意**不引入新配色**：用户明确要求不得改变现有观感。 */
+.chip--edit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 8px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.chip--edit:hover {
+  background: var(--chip-bg-on);
+}
+/* 面板打开时，入口按钮进入"已按下"态（结构表达：左侧竖条 + 加粗），
+   与 chip 的选中态同一套语言 —— 用户能看出"这个面板是从这儿开的"。 */
+.chip--edit[data-open='on'] {
+  border-left-color: var(--accent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 /* ---------------- 类型滑动条（用户新增要求） ----------------
  * 「新增一个类型滑动条，方便在这些不同类型之间切换浏览」。
  * 两个 ‹ › 步进按钮 + 一条 range + 当前类型名：
@@ -384,6 +408,154 @@ body {
 }
 .catadd__input::placeholder {
   color: var(--text-tertiary);
+}
+
+/* ---------------- 筛选栏编辑面板（本次功能） ----------------
+ * 回答两个问题：「这个类型**包含哪些源**」与「我对它是什么态度」。
+ *
+ * ★ 硬约束（用户明确要求）：**不许改变现有整体观感**。
+ *   ⇒ 面板只用 tokens.css 里已有的 token（--surface-bg / --surface-edge /
+ *     --radius-card / --gap-* / --fs-meta / --text-* / --accent / --divider），
+ *     **没有新的配色、圆角、阴影、字体**；勾选框沿用 `.chip` 那一套结构语言，
+ *     按钮沿用 `.btn`。
+ *
+ * ★ 为什么用**浮层**（absolute）而不是把列表往下推：
+ *   卡片收起态的高度是算死的（bar+总览句+chips+滑动条+底栏 = 175px，
+ *   见 window.js），再挤进来一块面板就会把底栏顶出可视区 ——
+ *   而那正是前几轮返工修掉的老毛病（"底栏三个按钮显示不完整"）。
+ *   浮层不改变任何既有元素的排版位置，关掉之后界面与改动前**逐字一致**。
+ *
+ * ⚠️ `position: relative` 加在 .catbar 上只是为了给浮层当定位基准
+ *   （它现在是 relative 的定位父级）。这一句**不改变 .catbar 自身的排版**：
+ *   它本来就是 flex 行，relative 只影响后代绝对定位的参照系。
+ *   ⚠️ 但 `.filters` 有 overflow-x:auto ⇒ 面板**绝不能放进 .filters**，
+ *      否则会被裁成一个横向滚动条里的小方块。所以它住在 .catbar 里。 */
+.catbar {
+  position: relative;
+}
+.catpanel {
+  position: absolute;
+  left: var(--gap-3);
+  right: var(--gap-3);
+  /* 顶端贴在 catbar 下沿（catbar 的 padding-bottom 是 6px） */
+  top: 100%;
+  margin-top: 2px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-1);
+  /* 收起态卡片内容高度 340px，而这一行大约在 y=150 ⇒ 160px 之内一定装得下 */
+  max-height: 156px;
+  overflow-y: auto;
+  padding: var(--gap-2);
+  border: var(--surface-edge);
+  border-radius: var(--radius-chip);
+  background: var(--surface-bg);
+  box-shadow: var(--surface-shadow);
+  font-size: var(--fs-meta);
+}
+.catpanel[hidden] {
+  display: none;
+}
+.catpanel__row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex: 0 0 auto;
+}
+.catpanel__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.catpanel__hint {
+  flex: 0 0 auto;
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+}
+.catpanel__label {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+/* 源清单：两列小勾选。
+ * 为什么不用多选 <select>：桌面小卡片里展开式列表会盖住半个界面，
+ * 而且它在 Electron 里是**原生控件**，样式与整卡的浅色结构对不上。 */
+.catpanel__list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px var(--gap-2);
+  flex: 0 1 auto;
+  min-height: 0;
+}
+.catpanel__src {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-1);
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: var(--radius-chip);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.catpanel__src:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+.catpanel__src input {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.catpanel__srcname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 停用的源仍然列出来（用户可以勾，但它不会被抓），弱化但**不隐藏** ——
+   藏掉的话用户会以为"这个源不见了"，而真相是它被停用了。 */
+.catpanel__src[data-off='on'] .catpanel__srcname {
+  color: var(--text-tertiary);
+}
+.catpanel__src[data-bad='on'] .catpanel__srcname::after {
+  content: ' ·';
+  color: var(--state-warn);
+}
+/* 分隔线：与列表里的 --divider 同一支笔 */
+.catpanel__sep {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 2px 0;
+  background: var(--divider);
+}
+/* 面板底部那一行：删除在左、关闭在右 —— 破坏性动作不靠近"保存/完成" */
+.catpanel__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex: 0 0 auto;
+}
+.catpanel__spacer {
+  flex: 1 1 auto;
+}
+/* 删除的二次确认态：用错误色**描边**而不是填充 —— 一整个红按钮会让人以为
+   点下去是不可逆的灾难，而这里是"再点一次才生效"，语义要准。 */
+.catpanel__del[data-armed='on'] {
+  color: var(--state-bad);
+  border-color: var(--state-bad);
+}
+.catpanel .btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: var(--fs-meta);
 }
 
 /* ---------------- 列表 ----------------

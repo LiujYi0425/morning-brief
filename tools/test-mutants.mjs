@@ -21,6 +21,11 @@ import { fileURLToPath } from 'node:url'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const RUNTIME = 'src/shared/runtime-state.js'
 const UPDATE = 'src/shared/update.js'
+/* 本次功能（筛选栏）的三个靶子 —— 都是"改坏了用户会以为功能没做"的地方 */
+const QUOTA = 'src/shared/quota.js'
+const DB = 'src/store/db.js'
+const INGEST = 'src/ingest/fetch-feeds.js'
+const MAIN = 'src/main/index.js'
 
 const MUTANTS = [
   /* ── 打包态数据目录与可写性探测（P0-2）── */
@@ -99,6 +104,63 @@ const MUTANTS = [
     from: '  if (!state.pending) return state;\n',
     to: '',
     expect: '回退状态机走一遍',
+  },
+
+  /* ══════════════════════════════════════════════════════════════════
+   * 筛选栏（本次功能）—— 四处"改坏了就白做"的地方
+   *
+   * 这四条共同的特征是：**用户侧看不见**。
+   *   · 配额上限被拆 → 界面照样有 15 条，只是"不喜欢"占了 8 条
+   *   · 偏好读不到   → 界面照样有 15 条，只是设置完全不起作用
+   *   · 播种守卫被拆 → 用户改完映射，下次启动被代码里的清单冲掉
+   *   · 打标签读清单 → 用户在界面上勾的东西完全不参与抓取
+   * 所以它们必须靠"故意改坏一处、看断言抓不抓得住"来证。
+   * ══════════════════════════════════════════════════════════════════ */
+  {
+    file: QUOTA,
+    why: '「不喜欢」的配额上限被拆掉 ⇒ "少放"变成"全放进来"（界面照样 15 条，看不出来）',
+    from: "    if (cls === PREF.dislike && counts.dislike >= cap) return false;",
+    to: '    if (false) return false;',
+    expect: '不超过 K 条',
+  },
+  {
+    file: MAIN,
+    why: '偏好表没传进精选（全按中性处理）⇒ 喜欢/不喜欢完全不起作用，而条数一切正常',
+    from: 'prefByCategory: prefs, quota: effQuota });',
+    to: 'prefByCategory: null, quota: effQuota });',
+    expect: 'selectByQuota 收到的不是库里那份偏好表',
+  },
+  {
+    file: QUOTA,
+    why: '配额不随筛选范围的占比缩放 ⇒ 点进那个类型本身时被砍到 3 条（"配比"变成了"过滤"）',
+    /* ⚠️ 靶子要打在**真正决定缩放结果**的那条算式上。我第一版改的是
+       `if (pool <= want) return want;` —— 变异体"漏网"了：那条分支只对
+       小池子生效，缩放本身还在，于是"点进类型里"的结论其实仍然对。 */
+    from: '  const scaled = Math.ceil((want * hit) / pool);',
+    to: '  const scaled = quotaOf(want); // 变异体：不缩放，永远用基础配额',
+    expect: '配额要随**筛选范围**的占比缩放',
+  },
+  {
+    file: DB,
+    why: '播种的"老库"守卫被拆掉 ⇒ 升级上来的库里，用户改过的映射被预置清单整个冲掉',
+    /* ⚠️ 为什么靶子是**第二道**守卫（`already > 0 && !fresh`）而不是第一道
+       （`seeded === '1'`）：我两条都试过，第一道拆掉之后**所有断言照样全绿** ——
+       因为走 db.js 这条路径根本到不了它：`openDb` 只会在"映射表还是空的"时候
+       让播种真正执行，而那之后第二道守卫必然先返回。
+       ⇒ 靶子必须打在**行为可观测**的那一条上，否则我们得到的只是
+         "变异体落网"的假象（第一道拆掉后 156 条断言一条都不红）。
+       ⚠️ 第一道守卫保留着当"显式契约"（它让"播种是一次性的"这件事写在代码里、
+         可以被读出来），这是刻意的冗余，不是死代码。 */
+    from: '  if (already > 0 && !opts.fresh) {',
+    to: '  if (false) {',
+    expect: '老库里**已经改过**的映射不许被播种覆盖',
+  },
+  {
+    file: INGEST,
+    why: '打标签改回读代码里的预置清单 ⇒ 用户在界面上勾的源完全不参与抓取（功能等于没做）',
+    from: '              const ids = catOfSource.get(src.id) || [];',
+    to: "              const ids = ((DEFAULT_SOURCES.find((d) => d.feedUrl === src.feed_url) || {}).categories || []).map((n) => catIdByName.get(n)).filter((x) => x != null);",
+    expect: '抓取打标签读的是 DB 里的映射',
   },
 ]
 
