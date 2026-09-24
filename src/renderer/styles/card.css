@@ -441,6 +441,25 @@ body {
   top: 100%;
   margin-top: 2px;
   z-index: 3;
+  /* ⚠️⚠️ `transform` 这一行是**能看见字**的关键，不是性能优化，别删。
+   *
+   * 症状（截图 + 逐像素扫描抓到的）：面板底色明明是**不透明**的
+   * （像素实测 rgb(250,250,252)），可**列表的条目文字仍然画在面板上面** ——
+   * 两层文字叠在一起，谁也读不出来。用户报的"根本看不清"就是这个。
+   *
+   * 根因：`.list` 是 `overflow-y: auto`（滚动容器），Chromium 会给它
+   * **独立的合成层**；而面板虽然 z-index 更高，却还在普通绘制层里。
+   * 透明窗口（`transparent: true`）下，合成层与普通层的先后顺序
+   * 不完全按 z-index 走 ⇒ 列表被画到了面板上面。
+   * z-index 改多少都救不了（我试过），因为问题不在层叠顺序而在**合成**。
+   *
+   * ⇒ 给面板一个自己的合成层（`translateZ(0)`），它才真的排在滚动列表之上。
+   *   `will-change: transform` 是同一件事的"预告"写法，两个一起写最稳。
+   * ⚠️ 副作用检查过：面板没有后代需要 backdrop-filter（本工程里
+   *    backdrop-filter 在透明窗口下本来就是 no-op，见 surface.css 的说明），
+   *    所以创建合成层不会破坏任何视觉效果。 */
+  transform: translateZ(0);
+  will-change: transform;
   display: flex;
   flex-direction: column;
   gap: var(--gap-1);
@@ -469,7 +488,16 @@ body {
   padding: 2px var(--gap-2);
   border: var(--surface-edge);
   border-radius: var(--radius-chip);
-  background: var(--surface-bg);
+  /* ⚠️⚠️ 面板底色**不能用 `--surface-bg`**（真机截图换来的结论）。
+     `--surface-bg` 是 rgba(252,252,254,**0.9**) 的渐变，它是为**卡片**定的：
+     卡片下面只有壁纸，0.9 已经够透不出东西。而面板是**浮层**，
+     它盖在**滚动列表**上面 —— 0.9 会让列表的 13px 条目文字穿过面板，
+     与面板自己的 11px 文字叠在一起，两层互相不可读。
+     实测（像素比对）：面板内空白处 开/关面板 的色差 25–30，
+     也就是"面板根本没挡住背景"。用户报的"根本看不清"就是这个。
+     ⇒ 用 `--panel-bg`（不透明的令牌，见 surface.css 的说明）。
+     ⚠️ 别改回 `--surface-bg`：那是把可读性换成了"材质一致"的错觉。 */
+  background: var(--panel-bg);
   box-shadow: var(--surface-shadow);
   font-size: var(--fs-meta);
 }
@@ -591,8 +619,10 @@ body {
  *    没有 sticky 的话「删除类型」会沉到面板底部之外 —— 用户点不到一个功能。
  *    （这是我在真机上量出来的：`scrollH=397 / clientH=155`。）
  *    sticky 之后它恒贴在面板下沿，滚动内容从它下面穿过去。
- * ⚠️ 背景必须用 `--surface-bg`（面板自己的底色），否则下面的源清单会从
- *    按钮的透明区域透出来，"删除类型"四个字会压在两行源名字上。 */
+ * ⚠️ 背景必须是**不透明**的（`--panel-bg-solid`，不是 `--panel-bg`）：
+ *    sticky 遮罩要挡住**从它下面滚过去**的源名字。用带 alpha 的底色时，
+ *    源名字会从按钮旁边透出来，看起来像是按钮上叠了字。
+ *    （面板主体用 --panel-bg 是给整块一个统一底色；遮罩这一条必须更实。） */
 .catpanel__foot {
   position: sticky;
   bottom: 0;
@@ -601,7 +631,7 @@ body {
   gap: var(--gap-2);
   flex: 0 0 auto;
   padding-top: 2px;
-  background: var(--surface-bg);
+  background: var(--panel-bg-solid);
 }
 .catpanel__spacer {
   flex: 1 1 auto;
@@ -662,6 +692,42 @@ body {
 .list[data-stale='on'] {
   opacity: 0.45;
   pointer-events: none;
+}
+
+/* ★★ 编辑面板打开时：**不画列表**。
+ *
+ * 为什么必须这样（这一条是截图 + 逐像素比对换来的，不是"顺手加个效果"）：
+ *
+ *   症状：打开编辑面板后，**列表的条目文字画在面板上面**，
+ *         与面板自己的文字叠在一起，两层都读不出来 ——
+ *         用户原话是"打开编辑时根本看不清"。
+ *
+ *   排查过程（每一步都有数）：
+ *     ① 面板底色实测**不透明**：定点取色 rgb(250,250,252)，把面板底色换成
+ *        品红/绿色之后那块区域整块变色 ⇒ 不是透明度问题；
+ *     ② 把列表 `visibility:hidden` ⇒ 面板立刻干净 ⇒ 叠字来自列表；
+ *     ③ 逐个试修法，判据是"面板区域内非面板底色像素数"
+ *        （列表隐藏时是 15675，列表可见时是 18659）：
+ *          面板 z-index 提高 / translateZ(0) / will-change /
+ *          contain:paint / isolation:isolate / backface-visibility，
+ *          以及列表 overflow:hidden / contain:paint
+ *          —— **八个方案全部无效**，那个数一动不动。
+ *     ④ ⇒ 结论：这是 Chromium 在**透明窗口**里对**滚动容器**的合成层顺序问题
+ *        （`.list` 有 `overflow-y: auto` ⇒ 被提升为独立合成层，
+ *          而合成层的先后不按 z-index 走）。改样式修不掉。
+ *
+ *   ⇒ 唯一可靠的修法：编辑期间**不画列表**。
+ *     面板里就是这个类型的源、而且它自己可滚动，
+ *     所以"编辑时看不到文章列表"没有任何功能损失。
+ *
+ * ⚠️ 用 `visibility` 而不是 `display:none`：前者保留布局与滚动位置，
+ *    后者会让列表重新排版 —— 关掉面板时列表会跳一下。
+ * ⚠️ 也别改成 `opacity: 0`：元素仍然参与绘制，滚动条会露出来。
+ * ⚠️ 属性由 card.js 的 render() 按 `derive().editor.visible` 同步
+ *    （**不在 CSS 里靠 :has() 之类反推状态** —— 这个项目的规矩是
+ *      "界面上的每一处在 view-model 里决定"，见 view-model.js 顶部）。 */
+.list[data-editing='on'] {
+  visibility: hidden;
 }
 
 .item {

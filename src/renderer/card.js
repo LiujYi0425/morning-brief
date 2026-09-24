@@ -515,6 +515,21 @@
     var d = VM.derive(view);
     lastDerived = d;
     elDate.textContent = fmtDate(null);
+    /* ★★ 面板打开时把列表**隐藏**（本次修复，理由见 card.css 的 [data-editing]）。
+     *
+     * 为什么做到这一步：真机截图 + 逐像素比对证明，面板虽然 z-index 更高、
+     * 底色也是**不透明**的，**列表的文字仍然画在面板上面** ——
+     * 两层文字叠在一起，用户"根本看不清"。这是透明窗口里滚动容器的
+     * 合成层顺序问题，z-index / translateZ / contain / isolation
+     * **逐个试过，全部无效**（见 css 注释里的实验记录）。
+     * ⇒ 唯一可靠的修法是：编辑期间**不画列表**。
+     *   面板自己可滚动、里面就是这个类型的源，编辑时不需要同时看文章列表。
+     * ⚠️ 是 `visibility: hidden` 而不是 `display: none`：
+     *    前者保留布局（滚动位置不丢），后者会让列表重新排版、收起展开时跳一下。 */
+    if (elList) {
+      if (d.editor.visible) elList.setAttribute('data-editing', 'on');
+      else elList.removeAttribute('data-editing');
+    }
     /* 顶栏是 Disclosure 按钮 ⇒ aria-expanded 必须跟着状态走
        （aria-expanded 是"状态"而不是"角色"，角色写死在 HTML 里、状态由脚本同步） */
     if (bar) bar.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');

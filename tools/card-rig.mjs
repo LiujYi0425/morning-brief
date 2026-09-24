@@ -261,6 +261,8 @@ export function makeRig(cardSrc) {
     },
     /* ---- DOM 读取便捷方法（断言里用，都是只读） ---- */
     el(id) { return byId[id]; },
+    /** 读某个元素的属性（只读）。用于断言 `data-editing` 这类"状态开关" */
+    attr(id, name) { const n = byId[id]; return n ? n.getAttribute(name) : null; },
     chips() { return byId.filters.children.map((c) => ({ name: c.textContent, on: c.getAttribute('data-on') === 'on' })); },
     rows() { return byId.list.children.map((r) => r.children.map((x) => x.textContent).join('|')); },
     rowTitles() { return byId.list.children.map((r) => (r.children[0] ? r.children[0].textContent : r.textContent)); },

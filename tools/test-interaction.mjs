@@ -857,6 +857,59 @@ ok('★ 不许再用 window.prompt（Electron 渲染进程里它不存在，且�
 });
 
 say('');
+say('【第一层之四】筛选栏面板的**可读性**（真机截图换来的两条硬约束）');
+
+ok('★ 编辑面板底色必须不透明（半透明会让列表文字穿过面板，两层都读不出）', () => {
+  /* 真机取证：面板第一版用的是卡片那套 `--surface-bg`（rgba 0.9 的渐变），
+     理由是"同一族材质"。但面板是**浮层**、盖在滚动列表上 ——
+     0.9 的 alpha 会让 13px 的条目文字穿过面板，
+     与面板自己的 11px 文字叠在一起。截图 + 像素比对确认了这一点，
+     用户报的"打开编辑根本看不清"就是这个。
+     ⇒ 这两条是"别改回去"的闸门：面板底色必须来自 `--panel-bg`，
+        而那个令牌的 alpha 必须够高。 */
+  const cardCss = readCss('card.css');
+  const surfaceCss = readCss('surface.css');
+
+  const panelBlock = declBlock(cardCss, '.catpanel');
+  assert.ok(panelBlock, 'card.css 里找不到 .catpanel 的声明块');
+  assert.ok(/background\s*:\s*var\(--panel-bg\)/.test(panelBlock),
+    '.catpanel 的底色不是 var(--panel-bg) —— 一旦改回 var(--surface-bg)（卡片那套 0.9 透明渐变），' +
+      '列表文字就会从面板下面透上来，与面板自己的文字叠成一片');
+
+  for (const [name, css] of [['surface.css', surfaceCss]]) {
+    const m = css.match(/--panel-bg\s*:\s*rgba?\(([^)]*)\)/);
+    assert.ok(m, name + ' 里找不到 --panel-bg');
+    const parts = m[1].split(',').map((s) => s.trim());
+    if (parts.length === 4) {
+      const alpha = Number(parts[3]);
+      assert.ok(Number.isFinite(alpha) && alpha >= 0.97,
+        '--panel-bg 的 alpha 只有 ' + parts[3] + ' —— 面板是浮层，低于 0.97 时列表文字会透上来（实测 0.9 时肉眼可见叠字）');
+    }
+  }
+  /* 底部那一行（sticky 遮罩）必须用**完全不透明**的令牌：
+     它要挡住从下面滚过去的源名字。 */
+  const footBlock = declBlock(cardCss, '.catpanel__foot');
+  assert.ok(footBlock, 'card.css 里找不到 .catpanel__foot 的声明块');
+  assert.ok(/background\s*:\s*var\(--panel-bg-solid\)/.test(footBlock),
+    '.catpanel__foot 的底色不是 var(--panel-bg-solid) —— 带 alpha 时滚动的源名字会从按钮旁边透出来');
+});
+
+ok('★ 面板打开时必须把列表藏起来（合成层顺序改样式改不掉）', () => {
+  /* 真机上逐个试过八个方案（z-index / translateZ / will-change /
+     contain:paint / isolation / backface-visibility / 列表 overflow:hidden /
+     列表 contain:paint），**全部无效**：滚动容器在透明窗口里被提升成
+     独立合成层，而合成层的先后不按 z-index 走。
+     ⇒ 唯一可靠的修法是"编辑期间不画列表"，由 card.js 挂 data-editing。
+     这条断言保证那条 CSS 规则还在（属性由 card.js 挂，另有一条管线断言）。 */
+  const css = readCss('card.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(/\.list\[data-editing='on'\]\s*\{[^}]*visibility\s*:\s*hidden/.test(css),
+    "card.css 少了 `.list[data-editing='on'] { visibility: hidden }` —— " +
+      '没有它，打开编辑面板时列表文字会画在面板上面（真机实测：两层文字互相不可读）');
+  assert.ok(!/\.list\[data-editing='on'\]\s*\{[^}]*display\s*:\s*none/.test(css),
+    '用 display:none 会丢掉列表的滚动位置，关掉面板时列表会跳一下 —— 用 visibility');
+});
+
+say('');
 say('【第二层】四条不变量 + 顺序无关 + 模型等价 + 可达闭包');
 ok('checkAll(真实实现) 应当零违反', () => {
   const bad = checkAll(VM);
@@ -1048,6 +1101,37 @@ const PANEL_SOURCES = [
     await r.ok('get', firstPayload(r, '全部'));
     assert.equal(r.panel().hidden, true, '切回「全部」之后面板必须关掉（没有可编辑的东西）');
     assert.equal(r.editBtn().hidden, true, '选中「全部」时编辑入口不该出现');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★★ 面板打开时必须把列表**藏起来**（否则列表文字画在面板上面，两层都读不出）', async () => {
+    /* 这条断言守的是一个**真机截图抓到的**缺陷：面板虽然 z-index 更高、
+       底色也不透明，**列表的文字仍然画在面板上面**（透明窗口里滚动容器的
+       合成层顺序问题；z-index / translateZ / contain / isolation
+       逐个试过，全部无效）。唯一可靠的修法是编辑期间不画列表。
+       ⚠️ 判据只能靠 DOM 属性 —— 合成层的先后在离线 vm 里根本不存在，
+          所以这里咬的是"开关有没有被拉上"，而不是"看上去怎么样"。
+          （真机上的量法写在 card.css 那段注释里：截图 + 逐像素比对。） */
+    assert.equal(r.attr('list', 'data-editing'), null, '没开面板时不该有这个属性（否则列表白藏了）');
+    r.click('btnEditCat');
+    await r.sleep(20);
+    await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
+    assert.equal(r.attr('list', 'data-editing'), 'on', '面板开着却没把列表藏起来 —— 真机上会看到两层文字叠在一起');
+    /* 关掉面板必须**还原**（否则列表就永远看不见了） */
+    r.clickPanelButton(/^关闭$/);
+    await r.sleep(20);
+    assert.equal(r.attr('list', 'data-editing'), null, '关掉面板之后没有把列表放回来');
+    /* 切回「全部」也会关掉面板，属性必须跟着走 */
+    r.click('btnEditCat');
+    await r.sleep(20);
+    if (r.has('categorySources')) await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [], sources: PANEL_SOURCES });
+    assert.equal(r.attr('list', 'data-editing'), 'on');
+    r.clickChip(0);
+    await r.sleep(20);
+    if (r.has('get')) await r.ok('get', firstPayload(r, '全部'));
+    assert.equal(r.attr('list', 'data-editing'), null, '切回「全部」后面板关了，列表必须恢复显示');
   });
 }
 
