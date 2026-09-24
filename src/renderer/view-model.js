@@ -871,7 +871,13 @@
         { value: 0, label: '中性', hint: '正常参与' },
         { value: -1, label: '不喜欢', hint: '少放但不会没有' },
       ],
-      prefHint: '喜欢：多放　中性：正常　不喜欢：少放但不会没有（在「全部」里最多 ' + quotaOf(curatedLimit) + ' 条）',
+      /* ⚠️ 提示必须短到**一行装得下**（343px 宽）。
+         它折成两行就会把「删除类型」挤出面板可视区 —— 真机上量到过
+         （面板内容 397px，可视只有 155px）。三档的含义直接写在
+         每个按钮的 title 里（悬停可读），这里只留最短的一行。
+         ⚠️ 仍然要说清"在「全部」里"：配额随筛选范围的占比缩放，
+            点进这个类型本身时不再受这个数限制（见 shared/quota.js）。 */
+      prefHint: '不喜欢：少放但不会没有（「全部」里最多 ' + quotaOf(curatedLimit) + ' 条）',
       /* 删除：二次确认由状态承担（见 REDUCERS.askDelete 的说明） */
       deleting: v.pendingDelete != null && String(v.pendingDelete) === String(v.activeCategory),
       deleteLabel: v.pendingDelete != null && String(v.pendingDelete) === String(v.activeCategory) ? '确认删除' : '删除类型',

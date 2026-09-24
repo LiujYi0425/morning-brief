@@ -452,13 +452,15 @@
       frag.appendChild(list);
     }
 
-    frag.appendChild(el('div', 'catpanel__sep'));
-
     /* —— 第 3 行：三档喜好 ——
        ★ 语义必须在界面上说清（用户定死的那三条）：
          喜欢 = 多放、中性 = 正常、**不喜欢 = 少放但不会没有**。
          只写"不喜欢"三个字的话，用户会以为它等于"过滤掉"，
-         然后发现"怎么还能看到" —— 那是文案与行为不符。 */
+         然后发现"怎么还能看到" —— 那是文案与行为不符。
+       ⚠️ 每个按钮的 `title` 承载完整语义（悬停可读），面板里那行提示
+          只留最短的一句 —— 它折行会把「删除类型」挤出可视区（真机量到过）。
+       ⚠️ 这里**不再画分隔线**：收起态下每 12px 都要省（面板总共只有 176px），
+          而 `.catpanel` 的纵向 gap 已经足以把三块分开。 */
     var prefRow = el('div', 'catpanel__row');
     prefRow.appendChild(el('span', 'catpanel__label', '喜欢程度'));
     ed.prefOptions.forEach(function (o) {

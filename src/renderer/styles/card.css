@@ -444,10 +444,29 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--gap-1);
-  /* 收起态卡片内容高度 340px，而这一行大约在 y=150 ⇒ 160px 之内一定装得下 */
-  max-height: 156px;
+  /* ★★ 高度上限：**固定值**，而且是一个算得出来的值（别再用 `calc(100% - x)`）。
+   *
+   *   ⚠️⚠️ 我第一版写的是 `max-height: calc(100% - 150px)`，以为 `100%` 是卡片高度
+   *      （注释里还写着"`.card` 是 absolute ⇒ 100% 就是卡片高"）。**错了**：
+   *      面板的包含块是 `.catbar`（它是 `position: relative`），
+   *      所以 `100%` 是 **catbar 的高度 30px** ⇒ `calc` 算出负数、被夹成 0，
+   *      面板只剩上下 padding 17px 高 —— 打开面板什么也看不见。
+   *      （真机量到 `panel h=17`，而所有子行都溢在外面。）
+   *
+   *   可用高度的算法（真机 100% 缩放下，收起态）：
+   *     卡片内容高 340 − catbar 下沿 146 = **194px** 可用
+   *     面板自身：上下 padding 4+4、标题 15、偏好行 24、提示 15、底部行 24+2
+   *     ⇒ 固定部分 88 ⇒ 留给源清单 **106px**，取 4 行（18×4+2×3 = 78）保守一点
+   *   ⇒ 面板总高 ≈ 4+15+78+24+15+26+4 = 166px，下沿落在卡片 y≈312（底栏之上）。
+   *   ⚠️ 展开态卡片高得多，但面板**不需要**跟着变高：
+   *      源清单自己滚动，所以"多出来的地方"对面板没有意义。 */
+  max-height: 168px;
   overflow-y: auto;
-  padding: var(--gap-2);
+  /* ⚠️ 纵向 padding 收到 2px（横向保持 --gap-2）：
+     面板可用高度 = 卡片 340 − catbar 下沿 146 = 192px，而内容刚好要 190px ——
+     8px 的上下 padding 会让它溢出 2px（实测）。每一像素都留给
+     "偏好行 + 删除行"，那两块在真机上曾经整个掉到面板外面。 */
+  padding: 2px var(--gap-2);
   border: var(--surface-edge);
   border-radius: var(--radius-chip);
   background: var(--surface-bg);
@@ -477,6 +496,11 @@ body {
   flex: 0 0 auto;
   font-size: var(--fs-meta);
   color: var(--text-tertiary);
+  /* ⚠️ 提示必须**单行省略**：它是三行结构里唯一会换行的长句子，
+     一旦折成两行就会把「删除类型」那一行挤出面板可视区（真机上量到过）。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .catpanel__label {
   flex: 0 0 auto;
@@ -484,13 +508,37 @@ body {
 }
 /* 源清单：两列小勾选。
  * 为什么不用多选 <select>：桌面小卡片里展开式列表会盖住半个界面，
- * 而且它在 Electron 里是**原生控件**，样式与整卡的浅色结构对不上。 */
+ * 而且它在 Electron 里是**原生控件**，样式与整卡的浅色结构对不上。
+ *
+ * ⚠️⚠️ `max-height` + `overflow-y: auto` 是**必须**的，不是为了好看：
+ *    真机（100% 缩放）下面板只有 361px 宽，源名字一长就会换行、把清单撑高，
+ *    于是"喜欢程度"和「删除类型」被推到面板可视区之外 —— 用户根本点不到。
+ *    （这不是假想：我在真机上量到 `scrollH=397 / clientH=155`，
+ *      而当时的合成点击连续几次都点在列表上、还顺带打开了一篇文章。）
+ *    把高度钉死之后，无论有多少源、名字多长，下面两行都在。
+ * ⚠️ 名字用省略号收尾（`text-overflow: ellipsis`）—— 让行高恒定，
+ *    清单靠**滚动**容纳更多源，而不是靠换行把面板撑破。 */
 .catpanel__list {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 18px;
   gap: 2px var(--gap-2);
-  flex: 0 1 auto;
-  min-height: 0;
+  /* ⚠️⚠️ 清单是**唯一**可伸缩的那一块：它自己滚动，把位置让给下面两行。
+   *
+   *    我在这里试错过两次，两次都是"看起来能行、真机上不对"：
+   *      ① `max-height: 76px` ⇒ 网格与底部行**抢**同一段剩余空间，
+   *         结果清单被压成一行高、底部行反而被推出面板（真机 `scrollH=397`）；
+   *      ② 固定 `height: 72px` ⇒ 面板在 100% 缩放下只有 155px 可用，
+   *         清单 72 + 分隔 1 + 偏好 24 + 提示 15 + 底部 28 + 间距 = 182px，
+   *         于是「删除类型」与提示行**重叠**（真机量到两者都在 y≈267）。
+   *
+   *    现在：清单 `flex: 1 1 auto` + `min-height: 0` ⇒ 它吃剩下的空间、
+   *    不够就自己滚动；下面几行都是 `flex: 0 0 auto`，位置**恒定**。
+   *    ⇒ 无论多少源、名字多长、窗口多矮，三档喜好与删除按钮永远在。 */
+  flex: 1 1 auto;
+  min-height: 34px;
+  max-height: 78px;
+  overflow-y: auto;
 }
 .catpanel__src {
   display: flex;
@@ -536,12 +584,24 @@ body {
   margin: 2px 0;
   background: var(--divider);
 }
-/* 面板底部那一行：删除在左、关闭在右 —— 破坏性动作不靠近"保存/完成" */
+/* 面板底部那一行：删除在左、关闭在右 —— 破坏性动作不靠近"保存/完成"。
+ *
+ * ⚠️⚠️ `position: sticky` 是**必须**的，理由与上面源清单的 max-height 同源：
+ *    面板内容在真机上会超过可视高度（源多、名字长、提示文字折行），
+ *    没有 sticky 的话「删除类型」会沉到面板底部之外 —— 用户点不到一个功能。
+ *    （这是我在真机上量出来的：`scrollH=397 / clientH=155`。）
+ *    sticky 之后它恒贴在面板下沿，滚动内容从它下面穿过去。
+ * ⚠️ 背景必须用 `--surface-bg`（面板自己的底色），否则下面的源清单会从
+ *    按钮的透明区域透出来，"删除类型"四个字会压在两行源名字上。 */
 .catpanel__foot {
+  position: sticky;
+  bottom: 0;
   display: flex;
   align-items: center;
   gap: var(--gap-2);
   flex: 0 0 auto;
+  padding-top: 2px;
+  background: var(--surface-bg);
 }
 .catpanel__spacer {
   flex: 1 1 auto;
