@@ -22,9 +22,18 @@
  */
 
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { runIngest } from '../src/ingest/fetch-feeds.js';
+/* ★★ 数据目录必须与**程序**用同一个口径（阶段 C 的真教训）。
+ *
+ * ⚠️ 这里原来自己拼了一份默认值：`~/。morning-brief/brief.db` ——
+ *    而程序（tools/launch.mjs → dataDirOf）用的是 **<项目>/data**。
+ *    两者不是同一个文件。后果在真机上出现得很难看：
+ *      `npm run ingest -- --enable-local` 改的是 CLI 那个库，
+ *      而程序读的是另一个 ⇒ **命令说"26 条已启用"，界面上一点变化都没有**。
+ *    项目里本来就有守卫（"三个入口必须用同一个数据目录口径"），
+ *    只是那份名单漏了这个文件 —— 本轮已经把它补进去了。 */
+import { dataDirOf } from '../src/shared/runtime-state.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -35,7 +44,7 @@ const dbIdx = argv.indexOf('--db');
 const dbFile =
   dbIdx !== -1 && argv[dbIdx + 1]
     ? path.resolve(argv[dbIdx + 1])
-    : path.join(process.env.MB_DATA_DIR || path.join(os.homedir(), '.morning-brief'), 'brief.db');
+    : path.join(dataDirOf(process.env), 'brief.db');
 
 const t0 = Date.now();
 const setLocal = argv.includes('--enable-local') ? true : argv.includes('--disable-local') ? false : null;

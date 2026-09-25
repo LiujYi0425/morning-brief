@@ -1518,7 +1518,12 @@ ok('★★ 三个入口必须用**同一个**数据目录口径（漂移会让�
      表现是"应用明明起来了，status 却说没在运行"，或者"启动器等不到心跳"。
      ⇒ 断言它们都不再自己拼路径，而是引用同一个函数。 */
   const here = path.resolve(HERE, '..');
-  for (const rel of ['tools/launch.mjs', 'tools/service.mjs', 'src/main/index.js']) {
+  /* ⚠️ 名单里原来**漏了 tools/run-ingest.mjs** —— 而它恰恰自己拼了一份默认值
+     （`~/.morning-brief/brief.db`），与程序的 `<项目>/data` 不是同一个文件。
+     真机上的表现：`npm run ingest -- --enable-local` 报"26 条已启用"，
+     而界面上一点变化都没有 —— 命令改的是另一个库。
+     ⇒ 名单补齐：**凡是会打开数据目录的入口，一个都不能少**。 */
+  for (const rel of ['tools/launch.mjs', 'tools/service.mjs', 'src/main/index.js', 'tools/run-ingest.mjs']) {
     const src = stripJsComments(fs.readFileSync(path.join(here, rel), 'utf8'));
     assert.ok(/dataDirOf\(/.test(src), `${rel} 没有用 dataDirOf() —— 各写一份默认值必然漂移`);
     assert.ok(
