@@ -5,7 +5,7 @@ type: curator
 updated: 2026-09-22
 status: ACTIVE
 trigger: 每 10 次代理运行后，或每个阶段收尾时，或任一代理 eval_score 明显下滑时
-depends_on: AGENT-SYSTEM@1.1.2, MASTER-PLAN@1.4.0, PROJECT-RULES@1.4.0
+depends_on: AGENT-SYSTEM@1.1.2, MASTER-PLAN@1.5.0, PROJECT-RULES@1.4.0
 eval_score: null
 run_count: 0
 success_count: 0
@@ -121,6 +121,7 @@ success_count: 0
 | 日期 | 场景 | 踩到的坑 / 发现 | 转化成的规则 | 应用版本 |
 |---|---|---|---|---|
 | 2026-09-18 | 首次静态盘点：MASTER-PLAN 升 1.1.0（ADR-007 / ADR-008），触发一批代理核对 | **同一轮里出现了两种性质完全不同的升版**：`design-critic` 与 `brief-writer` 是**实质变更**（检查项 17→23、新增 Key 边界），`collector` 是**纯依赖跟进**（内容一字未改）。若不区分，很容易"为了省事一起升 minor"——而 `collector` 根本不该升 minor | 执行清单新增**第 10 步**：必须逐条判断"实质变更"还是"依赖跟进"，前者升 minor/major，后者升 patch 并写明"已核对，无需改动" | 1.1.0 |
+| 2026-09-25 | 核对 `MASTER-PLAN@1.5.0`（M1 改判为「部分交付」） | 上游改的是**里程碑交付实况**，不是规则或契约 —— **这类变更最容易顺手给所有代理升版**。核对后确认：`collector` / `brief-writer` / `design-critic` 不依赖 `MASTER-PLAN`，`curator` 只更新 `depends_on`。**转化：R-D05 的判据是「上游变了什么」，不是「上游变了没有」** | 不改任何代理的检查清单与契约；仅 `curator` 记账跟进 | 1.1.2（不升） |
 
 ---
 
