@@ -489,6 +489,46 @@ const MUTANTS = [
     from: '  const cats = enabled ? ensureLocalCategories(db, nowIso) : { created: 0, added: 0 };',
     to: '  const cats = { created: 0, added: 0 };',
     expect: '本机专属的那 6 个类别',
+  },
+  /* ── AI 简报（M1 交付物的最后一项）──
+   * ⚠️ 这一层的错误形状和其它层不一样：它们**全都看起来是正常的** ——
+   *    简报照样生成、卡片照样有内容、日志照样安静。
+   *    所以它们的断言也必须盯着「数字对不对」，而不只是「有没有报错」。
+   * ⚠️ 这几条的 test 指向 tools/test-ai-brief.mjs（本文件支持按文件跑，见 ONLY）。 */
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: 'src/shared/ai/plan.js',
+    why: '拿零值冒充真实用量 ⇒ 北极星要求「Token 消耗可见」，而可见的必须是真数字',
+    from: '  return known ? { promptTokens: p, completionTokens: c, totalTokens: t || p + c } : null;',
+    to: '  return known ? { promptTokens: p, completionTokens: c, totalTokens: t || p + c } : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };',
+    expect: '不编数字',
+  },
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: 'src/shared/ai/plan.js',
+    why: '缓存闸门失效 ⇒ 用户每点一次刷新都重新烧一遍钱（而他只是想看看有没有新东西）',
+    from: ['  if (opts.sameInput && !opts.force) return { go: false, reason: ', String.fromCharCode(39), 'cached', String.fromCharCode(39), ' };'].join(''),
+    to: ['  if (false) return { go: false, reason: ', String.fromCharCode(39), 'cached', String.fromCharCode(39), ' };'].join(''),
+    expect: '不再调用',
+  },
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: 'src/main/brief-service.js',
+    why: '模型挂了却不走降级 ⇒ 简报是空的，而卡片以为自己有内容（「今天没东西看」的经典成因）',
+    from: ['  if (status === ', String.fromCharCode(39), 'fallback', String.fromCharCode(39), ') {'].join(''),
+    to: '  if (false) {',
+    expect: '仍有条目',
+  },
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: 'src/shared/day.js',
+    why: '「今天」用 UTC 算 ⇒ 东八区早上生成的简报会被存到昨天那一份上',
+    from: [
+      ['  const p = (n) => String(n).padStart(2, ', String.fromCharCode(39), '0', String.fromCharCode(39), ');'].join(''),
+      ['  return d.getFullYear() + ', String.fromCharCode(39), '-', String.fromCharCode(39), ' + p(d.getMonth() + 1) + ', String.fromCharCode(39), '-', String.fromCharCode(39), ' + p(d.getDate());'].join(''),
+    ].join(String.fromCharCode(10)),
+    to: '  return d.toISOString().slice(0, 10);',
+    expect: '本地日',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。
@@ -519,7 +559,16 @@ let allCaught = true
 /* 子进程的输出落在这个文件里（见下面「不能走管道」那段说明） */
 const CHILD_LOG = path.join(os.tmpdir(), 'mb-mutant-child.log')
 
+/* ★ 按需只跑一部分：node tools/test-mutants.mjs ai 只跑 test 路径或 why 里含 ai 的那些。
+ *   ⚠️ 为什么需要它：全量 48 个要跑近半小时，而改了一处之后
+ *      想立刻知道「我刚加的这几条抓不抓得住」是**开发时的常态**。
+ *      过滤时最后那句「全部变异体落网」只对**本次跑的那些**成立（下面会说出来）。 */
+const ONLY = String(process.argv[2] || '')
+let ranCount = 0
+
 for (const m of MUTANTS) {
+  if (ONLY && !(String(m.why).includes(ONLY) || String(m.test || '').includes(ONLY))) continue
+  ranCount += 1
   const original = readOrig(m.file)
   const abs = path.join(ROOT, m.file)
   if (!original.includes(m.from)) {
@@ -555,7 +604,10 @@ for (const m of MUTANTS) {
      *   而真相是子进程压根没起来 —— 这个误导性极大，所以在这里写死。
      * 文件描述符没有这个限制，顺带也不再需要 maxBuffer（大输出不会被截断）。 */
     childFd = fs.openSync(CHILD_LOG, 'w')
-    const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'test-all.mjs')], {
+    /* ★ 每个变异体跑哪一份考裁判：默认 test-all，AI 那几条指向 test-ai-brief。
+       两边都以结论行收尾，所以下面的判据不用分叉。 */
+    const testFile = m.test ? path.join(ROOT, m.test) : path.join(ROOT, 'tools', 'test-all.mjs')
+    const r = spawnSync(process.execPath, [testFile], {
       cwd: ROOT, stdio: ['ignore', childFd, childFd],
     })
     if (r.error) spawnErr = String(r.error.code || r.error.message || r.error)
@@ -613,4 +665,4 @@ for (const [rel, text] of originals) {
 fs.rmSync(SENTINEL, { force: true })
 console.log(`\n源码已还原且逐字节一致：${restored ? '✓' : '✗✗✗'}（共 ${originals.size} 个文件）`)
 if (!restored || !allCaught) process.exit(1)
-console.log('全部变异体落网 ✔')
+console.log('全部变异体落网 ✔' + (ONLY ? '（本次只跑了 ' + ranCount + ' 个：过滤条件「' + ONLY + '」）' : '（共 ' + ranCount + ' 个）'))

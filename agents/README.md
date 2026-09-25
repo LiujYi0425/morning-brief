@@ -3,7 +3,7 @@ doc_id: AGENT-SYSTEM
 version: 1.1.2
 updated: 2026-09-22
 status: ACTIVE
-depends_on: MASTER-PLAN@1.5.0, PROJECT-RULES@1.4.0
+depends_on: MASTER-PLAN@1.6.0, PROJECT-RULES@1.4.0
 ---
 
 # 晨报机 · 子代理机制
@@ -212,6 +212,7 @@ Critic 的意见由 Worker **显式处理**（规则 R-F05）：要么修，要�
 | 2026-09-19 | **⚠️ 四个代理定义（页脚修正）** | 版本号**不变**（非变更，是勘误） | **发现并修掉一处版本号漂移**：`collector` / `brief-writer` / `curator` / `design-critic` 的 **frontmatter 已升版，文件末尾页脚却仍停在上一次"实质变更"的版本**（如 `collector` frontmatter 1.0.2 ／ 页脚 1.0.1）。四处页脚已改为与 frontmatter 一致 | 根因：`sync-check` **只读 frontmatter，不读页脚**，所以"仅依赖跟进"那一轮漏改页脚**不会让校验失败**。这与 `M0-RECORD` §7 记录的"同步矩阵版本不准"是**同一类缺陷：机器不校验的第二处版本载体**。已在 §6.3 补上说明，并关联 `MASTER-PLAN` §7 的候选规则「同一份受管文件必须整块一致修改」 | 已在本次一并修正，无需另行动作 |
 | 2026-09-19 | —（本文件） | **不变**（**记账**，依 R-D05） | **核对上游 `PROJECT-RULES@1.4.0`**（R-D03 留痕）：`depends_on` → `PROJECT-RULES@1.4.0`。结论：新规则 **R-D05「记账 vs 实质」**与改写的 **R-D03** 只改变**"下游如何跟进"这件事本身的规矩**，**不触及代理的职责、输入输出契约、执行清单与进化机制**，故本文件**内容无需改动**，仅跟进依赖 | 上游 `PROJECT-RULES` 升 1.3.0 → **1.4.0**（+R-D05、R-D03 改写为含版本号的硬格式）。**本行同时是新机制的第一次实战范例**：按 R-D05，这类跟进**不改版本号**，于是本文件的下游**不会过期**，**级联在此终止** | `registry.json` 无需改动（代理定义版本均未变） |
 | 2026-09-25 | `curator` | —（记账） | **依 R-D05：`depends_on` 更新为 `MASTER-PLAN@1.5.0`，不升版本号。** 核对结论：**M1 交付状态归档不触及任何代理的职责、输入/输出契约与检查清单**。`collector` / `brief-writer` / `design-critic` **不依赖 `MASTER-PLAN`，无需改动** | SSOT 升 1.5.0（M1 改判为「部分交付」） | `registry.json` 无需改动 |
+| 2026-09-25 | 四个代理 | —（记账） | **依 R-D05：`depends_on` 跟进 `MASTER-PLAN@1.6.0` / `ARCHITECTURE@1.5.0` / `DESIGN-SPEC@1.5.0`，均不升版本号。** 核对结论：**本轮改动落在产品工程与架构 / 设计文档的正文里（ADR-004 落地、3 条新 IPC 通道、数据模型与组件定义），不触及任何代理的职责、输入输出契约与检查清单** | SSOT 1.6.0 ＋ ARCHITECTURE 1.5.0 ＋ DESIGN-SPEC 1.5.0 | `registry.json` 无需改动 |
 
 > **为什么"倒数第二行的待办"不是"已完成"**：M0 的结论确实与 `design-critic` 的检查清单相关，
 > 但**把一条硬规则塞进审查代理，和把它写进项目规则，是两件不同的事**。

@@ -5,7 +5,7 @@ type: worker
 updated: 2026-09-22
 status: ACTIVE
 trigger: 定时调度触发，或用户手动点击刷新，或需要拉取某个源的条目时
-depends_on: ARCHITECTURE@1.4.0
+depends_on: ARCHITECTURE@1.5.0
 eval_score: null
 run_count: 0
 success_count: 0
@@ -102,6 +102,7 @@ success_count: 0
 | 日期 | 场景 | 踩到的坑 / 发现 | 转化成的规则 | 应用版本 |
 |---|---|---|---|---|
 | 2026-09-18 | ARCHITECTURE 升 1.1.0（ADR-007 / ADR-008 落地） | 核对结论：**无需改动**。两条 ADR 都不触及采集层——ADR-007 是密钥与模型调用链的事（本代理不调模型），ADR-008 是渲染层的事。**唯一变动是 `depends_on` 版本号跟进**（D3 的收益：采集层不认识下游在干什么，所以下游怎么变它都不受影响） | 无（`depends_on` 已更新为 `ARCHITECTURE@1.1.0`） | 1.0.1 |
+| 2026-09-25 | 核对 `ARCHITECTURE@1.5.0`（ADR-004 落地、+3 条 IPC 通道、数据模型改动） | 上游动的是**架构正文**，不是本代理的职责边界。核对后确认：采集层的输入输出契约（`NormalizedItem`、失败隔离、R-E04）一字未改 | 不改检查清单与契约 | 1.0.3（不升） |
 
 ---
 

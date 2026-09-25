@@ -5,7 +5,7 @@ type: worker
 updated: 2026-09-22
 status: ACTIVE
 trigger: 采集完成、拿到 NormalizedItem[] 之后
-depends_on: ARCHITECTURE@1.4.0, DESIGN-SPEC@1.4.0
+depends_on: ARCHITECTURE@1.5.0, DESIGN-SPEC@1.5.0
 eval_score: null
 run_count: 0
 success_count: 0
@@ -113,6 +113,7 @@ success_count: 0
 |---|---|---|---|---|
 | 2026-09-20 | 核对上游 `DESIGN-SPEC@1.3.0`（`CardFooter` 定义修订 ＋ 新增 `ToastHint`） | **无明显坑。** 上游改的是**组件组成与交互声明**，本代理的**文案结构契约未变** —— 简报三段式（总览句 / 分组 / 条目）、条数上限、源标签格式一律不受影响 | 无需转化；记账核对即可。（唯一沾边的一条：轻提示 `ToastHint` 的文案应当**短、可截断、不用感叹号** —— 已并入既有「不得使用营销腔」一条，不另立新规） | — |
 | 2026-09-18 | 项目规划阶段，ADR-007 决策"用户自带 Key" | **本代理的初版边界里，没有任何一条约束它和 API Key 的关系。** 而它恰恰是全项目唯一真正"使用"Key 的地方——一旦把 Key 拼进 prompt、或把请求头打进日志，用户就会真实付费泄露 | ① `## 不负责` 新增"绝不接触 API Key"；② 输入契约写明客户端的 Key 来源链；③ 自检清单新增"产出物与日志中不含 Key 痕迹" | 1.1.0 |
+| 2026-09-25 | 核对 `ARCHITECTURE@1.5.0` 与 `DESIGN-SPEC@1.5.0` | ⚠️ **这一轮最值得记的一条**：ADR-004 落地之后，「筛选 + 摘要」**第一次真的存在了** —— 而它正是本代理的职责描述里写着的那件事。**结论：契约不变，但从今往后本代理的产出有了参照实现**（`src/main/brief-service.js`） | 不改检查清单与契约；把参照实现的位置记进 Lessons | 1.1.2（不升） |
 
 ---
 
