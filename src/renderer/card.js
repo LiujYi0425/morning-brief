@@ -1396,20 +1396,33 @@
         toast('上一轮还在抓，稍等一下');
         return;
       }
-      ingestRunning = true;
-      memo.foot = null; // 让 renderFoot 重新算一次（它把 ingestRunning 算进 disabled）
-      renderFoot(VM.derive(view));
-      /* ★ 刷新时把**当前选中的类型**一起传下去（本次功能）：
-         在此之前 `brief:ingest('manual')` 不带任何范围，于是"我只想看安全类"
-         这个意图与"刷新"这个动作之间没有任何联系 —— 点一次刷新照样把
-         全部启用源打一遍。现在选中类型时只抓该类型绑定的源并集。
-         ⚠️ 提示文案也要跟着变：说"19 个源"而实际只抓 3 个，是另一种撒谎。 */
-      var scopeCats = VM.derive(view).fetch.categoryIds;
-      var scopeName = d.activeChip && d.activeChip.id != null ? d.activeChip.name : null;
-      toast(scopeCats && scopeCats.length && scopeName
-        ? '正在抓取「' + scopeName + '」的源…'
-        : '正在抓取…（全部源，可能要几十秒）');
+      /* ⚠️⚠️ 从这里往下的**每一行都必须在 try 里** —— 理由见下面 finally 那段说明。
+       *
+       * 2026-09-24 的 c19f9e2 把"取当前类型名"那一行插到了 try **之前**，
+       * 而那一行引用了一个**根本不存在的变量 `d`**：
+       *     var scopeName = d.activeChip && …      ← ReferenceError
+       * ⇒ 点刷新当场抛错、finally 永远不跑 ⇒ ingestRunning 永远是 true
+       *   ⇒ **刷新按钮永久变灰**（文本卡在"抓取中…"），
+       *   而主进程**连请求都收不到**（日志里一行都没有）。
+       *   用户看到的只有"刷新了但一直在卡" —— 排查时最费时间的一种形态：
+       *   现象在界面，原因在界面，可日志里什么都没有。
+       * ⇒ 口径：**凡是把 ingestRunning 置真的代码，都必须在这一个 try 里**。
+       *   以后再往这里加语句，请加在 try 内部。 */
       try {
+        ingestRunning = true;
+        memo.foot = null; // 让 renderFoot 重新算一次（它把 ingestRunning 算进 disabled）
+        renderFoot(VM.derive(view));
+        /* ★ 刷新时把**当前选中的类型**一起传下去（本次功能）：
+           在此之前 `brief:ingest('manual')` 不带任何范围，于是"我只想看安全类"
+           这个意图与"刷新"这个动作之间没有任何联系 —— 点一次刷新照样把
+           全部启用源打一遍。现在选中类型时只抓该类型绑定的源并集。
+           ⚠️ 提示文案也要跟着变：说"19 个源"而实际只抓 3 个，是另一种撒谎。 */
+        var derived = VM.derive(view);
+        var scopeCats = derived.fetch.categoryIds;
+        var scopeName = derived.activeChip && derived.activeChip.id != null ? derived.activeChip.name : null;
+        toast(scopeCats && scopeCats.length && scopeName
+          ? '正在抓取「' + scopeName + '」的源…'
+          : '正在抓取…（全部源，可能要几十秒）');
         var r = await api.brief.ingest('manual', scopeCats && scopeCats.length ? scopeCats : undefined);
         if (r && r.scopedEmpty) {
           /* ⚠️ "这个类型一个源都没绑"必须单独说：混进"新增 0 条"里的话，
@@ -1418,7 +1431,7 @@
         } else {
           toast('抓取完成：新增 ' + (r.newItems || 0) + ' 条' + (r.failed ? '，' + r.failed + ' 个源失败' : ''));
         }
-        dispatch({ type: 'invalidate' });
+          dispatch({ type: 'invalidate' });
       } catch (err) {
         api.log('[card] ❌ 手动抓取失败：' + (err && err.message));
         toast('抓取失败：' + (err && err.message));

@@ -404,6 +404,16 @@ const MUTANTS = [
     to: '        const gate = null;',
     expect: '本机地址那道闸被绕过了',
   },
+  {
+    file: 'src/renderer/card.js',
+    why: '刷新处理器里又把那个未定义变量写回去 ⇒ 点一次刷新就抛 ReferenceError，按钮永久变灰、请求根本发不出去',
+    /* ⚠️ 真机事故：c19f9e2 插了一行 var scopeName = d.activeChip && …，
+       而处理器里根本没有 d；更糟的是它写在 try 之前 ⇒ finally 不跑 ⇒
+       ingestRunning 永远 true。症状是「刷新了但一直在卡」，而主进程日志里一行都没有。 */
+    from: '        var scopeName = derived.activeChip && derived.activeChip.id != null ? derived.activeChip.name : null;',
+    to: '        var scopeName = d.activeChip && d.activeChip.id != null ? d.activeChip.name : null;',
+    expect: '引用了未定义的 d',
+  },
   /* ── 阶段 C：分类体系扩五维度 + 补源（改坏了都是「界面看着正常、其实没了」）── */
   {
     file: DB,

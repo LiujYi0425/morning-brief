@@ -4257,6 +4257,41 @@ await aok('★ setLocalSourcesEnabled：只动本机那一组，公网源一个�
   db.close();
 });
 
+
+/* ==================================================================
+ * 第十九层 · 刷新按钮不许**永久变灰**（一次 ReferenceError 就够）
+ * ------------------------------------------------------------------
+ * 真机上的一次事故（2026-09-25 排查）：用户点「刷新」之后界面**一直卡着**，
+ * 控制台里只有主进程的日志，**连一行"手动触发抓取"都没有** —— 也就是说
+ * 请求根本没发出去。根因在渲染层：c19f9e2 往刷新处理器里插了一行
+ *     var scopeName = d.activeChip && …
+ * 而那个处理器里**根本没有 `d` 这个变量** ⇒ 每次点刷新都抛 ReferenceError；
+ * 更糟的是那一行在 `try` **之前**，于是 `finally` 永远不跑 ⇒
+ * `ingestRunning` 永远是 true ⇒ 按钮永久禁用（文本卡在「抓取中…」）。
+ *
+ * 这一层用两条源码判据把它钉住（渲染层跑不进 Node，只能静态咬）。
+ * ================================================================== */
+say();
+say('--- 第十九层 · 刷新按钮不许永久变灰 ---');
+
+ok('★★ 刷新处理器：不许引用未定义的变量、置真与还原必须在同一个 try/finally 里', () => {
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'renderer', 'card.js'), 'utf8');
+  const i = src.indexOf("btnRefresh.addEventListener('click'");
+  assert.ok(i > 0, '找不到刷新按钮的处理器（card.js 结构变了？）');
+  const end = src.indexOf('\n    });', i);
+  assert.ok(end > i, '定位不到刷新处理器的结尾');
+  /* ⚠️ 先剥注释再匹配：那段解释里写着 `d.activeChip` 这个反面例子，
+     不剥的话断言会咬到自己的注释（本项目在别处踩过两次）。 */
+  const body = src.slice(i, end).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(
+    !/\bd\s*\./.test(body),
+    '刷新处理器里引用了未定义的 d —— 点一次刷新就会抛 ReferenceError，按钮永久变灰',
+  );
+  assert.ok(
+    /try\s*\{[\s\S]*ingestRunning\s*=\s*true[\s\S]*finally\s*\{[\s\S]*ingestRunning\s*=\s*false/.test(body),
+    'ingestRunning 的置真/还原没有包在同一个 try/finally 里 —— 中间任何一句抛错都会让刷新按钮永久变灰',
+  );
+});
 say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
 /** 每个变异体：改坏一处，期望"至少有一条断言失败" */
 const MUTANTS = [
