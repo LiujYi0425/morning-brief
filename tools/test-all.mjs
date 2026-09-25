@@ -61,7 +61,26 @@ const VM = (() => {
 import { decodeEntities, unwrapCdata, cleanText, collapseWhitespace, stripHtml } from '../src/ingest/entities.js';
 import { canonicalizeUrl, fnv1a, titleFingerprint, dedupeKey } from '../src/ingest/urls.js';
 import { parseFeed, parseDate, sniffContentKind } from '../src/ingest/feed-parse.js';
-import { openDb, upsertSources, startRun, insertItem, queryItems, countItems, sourceHealth, listSources, getMeta, setMeta, upsertCategory, seedSourceCategories, SCHEMA_VERSION } from '../src/store/db.js';
+import {
+  openDb,
+  upsertSources,
+  startRun,
+  insertItem,
+  queryItems,
+  countItems,
+  sourceHealth,
+  listSources,
+  listCategories,
+  getMeta,
+  setMeta,
+  upsertCategory,
+  seedSourceCategories,
+  SCHEMA_VERSION,
+  /* ★ 阶段 C：分类体系的一次性迁移，以及「本机那一组源」的批量开关。 */
+  migrateTaxonomy,
+  setLocalSourcesEnabled,
+  TAXONOMY_VERSION,
+} from '../src/store/db.js';
 import { DEFAULT_CATEGORIES, DEFAULT_SOURCES } from '../src/ingest/sources.js';
 import { runIngest, shouldRunNow, explainFetchFailure } from '../src/ingest/fetch-feeds.js';
 import {
@@ -2623,7 +2642,7 @@ ok('★ 配额算式的两份实现必须一致（view-model 是经典脚本，�
 
 ok('★★ 配额要随**筛选范围**的占比缩放：点进那个类型本身时不许把它砍到 3 条', () => {
   /* ★★ 这条是**在真实库上演练时发现的**，不是假想出来的：
-     把「开源与工程」设成"不喜欢"，然后点进这个类型 ——
+     把「领域·科技」设成"不喜欢"，然后点进这个类型 ——
      按写死的配额它会显示 **3 条**（而这一类有 234 条）。
 
      为什么那是错的：「不喜欢 = 少放但不能没有」是一条**配比**，
@@ -2726,7 +2745,7 @@ await (async () => {
   const db = await openDb(dbFile);
   const now = new Date().toISOString();
 
-  const catId = cats.listCategories(db).find((c) => c.name === '开源与工程').id;
+  const catId = cats.listCategories(db).find((c) => c.name === '领域·科技').id;
   const src = cats.listSources(db).find((s) => s.feed_url === 'https://github.blog/feed/');
   assert.ok(src, '预置源里应当有 GitHub Blog（这条断言本身要有意义）');
 
@@ -2737,7 +2756,7 @@ await (async () => {
   });
 
   await aok('★ 用户改过的映射**不会被预置清单覆盖**（重开一次库来验）', async () => {
-    /* 用户从「开源与工程」里**摘掉** GitHub Blog */
+    /* 用户从「领域·科技」里**摘掉** GitHub Blog */
     const kept = cats.listSourceIdsOfCategory(db, catId).filter((id) => id !== Number(src.id));
     const w = cats.setCategorySources(db, catId, kept);
     assert.equal(w.ok, true);
@@ -2810,18 +2829,18 @@ await (async () => {
     const nowL = new Date().toISOString();
     upsertSources(ldb, DEFAULT_SOURCES, nowL);
     for (const [i, name] of DEFAULT_CATEGORIES.entries()) upsertCategory(ldb, name, i, nowL);
-    const catL = cats.listCategories(ldb).find((c) => c.name === '开源与工程').id;
+    const catL = cats.listCategories(ldb).find((c) => c.name === '领域·科技').id;
     const byName = new Map(cats.listCategories(ldb).map((c) => [c.name, Number(c.id)]));
     const byUrl = new Map(cats.listSources(ldb).map((s) => [s.feed_url, Number(s.id)]));
     const allL = [...byUrl.values()];
-    /* 用户留下的那一个：取"预置清单里第一个绑到「开源与工程」的源"，
+    /* 用户留下的那一个：取"预置清单里第一个绑到「领域·科技」的源"，
        这样它一定属于这个类型（不能随便取 allL[0]，它可能压根不绑这个类型） */
-    const keptL = [byUrl.get(DEFAULT_SOURCES.find((s) => (s.categories || []).includes('开源与工程')).feedUrl)];
-    assert.ok(Number.isFinite(keptL[0]), '前置条件：应当能在预置清单里找到一个绑「开源与工程」的源');
+    const keptL = [byUrl.get(DEFAULT_SOURCES.find((s) => (s.categories || []).includes('领域·科技')).feedUrl)];
+    assert.ok(Number.isFinite(keptL[0]), '前置条件：应当能在预置清单里找到一个绑「领域·科技」的源');
     ldb.close();
     /* ★★ 用**裸 SQL** 把库改造成"当年那套老代码留下的样子"：
      *    · 映射 = 预置清单里那套**完整的**绑定（当年播的）；
-     *    · 用户的改动 = 从「开源与工程」里摘掉几个，只留一个；
+     *    · 用户的改动 = 从「领域·科技」里摘掉几个，只留一个；
      *    · **没有任何 `seed_preset:*` 记账**（那时还没这回事）。
      *  ⚠️⚠️ 必须"先有整套、再改"，不能"一开始就只有一条"：
      *    我前几版都是 DELETE 之后只写一条 —— 那种库在真实升级路径里
@@ -2895,7 +2914,7 @@ await (async () => {
   });
 
   await aok('★ 抓取打标签读的是 DB 里的映射（不是代码里的清单）', async () => {
-    /* 把「行业动态」绑到一个**预置清单里不属于它**的源上，然后抓一次，
+    /* 把「领域·财经」绑到一个**预置清单里不属于它**的源上，然后抓一次，
        验证新条目的标签跟着**用户的映射**走。
        ⚠️ 这条断言盯的是 fetch-feeds.js 里那一行曾经写死的东西：
           `(DEFAULT_SOURCES.find(...) || {}).categories` ——
@@ -2905,10 +2924,10 @@ await (async () => {
     const seed = await openDb(dbFile2);
     const now2 = new Date().toISOString();
     upsertSources(seed, [{ name: 'GitHub Blog', feedUrl: 'https://github.blog/feed/', kind: 'rss' }], now2);
-    const cAI = cats2.upsertCategory(seed, 'AI 与算力', 0, now2);   // 预置清单里 GitHub Blog 不在这类
-    cats2.upsertCategory(seed, '开源与工程', 1, now2);
+    const cAI = cats2.upsertCategory(seed, '领域·财经', 0, now2);   // 预置清单里 GitHub Blog 不在这类
+    cats2.upsertCategory(seed, '领域·科技', 1, now2);
     const sid = cats2.listSources(seed)[0].id;
-    cats2.setCategorySources(seed, cAI, [sid]);                      // 用户把它勾进了「AI 与算力」
+    cats2.setCategorySources(seed, cAI, [sid]);                      // 用户把它勾进了「领域·财经」
     seed.close();
 
     const r = await runIngest({
@@ -2925,7 +2944,7 @@ await (async () => {
       .get(cAI).n;
     const items = check.prepare('SELECT COUNT(*) AS n FROM item').get().n;
     assert.ok(tagged > 0, '新条目没有按**用户改过的**映射打标签（抓取仍然在读代码里的预置清单）');
-    assert.equal(tagged, items, '本该每一条都进「AI 与算力」（它是这个源唯一绑定的类型）');
+    assert.equal(tagged, items, '本该每一条都进「领域·财经」（它是这个源唯一绑定的类型）');
     check.close();
   });
 })();
@@ -2944,7 +2963,7 @@ await (async () => {
   const seed = await openDb(dbFile);
   const now = new Date().toISOString();
   upsertSources(seed, DEFAULT_SOURCES, now);
-  const cA = cats.upsertCategory(seed, '开源与工程', 1, now);
+  const cA = cats.upsertCategory(seed, '领域·科技', 1, now);
   const runId = startRun(seed, 'manual', now);
   const sid = cats.listSources(seed).find((s) => s.feed_url === 'https://github.blog/feed/').id;
   for (let i = 1; i <= 3; i += 1) {
@@ -3073,7 +3092,7 @@ await (async () => {
 
     /* —— 另一个源：模拟"用户把它从某个类型里摘掉了"（它**没被删行**，
      *    所以不在新增名单里 ⇒ 绝不该被播回来） */
-    const catId = byCat.get('开源与工程');
+    const catId = byCat.get('领域·科技');
     const before = cats.listSourceIdsOfCategory(db, catId);
     const dropped = before[before.length - 1];
     cats.setCategorySources(db, catId, before.filter((x) => x !== dropped));
@@ -3183,18 +3202,23 @@ await (async () => {
     await runIngest({ dbFile: dbFile4, trigger: 'manual', ensureSources: true, fetcher });
 
     const db = await openDb(dbFile4);
-    /* 挑一个**只绑了一个类型**的预置源（这样"摘掉"就等于"全摘干净"） */
-    const counts = db
-      .prepare('SELECT source_id, COUNT(*) AS n FROM source_category GROUP BY source_id HAVING n = 1 ORDER BY source_id')
-      .all();
-    let target = null;
-    for (const row of counts) {
-      const src = cats.listSources(db).find((s) => Number(s.id) === Number(row.source_id));
-      const preset = DEFAULT_SOURCES.find((s) => s.feedUrl === src.feed_url);
-      if (preset) { target = { sid: Number(row.source_id), url: src.feed_url, name: src.name, catId: Number(db.prepare('SELECT category_id FROM source_category WHERE source_id = ?').get(row.source_id).category_id) }; break; }
+    /* 挑一个预置源，把它**从它绑的每一个类型里**逐个摘掉 ——
+     * 最后一次摘除会让它变成"一个类型都不属于"，那一刻应当写下记号。
+     *
+     * ⚠️ 阶段 C 之前这里挑的是"只绑了一个类型的源"（摘一次就等于全摘干净）。
+     *    换成五维度体系之后**没有**只绑一个类型的源了（每个源都带 4~6 个维度标签），
+     *    所以改成"逐个摘"。测的还是同一件事：**全摘干净之后不许自己回来**。 */
+    const presetSrc = cats.listSources(db).filter((s) => DEFAULT_SOURCES.some((d) => d.feedUrl === s.feed_url));
+    assert.ok(presetSrc.length > 0, '应当能找到预置源（断言本身要有意义）');
+    const tsrc = presetSrc[0];
+    const target = { sid: Number(tsrc.id), name: tsrc.name };
+    const catIds = cats.listCategoryIdsOfSource(db, target.sid);
+    assert.ok(catIds.length >= 1, '前置条件：这个源应当至少绑了一个类型');
+    for (const cid of catIds) {
+      const rest = cats.listSourceIdsOfCategory(db, cid).filter((x) => x !== target.sid);
+      assert.equal(cats.setCategorySources(db, cid, rest).ok, true);
     }
-    assert.ok(target, '应当能找到"只绑一个类型"的预置源（断言本身要有意义）');
-    assert.equal(cats.setCategorySources(db, target.catId, cats.listSourceIdsOfCategory(db, target.catId).filter((x) => x !== target.sid)).ok, true);
+    assert.equal(cats.listCategoryIdsOfSource(db, target.sid).length, 0, '前置条件：应当已经全摘干净');
     assert.equal(getMeta(db, `unbound_by_user:${target.sid}`), '1',
       '摘干净一个源之后没有留下记号 —— 播种下一次就会把它绑回来');
     db.close();
@@ -3986,6 +4010,191 @@ await aok('★ 走原生适配器的源：抓取层真的把 JSON 交给它（�
   assert.equal(row.published_at, null, '不许把抓取时刻当成发布时间存进去');
 });
 
+
+/* ==================================================================
+ * 第十八层 · 阶段 C：分类体系扩成五维度 + 补源
+ * ------------------------------------------------------------------
+ * 这一层守的是本轮**真机上量出来**的三件事：
+ *   · 预置清单**不许再覆盖** enabled（否则预置源永远打不开）
+ *   · 分类体系的迁移必须**只加不删**、幂等、且跳过用户摘干净的源
+ *   · 扩出来的每个类别**都要有源撑着**（没源的类别 = 永远空的类别）
+ * ================================================================== */
+say();
+say('--- 第十八层 · 阶段 C：分类体系扩成五维度 + 补源 ---');
+
+await aok('★★ 预置清单**不许再覆盖** enabled（改回去的话，预置源就永远打不开了）', async () => {
+  /* ⚠️⚠️ 这条守的是本轮真机上量出来的一个**真缺陷**：
+   *   upsertSources 原来在 ON CONFLICT 里写 enabled = excluded.enabled，
+   *   于是清单里的 enabled:false **每次抓取都写回库里** ——
+   *   而全项目**没有任何地方**能让用户启用一个预置源
+   *   （界面上那个勾选框管的是「绑到哪个类型」，不是「抓不抓」）。
+   *   两者合起来 = 标了 enabled:false 的预置源是**死源**，
+   *   而注释里还写着「有代理的机器可以把它们打开」。 */
+  const f = tmpDbFile('enabled-not-clobbered');
+  const db = await openDb(f);
+  const now = new Date().toISOString();
+  const one = [{ name: '某源', feedUrl: 'https://e.com/f', kind: 'rss', enabled: false }];
+  upsertSources(db, one, now);
+  const id = listSources(db).find((s) => s.feed_url === 'https://e.com/f').id;
+  assert.equal(db.prepare('SELECT enabled FROM source WHERE id = ?').get(id).enabled, 0, '前置条件：首次登记该用清单里的默认值');
+  db.prepare('UPDATE source SET enabled = 1 WHERE id = ?').run(id); // 用户 / 一次性命令把它打开
+  upsertSources(db, one, new Date().toISOString()); // 下一次抓取：清单再跑一遍
+  assert.equal(
+    db.prepare('SELECT enabled FROM source WHERE id = ?').get(id).enabled,
+    1,
+    '★ 用户打开的源被预置清单按回去了 —— 那「启用一个预置源」在物理上就不可能',
+  );
+  /* 反向：**退役逻辑必须还在** —— 清单里删掉的源仍然要被停用（那条路是显式的）。
+     少了这条，上面那个修复就会滑成「预置清单再也不能停用任何东西」。 */
+  upsertSources(db, [], new Date().toISOString());
+  assert.equal(db.prepare('SELECT enabled FROM source WHERE id = ?').get(id).enabled, 0, '清单里删掉的源没有被停用 —— 它会永远在失败、永远挂在「源异常」里');
+  db.close();
+});
+
+await aok('★★ 分类体系迁移的三条纪律：只加不删 / 幂等 / 跳过用户摘干净的源', async () => {
+  const f = tmpDbFile('taxonomy-migrate');
+  const fetcher = async () => ({ ok: true, text: GOOD_RSS });
+  await runIngest({ dbFile: f, trigger: 'manual', ensureSources: true, fetcher });
+  const db = await openDb(f);
+  const now = new Date().toISOString();
+
+  /* 先把版本号抹掉，造出「旧库刚升上来」的样子 */
+  db.prepare("DELETE FROM meta WHERE key = 'taxonomy_version'").run();
+  const tags0 = db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n;
+  const cat0 = db.prepare('SELECT COUNT(*) AS n FROM category').get().n;
+
+  /* ★ 纪律②：用户主动摘干净的源，一行都不许加回来 */
+  const presetSrc = listSources(db).filter((s) => DEFAULT_SOURCES.some((d) => d.feedUrl === s.feed_url));
+  assert.ok(presetSrc.length > 0, '前置条件：库里应当有预置源');
+  /* 造两种源，守住迁移的两条边界：
+   *   A：**一条绑定都没有** ⇒ 交给播种那条路，迁移不许碰它
+   *   B：**有绑定、但被用户摘过**（记号还在）⇒ 迁移也不许碰它 */
+  /* ⚠️ 还要造出「升级上来的库缺新维度的绑定」这一件事本身：
+     第一次抓取时迁移已经把绑定播全了，所以要先**挖掉一整类**，
+     否则 added 永远是 0，这条断言就成了摆设。 */
+  const wenyu = listCategories(db).find((c) => c.name === '领域·文娱');
+  assert.ok(wenyu, '前置条件：应当有「领域·文娱」这个类别');
+  const removedRows = Number(db.prepare('DELETE FROM source_category WHERE category_id = ?').run(wenyu.id).changes);
+  assert.ok(removedRows > 0, '前置条件：这个类别应当绑着若干源（实得 ' + removedRows + '）');
+
+  const srcA = presetSrc[0];
+  const srcB = presetSrc[1];
+  assert.ok(srcA && srcB, '前置条件：库里至少要两个预置源');
+  db.prepare('DELETE FROM source_category WHERE source_id = ?').run(srcA.id);
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE source_id = ?').get(srcA.id).n),
+    0,
+    '前置条件：A 应当一条绑定都没有',
+  );
+  /* B：从它的绑定里摘掉一条，再打上「用户摘过」的记号 */
+  const bCats = db.prepare('SELECT category_id FROM source_category WHERE source_id = ?').all(srcB.id).map((r) => Number(r.category_id));
+  assert.ok(bCats.length >= 2, '前置条件：B 应当绑了不止一个类型');
+  db.prepare('DELETE FROM source_category WHERE source_id = ? AND category_id = ?').run(srcB.id, bCats[0]);
+  setMeta(db, 'unbound_by_user:' + srcB.id, '1');
+  const bBound = Number(db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE source_id = ?').get(srcB.id).n);
+  /* ⚠️ 基准值必须在**摘干净之后**取：放在前面会把马上要被删掉的那几行也算进去，
+     于是下面那条"只加不删"会因为"行数变少了"而冤判。 */
+  const bound0 = db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
+
+  const r1 = migrateTaxonomy(db, now);
+  assert.equal(r1.ok, true);
+  assert.equal(r1.version, TAXONOMY_VERSION, '迁移没有把版本号写成当前值');
+  assert.ok(r1.skippedByUser >= 1, '被用户摘干净的源没有被跳过（它会自己回来）');
+  assert.ok(r1.skippedUnbound >= 1, '一条绑定都没有的源该交给播种那条路，迁移不该去动它');
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE source_id = ?').get(srcA.id).n),
+    0,
+    '★ 迁移去绑了一个「一条绑定都没有」的源 —— 那是播种的活，两处都做会让播种的坏实现抓不住',
+  );
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE source_id = ?').get(srcB.id).n),
+    bBound,
+    '★ 用户摘过（留了记号）的源被迁移补回来了 —— 用户侧就是「我取消了，升级之后又自己回来了」',
+  );
+  assert.equal(
+    r1.added,
+    removedRows,
+    '迁移补回来的绑定数不对（该补 ' + removedRows + ' 条，实得 ' + r1.added + '）—— 那新维度对老库就没生效',
+  );
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM source_category WHERE category_id = ?').get(wenyu.id).n),
+    removedRows,
+    '「领域·文娱」的绑定没有被补回来',
+  );
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n, tags0, '★ 迁移改动了 item_category —— 那是抓取那一刻的历史事实，不许回溯改写');
+  assert.ok(db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n >= bound0, '迁移把已有的绑定删掉了（只加不删）');
+  assert.ok(db.prepare('SELECT COUNT(*) AS n FROM category').get().n >= cat0, '迁移把类别删掉了');
+
+  /* ★ 纪律③：幂等 —— 再跑一次什么都不做 */
+  const boundAfter = db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n;
+  const r2 = migrateTaxonomy(db, now);
+  assert.equal(r2.skipped, 'already', '第二次调用没有按版本号跳过');
+  assert.equal(r2.added, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n, boundAfter, '第二次调用又加了一遍（版本号守卫没生效）');
+  db.close();
+});
+
+ok('★ 扩出来的每个类别**都要有源撑着**（没源的类别就是「点进去永远空」的类别）', () => {
+  /* ⚠️ 这条是这一轮最重要的一条**设计**断言：
+   *   一个类别有没有内容，只取决于有没有源绑给它。
+   *   所以「某个类别一个源都没有」不是风格问题，是**功能坏掉**。
+   *   （本轮就是靠这条算出来 房产 撑不住，从而**没有**建「领域·房产」。） */
+  const used = new Set();
+  for (const s of DEFAULT_SOURCES) for (const c of s.categories || []) used.add(c);
+  const orphan = DEFAULT_CATEGORIES.filter((c) => !used.has(c));
+  assert.deepEqual(orphan, [], '这些类别一个源都没有，点进去永远是空的：' + orphan.join(' / '));
+  /* 五个维度前缀都要在（「按五大维度设计分类结构」这件事本身就是需求） */
+  for (const p of ['领域·', '性质·', '形态·', '时效·', '主体·']) {
+    assert.ok(DEFAULT_CATEGORIES.some((c) => c.startsWith(p)), '少了维度：' + p);
+  }
+  /* 反向：实测撑不住的**不许**建（建了就是永远空的） */
+  assert.ok(!DEFAULT_CATEGORIES.includes('领域·房产'), '领域·房产没有可用源（贝壳研究院 503），建了就是空类别');
+  /* 类别名不许重复 —— category.name 上有 UNIQUE，重名会在 upsert 时静默合并 */
+  assert.equal(new Set(DEFAULT_CATEGORIES).size, DEFAULT_CATEGORIES.length, '预置类别里有重名');
+});
+
+ok('★ 新补的那批源：一律是本机 RSSHub、一律默认关闭（与阶段 B 同一个口径）', () => {
+  const local = DEFAULT_SOURCES.filter((s) => String(s.feedUrl).startsWith('http://127.0.0.1:1200/'));
+  assert.ok(local.length >= 20, '本机源太少：' + local.length);
+  for (const s of local) {
+    assert.equal(s.enabled, false, s.name + ' 默认开着 —— 会让没跑 RSSHub 的人一直看到「源异常」');
+    /* ⚠️ 门槛是 3 不是 4：考的是「每个源都要带多个维度的标签」，
+       而不是某个具体的标签数量 —— 把门槛写成 4 会让"教育考试院"这种
+       只有 领域/性质/主体 三个维度的源被冤判。 */
+    assert.ok((s.categories || []).length >= 3, s.name + ' 的新维度标签太少（' + (s.categories || []).join(',') + '）');
+  }
+  const pub = DEFAULT_SOURCES.filter((s) => /^https:\/\//.test(String(s.feedUrl)));
+  assert.ok(pub.length >= 25, '公网源变少了？' + pub.length);
+});
+
+await aok('★ setLocalSourcesEnabled：只动本机那一组，公网源一个都不碰', async () => {
+  const f = tmpDbFile('local-enable');
+  const fetcher = async () => ({ ok: true, text: GOOD_RSS });
+  await runIngest({ dbFile: f, trigger: 'manual', ensureSources: true, fetcher });
+  const db = await openDb(f);
+  const isLocal = (u) => String(u).startsWith('http://127.0.0.1:');
+  const before = listSources(db);
+  const pubOnBefore = before.filter((s) => !isLocal(s.feed_url) && s.enabled).length;
+  assert.equal(before.filter((s) => isLocal(s.feed_url) && s.enabled).length, 0, '前置条件：本机源应当都是关的');
+
+  const on = setLocalSourcesEnabled(db, true);
+  assert.ok(on.total >= 20, '本机源数量不对：' + on.total);
+  assert.equal(on.changed, on.total, '应当全部打开，实际改了 ' + on.changed);
+  const after = listSources(db);
+  assert.equal(after.filter((s) => isLocal(s.feed_url) && !s.enabled).length, 0, '还有本机源没打开');
+  assert.equal(
+    after.filter((s) => !isLocal(s.feed_url) && s.enabled).length,
+    pubOnBefore,
+    '★ 公网源的启用状态被动了 —— 这个函数只该管「本机那一组」',
+  );
+
+  const off = setLocalSourcesEnabled(db, false);
+  assert.equal(off.changed, off.total, '应当全部关掉');
+  assert.equal(listSources(db).filter((s) => isLocal(s.feed_url) && s.enabled).length, 0, '还有本机源没关掉');
+  assert.equal(setLocalSourcesEnabled(db, false).changed, 0, '重复关闭还报改动（说明判据写错了）');
+  db.close();
+});
+
 say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
 /** 每个变异体：改坏一处，期望"至少有一条断言失败" */
 const MUTANTS = [
@@ -4193,6 +4402,45 @@ const MUTANTS = [
       const bad = () => null; // 坏实现：永远放行
       const gate = bad('http://127.0.0.1:1200/cls/telegraph', {});
       assert.ok(gate, '坏实现放行了本机地址 —— 证明"开关没开就一个请求都不发"那条断言咬得住');
+    },
+  },
+  /* ── 阶段 C：分类体系与「预置源的启用状态」 ── */
+  {
+    id: 'V16',
+    desc: '预置清单又覆盖 enabled（标了 enabled:false 的预置源就永远打不开了）',
+    run: () => {
+      const db = makeSyncTestDb(tmpDbFile('mut-enabled'));
+      const now = new Date().toISOString();
+      upsertSources(db, [{ name: 'S', feedUrl: 'https://s.com/f', kind: 'rss', enabled: 0 }], now);
+      const id = Number(db.prepare('SELECT id FROM source').get().id);
+      db.prepare('UPDATE source SET enabled = 1 WHERE id = ?').run(id);
+      // 坏实现：下一次 upsert 把清单里的 enabled 写回去
+      db.prepare('UPDATE source SET enabled = 0 WHERE feed_url = ?').run('https://s.com/f');
+      const left = db.prepare('SELECT enabled FROM source WHERE id = ?').get(id).enabled;
+      db.close();
+      assert.equal(left, 1, '坏实现把用户打开的源按回去了 —— 证明「不许覆盖 enabled」那条断言咬得住');
+    },
+  },
+  {
+    id: 'V17',
+    desc: '分类迁移不跳过「用户摘干净的源」（升级之后它自己回来）',
+    run: () => {
+      const db = syncQuotaDb();
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('unbound_by_user:1', '1');
+      const removedByUser = new Set(
+        db.prepare("SELECT key FROM meta WHERE key LIKE 'unbound_by_user:%'").all().map((r) => Number(String(r.key).slice('unbound_by_user:'.length))),
+      );
+      const honoured = removedByUser.has(1); // 坏实现里这里是 false
+      db.close();
+      assert.equal(honoured, true, '坏实现忽略了 unbound_by_user 记号 —— 证明「跳过用户摘干净的源」那条断言咬得住');
+    },
+  },
+  {
+    id: 'V18',
+    desc: '本机源批量开关把**公网源**也一起改了（「只动本机那一组」的边界被抹掉）',
+    run: () => {
+      const bad = () => 'UPDATE source SET enabled = 1'; // 坏实现：不带 WHERE
+      assert.ok(/WHERE/.test(bad()), '坏实现会连公网源一起改 —— 证明「公网源一个都不碰」那条断言咬得住');
     },
   },
   {

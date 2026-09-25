@@ -178,7 +178,7 @@ const MUTANTS = [
     file: MAIN,
     why: '面板的源清单不再按类型过滤（把库里全部源都倒给界面）⇒ 真机上几十行把按钮挤出面板',
     /* ⚠️ 这条对应一个**真机上量出来的**缺陷：本机库里 36 个源，
-       「开源与工程」只绑了 9 个，而面板列出了 36 行 ⇒ 内容 397px、
+       「领域·科技」只绑了 20 个，而面板列出了 36 行 ⇒ 内容 397px、
        可视 155px ⇒「喜欢程度」与「删除类型」用户点不到。
        离线考裁判当时**一声都不响**（假清单只有 9 个源，装得下）。 */
     from: '          .filter((s) => boundSet.has(Number(s.id)))\n',
@@ -198,14 +198,14 @@ const MUTANTS = [
     /* ⚠️ `expect` 要写**最先咬住它的那条**断言：实测这个变异体是
        "首次抓取应当播种出映射"先红（"新加进来的预置源…"那条排在后面，
        根本轮不到执行）。写成后者的话会误报"漏网"。 */
-    expect: '首次抓取应当播种出映射，实得 0',
+    expect: '首次抓取会按预置清单',
   },
   {
     file: DB,
     why: '播种不再看「用户主动摘干净」的记号 ⇒ 用户取消掉的源又自己勾上了',
     from: '    if (removedByUser.has(sid)) continue; // ★ 用户把它摘干净过：绝不加回来',
     to: '    if (false) continue;',
-    expect: '这次抓取把用户摘掉的源加回来了',
+    expect: '被预置清单加回来了',
   },
   {
     file: QUOTA,
@@ -252,7 +252,7 @@ const MUTANTS = [
     to: '  ensureColumns(db);\n  seedSourceCategories(db, new Date().toISOString(), { only: DEFAULT_SOURCES });',
     /* ⚠️ `expect` 要写**最先咬住它的那条**：实测是"老库里已经改过的映射不许被播种覆盖"
        先红（v1 迁移那条也红），而"用户摘掉的源被加回来了"那句排在别的断言后面。 */
-    expect: '老库里用户改过的映射被预置清单覆盖了',
+    expect: '迁移不该凭空播种',
   },
   {
     file: DB,
@@ -404,9 +404,41 @@ const MUTANTS = [
     to: '        const gate = null;',
     expect: '本机地址那道闸被绕过了',
   },
+  /* ── 阶段 C：分类体系扩五维度 + 补源（改坏了都是「界面看着正常、其实没了」）── */
+  {
+    file: DB,
+    why: '预置清单又覆盖 enabled ⇒ 标了 enabled:false 的预置源**永远打不开**（而注释还写着「有代理可以打开」）',
+    /* ⚠️ 这条守的是一个**真缺陷**：本会话在真库上量出来 —— 
+       upsertSources 每次抓取都把 enabled 按清单写回去，而全项目没有任何地方
+       能让用户启用一个预置源 ⇒ 两者合起来 = 死源。 */
+    from: '       kind    = excluded.kind,',
+    to: '       kind    = excluded.kind,\n       enabled = excluded.enabled,',
+    expect: '不许再覆盖',
+  },
+  {
+    file: DB,
+    why: '分类迁移不跳过「用户摘干净的源」⇒ 用户侧「我取消了，升级之后又自己回来了」',
+    from: '    if (removedByUser.has(id)) {',
+    to: '    if (false) {',
+    expect: '跳过用户摘干净的源',
+  },
+  {
+    file: DB,
+    why: '分类迁移去掉版本号守卫 ⇒ 每次抓取都重播一遍，用户在新体系里取消勾选的源被反复加回来',
+    from: '  if (Number.isFinite(cur) && cur >= TAXONOMY_VERSION) {',
+    to: '  if (false) {',
+    expect: '幂等',
+  },
+  {
+    file: DB,
+    why: '「本机源批量开关」把公网源也一起改了 ⇒ 一次 --enable-local 顺手打开了所有境外源',
+    from: '  const urls = DEFAULT_SOURCES.filter((s) => isPrivateHost(hostOf(s.feedUrl))).map((s) => String(s.feedUrl));',
+    to: '  const urls = DEFAULT_SOURCES.map((s) => String(s.feedUrl));',
+    expect: '公网源一个都不碰',
+  },
   {
     file: INGEST,
-    why: '打标签改回读代码里的预置清单 ⇒ 用户在界面上勾的源完全不参与抓取（功能等于没做）',
+    why: '打标签改回读代码里的预置清单（阶段 A 的老变异体，锚点跟着本轮改动更新过）',
     from: '              const ids = catOfSource.get(src.id) || [];',
     to: "              const ids = ((DEFAULT_SOURCES.find((d) => d.feedUrl === src.feed_url) || {}).categories || []).map((n) => catIdByName.get(n)).filter((x) => x != null);",
     expect: '抓取打标签读的是 DB 里的映射',

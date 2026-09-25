@@ -28,14 +28,34 @@ import { TOUTIAO_HOT_API } from './parse-toutiao.js';
 
 /** 预置类别（需求 2：用户自定义固定类别 —— 这是初始值，之后可增删改） */
 export const DEFAULT_CATEGORIES = [
-  'AI 与算力',
-  '开源与工程',
-  '行业动态',
-  '产品与设计',
-  '国际要闻',
-  '安全与隐私',
-  '科学新知',
-  '游戏与娱乐',
+  '领域·时政',
+  '领域·财经',
+  '领域·科技',
+  '领域·文娱',
+  '领域·体育',
+  '领域·民生',
+  '领域·国际',
+  '领域·军事',
+  '领域·教育',
+  '领域·医疗健康',
+  '领域·汽车',
+  '领域·美食',
+  '领域·旅游',
+  '性质·快讯',
+  '性质·深度',
+  '性质·观点',
+  '性质·数据',
+  '性质·实用',
+  '性质·核查',
+  '形态·音频',
+  '时效·硬新闻',
+  '时效·软新闻',
+  '时效·专题',
+  '主体·官方',
+  '主体·主流媒体',
+  '主体·垂直媒体',
+  '主体·通讯社',
+  '主体·UGC',
 ];
 
 /**
@@ -71,25 +91,25 @@ export const DEFAULT_SOURCES = [
   // A. **实测确认为真 feed**（R2 逐个抓取响应体，看到的是 XML/JSON 本身）
   //    —— 这一组是默认启用的主力，覆盖 6 个类别。
   // ==================================================================
-  { name: '量子位', feedUrl: 'https://www.qbitai.com/feed', kind: 'rss', categories: ['AI 与算力'] },
-  { name: 'InfoQ 中文', feedUrl: 'https://www.infoq.cn/feed', kind: 'rss', categories: ['开源与工程'] },
-  { name: 'Solidot', feedUrl: 'https://www.solidot.org/index.rss', kind: 'rss', categories: ['开源与工程', '科学新知'] },
-  { name: '少数派', feedUrl: 'https://sspai.com/feed', kind: 'rss', categories: ['产品与设计'] },
-  { name: 'IT之家', feedUrl: 'https://www.ithome.com/rss/', kind: 'rss', categories: ['行业动态'] },
-  { name: '中新网即时', feedUrl: 'https://www.chinanews.com.cn/rss/scroll-news.xml', kind: 'rss', categories: ['行业动态'] },
-  { name: '钛媒体', feedUrl: 'https://www.tmtpost.com/rss.xml', kind: 'rss', categories: ['行业动态', '产品与设计'] },
-  { name: '华尔街见闻', feedUrl: 'https://dedicated.wallstreetcn.com/rss.xml', kind: 'rss', categories: ['行业动态'] },
-  { name: '雪球', feedUrl: 'https://xueqiu.com/hots/topic/rss', kind: 'rss', categories: ['行业动态'] },
-  { name: 'FreeBuf', feedUrl: 'https://www.freebuf.com/feed', kind: 'rss', categories: ['安全与隐私'] },
-  { name: '安全客', feedUrl: 'https://api.anquanke.com/data/v1/rss', kind: 'rss', categories: ['安全与隐私'] },
-  { name: '游研社', feedUrl: 'https://www.yystv.cn/rss/feed', kind: 'rss', categories: ['游戏与娱乐'] },
-  { name: '机核', feedUrl: 'https://www.gcores.com/rss', kind: 'rss', categories: ['游戏与娱乐'] },
-  { name: '触乐', feedUrl: 'https://www.chuapp.com/feed', kind: 'rss', categories: ['游戏与娱乐'] },
-  { name: '掘金', feedUrl: 'https://juejin.cn/rss', kind: 'rss', categories: ['开源与工程'] },
-  { name: '博客园', feedUrl: 'https://feed.cnblogs.com/blog/sitehome/rss', kind: 'atom', categories: ['开源与工程'] },
-  { name: '阮一峰的网络日志', feedUrl: 'https://www.ruanyifeng.com/blog/atom.xml', kind: 'atom', categories: ['开源与工程'] },
-  { name: '美团技术团队', feedUrl: 'https://tech.meituan.com/feed', kind: 'rss', categories: ['开源与工程'] },
-  { name: 'GitHub Blog', feedUrl: 'https://github.blog/feed/', kind: 'rss', categories: ['开源与工程'] },
+  { name: '量子位', feedUrl: 'https://www.qbitai.com/feed', kind: 'rss', categories: ['领域·科技', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'] },
+  { name: 'InfoQ 中文', feedUrl: 'https://www.infoq.cn/feed', kind: 'rss', categories: ['领域·科技', '性质·深度', '时效·硬新闻', '主体·垂直媒体'] },
+  { name: 'Solidot', feedUrl: 'https://www.solidot.org/index.rss', kind: 'rss', categories: ['领域·科技', '性质·快讯', '主体·UGC'] },
+  { name: '少数派', feedUrl: 'https://sspai.com/feed', kind: 'rss', categories: ['领域·科技', '性质·实用', '时效·软新闻', '主体·垂直媒体'] },
+  { name: 'IT之家', feedUrl: 'https://www.ithome.com/rss/', kind: 'rss', categories: ['领域·科技', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'] },
+  { name: '中新网即时', feedUrl: 'https://www.chinanews.com.cn/rss/scroll-news.xml', kind: 'rss', categories: ['领域·时政', '领域·民生', '领域·国际', '性质·快讯', '时效·硬新闻', '主体·通讯社'] },
+  { name: '钛媒体', feedUrl: 'https://www.tmtpost.com/rss.xml', kind: 'rss', categories: ['领域·财经', '领域·科技', '性质·深度', '主体·垂直媒体'] },
+  { name: '华尔街见闻', feedUrl: 'https://dedicated.wallstreetcn.com/rss.xml', kind: 'rss', categories: ['领域·财经', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'] },
+  { name: '雪球', feedUrl: 'https://xueqiu.com/hots/topic/rss', kind: 'rss', categories: ['领域·财经', '性质·数据', '主体·UGC'] },
+  { name: 'FreeBuf', feedUrl: 'https://www.freebuf.com/feed', kind: 'rss', categories: ['领域·科技', '性质·深度', '主体·垂直媒体'] },
+  { name: '安全客', feedUrl: 'https://api.anquanke.com/data/v1/rss', kind: 'rss', categories: ['领域·科技', '性质·深度', '主体·垂直媒体'] },
+  { name: '游研社', feedUrl: 'https://www.yystv.cn/rss/feed', kind: 'rss', categories: ['领域·文娱', '性质·深度', '时效·软新闻', '主体·垂直媒体'] },
+  { name: '机核', feedUrl: 'https://www.gcores.com/rss', kind: 'rss', categories: ['领域·文娱', '性质·深度', '时效·软新闻', '主体·垂直媒体'] },
+  { name: '触乐', feedUrl: 'https://www.chuapp.com/feed', kind: 'rss', categories: ['领域·文娱', '性质·深度', '时效·软新闻', '主体·垂直媒体'] },
+  { name: '掘金', feedUrl: 'https://juejin.cn/rss', kind: 'rss', categories: ['领域·科技', '性质·实用', '主体·UGC'] },
+  { name: '博客园', feedUrl: 'https://feed.cnblogs.com/blog/sitehome/rss', kind: 'atom', categories: ['领域·科技', '性质·实用', '主体·UGC'] },
+  { name: '阮一峰的网络日志', feedUrl: 'https://www.ruanyifeng.com/blog/atom.xml', kind: 'atom', categories: ['领域·科技', '性质·观点', '时效·软新闻', '主体·UGC'] },
+  { name: '美团技术团队', feedUrl: 'https://tech.meituan.com/feed', kind: 'rss', categories: ['领域·科技', '性质·深度', '主体·官方'] },
+  { name: 'GitHub Blog', feedUrl: 'https://github.blog/feed/', kind: 'rss', categories: ['领域·科技', '性质·快讯', '主体·官方'] },
 
   // ==================================================================
   // B. 曾经写错地址 / 已改成付费或半死 —— **默认关闭**，但写进库让用户看得见
@@ -98,7 +118,7 @@ export const DEFAULT_SOURCES = [
      页面上写着"机器之心数据服务已上线"并留了商务邮箱 ——
      即**官方已经把公开 RSS 撤成了付费/合作制数据服务**，免费 feed 不存在了。
      这不是 URL 写错，是产品决策。⇒ 默认关闭，AI 类内容由量子位承担。 */
-  { name: '机器之心', feedUrl: 'https://www.jiqizhixin.com/rss', kind: 'rss', categories: ['AI 与算力'], enabled: false },
+  { name: '机器之心', feedUrl: 'https://www.jiqizhixin.com/rss', kind: 'rss', categories: ['领域·科技', '性质·深度', '主体·垂直媒体'], enabled: false },
 
   /* ⚠️ 36氪原来在这里（B 组，`enabled: false`）。2026-09-24 挪到下面的 C 组并
      **默认开启** —— 它的地址是对的，返回的是间歇性的反爬页，
@@ -106,10 +126,10 @@ export const DEFAULT_SOURCES = [
      放在 B 组（"地址写错/半死"）与事实不符，会误导下一个人别再试。 */
 
   // 境外源：本机实测 `fetch failed`（DNS/TCP 层不可达）。**有代理就打开。**
-  { name: 'Hacker News', feedUrl: 'https://hnrss.org/frontpage', kind: 'rss', categories: ['开源与工程'], enabled: false },
-  { name: 'Ars Technica', feedUrl: 'https://feeds.arstechnica.com/arstechnica/index', kind: 'rss', categories: ['行业动态'], enabled: false },
-  { name: 'BBC World', feedUrl: 'https://feeds.bbci.co.uk/news/world/rss.xml', kind: 'rss', categories: ['国际要闻'], enabled: false },
-  { name: 'BBC 中文', feedUrl: 'https://feeds.bbci.co.uk/zhongwen/simp/rss.xml', kind: 'rss', categories: ['国际要闻'], enabled: false },
+  { name: 'Hacker News', feedUrl: 'https://hnrss.org/frontpage', kind: 'rss', categories: ['领域·科技', '性质·快讯', '主体·UGC'], enabled: false },
+  { name: 'Ars Technica', feedUrl: 'https://feeds.arstechnica.com/arstechnica/index', kind: 'rss', categories: ['领域·科技', '性质·深度', '主体·垂直媒体'], enabled: false },
+  { name: 'BBC World', feedUrl: 'https://feeds.bbci.co.uk/news/world/rss.xml', kind: 'rss', categories: ['领域·国际', '性质·快讯', '时效·硬新闻', '主体·主流媒体'], enabled: false },
+  { name: 'BBC 中文', feedUrl: 'https://feeds.bbci.co.uk/zhongwen/simp/rss.xml', kind: 'rss', categories: ['领域·国际', '性质·快讯', '时效·硬新闻', '主体·主流媒体'], enabled: false },
 
   /* ==================================================================
    * C. 2026-09-24 实测补入（本轮）：官方 / 可用 feed
@@ -127,7 +147,7 @@ export const DEFAULT_SOURCES = [
     name: '澎湃新闻',
     feedUrl: 'https://rsshub.rssforever.com/thepaper/featured',
     kind: 'rss',
-    categories: ['行业动态', '国际要闻'],
+    categories: ['领域·时政', '领域·国际', '性质·深度', '时效·硬新闻', '主体·主流媒体'],
   },
 
   /* ★ 36氪：官方地址是对的，但**本机实测 4 次全部返回反爬页**（HTTP 200 + HTML）。
@@ -135,7 +155,7 @@ export const DEFAULT_SOURCES = [
      所以留着并**默认开启**：别的网络/别的时段可能就通了，
      而失败了也只是界面上多一个"源异常"，不会污染数据。
      ⚠️ 实测记录：`<!DOCTY...` —— 与 sources.js 里那条历史结论一致（间歇性、非地址错误）。 */
-  { name: '36氪', feedUrl: 'https://36kr.com/feed', kind: 'rss', categories: ['行业动态'] },
+  { name: '36氪', feedUrl: 'https://36kr.com/feed', kind: 'rss', categories: ['领域·财经', '领域·科技', '性质·深度', '主体·垂直媒体'] },
 
   /* ★ 虎嗅：官网有一个**自己的** RSS（`/rss/0.xml`），是全网少数还活着的官方 feed。
      但**本机 4 次全部超时**（与 2026-09-22 那次实测一致）。
@@ -146,7 +166,7 @@ export const DEFAULT_SOURCES = [
     name: '虎嗅',
     feedUrl: 'https://www.huxiu.com/rss/0.xml',
     kind: 'rss',
-    categories: ['行业动态', '产品与设计'],
+    categories: ['领域·财经', '领域·科技', '性质·深度', '性质·观点', '主体·垂直媒体'],
     enabled: false,
   },
 
@@ -200,19 +220,75 @@ export const DEFAULT_SOURCES = [
     name: '今日头条热榜',
     feedUrl: TOUTIAO_HOT_API,
     kind: 'json',
-    categories: ['行业动态'],
+    categories: ['领域·民生', '性质·快讯', '时效·硬新闻', '主体·UGC'],
     enabled: false,
   },
 
   /* —— ① 本机自建 RSSHub（实测数字都记在每条后面）—— */
-  { name: '今日头条热点（本机）', feedUrl: 'http://127.0.0.1:1200/toutiao/channel/news_hot', kind: 'rss', categories: ['行业动态'], enabled: false },
-  { name: '网易新闻今日关注（本机）', feedUrl: 'http://127.0.0.1:1200/163/today', kind: 'rss', categories: ['行业动态', '国际要闻'], enabled: false },
-  { name: '财联社电报（本机）', feedUrl: 'http://127.0.0.1:1200/cls/telegraph', kind: 'rss', categories: ['行业动态'], enabled: false },
-  { name: '新浪财经滚动（本机）', feedUrl: 'http://127.0.0.1:1200/sina/finance/rollnews', kind: 'rss', categories: ['行业动态'], enabled: false },
-  { name: '人民日报电子版（本机）', feedUrl: 'http://127.0.0.1:1200/people/paper', kind: 'rss', categories: ['行业动态', '国际要闻'], enabled: false },
-  { name: '36氪快讯（本机）', feedUrl: 'http://127.0.0.1:1200/36kr/newsflashes', kind: 'rss', categories: ['行业动态'], enabled: false },
-  { name: '虎嗅资讯（本机）', feedUrl: 'http://127.0.0.1:1200/huxiu/article', kind: 'rss', categories: ['行业动态', '产品与设计'], enabled: false },
-  { name: 'ZAKER 精读（本机）', feedUrl: 'http://127.0.0.1:1200/zaker/focusread', kind: 'rss', categories: ['行业动态'], enabled: false },
+  { name: '今日头条热点（本机）', feedUrl: 'http://127.0.0.1:1200/toutiao/channel/news_hot', kind: 'rss', categories: ['领域·时政', '领域·民生', '领域·国际', '性质·快讯', '时效·硬新闻', '主体·UGC'], enabled: false },
+  { name: '网易新闻今日关注（本机）', feedUrl: 'http://127.0.0.1:1200/163/today', kind: 'rss', categories: ['领域·时政', '领域·国际', '性质·快讯', '主体·主流媒体'], enabled: false },
+  { name: '财联社电报（本机）', feedUrl: 'http://127.0.0.1:1200/cls/telegraph', kind: 'rss', categories: ['领域·财经', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'], enabled: false },
+  { name: '新浪财经滚动（本机）', feedUrl: 'http://127.0.0.1:1200/sina/finance/rollnews', kind: 'rss', categories: ['领域·财经', '性质·快讯', '时效·硬新闻', '主体·主流媒体'], enabled: false },
+  { name: '人民日报电子版（本机）', feedUrl: 'http://127.0.0.1:1200/people/paper', kind: 'rss', categories: ['领域·时政', '领域·国际', '性质·深度', '时效·硬新闻', '主体·官方'], enabled: false },
+  { name: '36氪快讯（本机）', feedUrl: 'http://127.0.0.1:1200/36kr/newsflashes', kind: 'rss', categories: ['领域·财经', '领域·科技', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'], enabled: false },
+  { name: '虎嗅资讯（本机）', feedUrl: 'http://127.0.0.1:1200/huxiu/article', kind: 'rss', categories: ['领域·财经', '领域·科技', '性质·深度', '主体·垂直媒体'], enabled: false },
+  { name: 'ZAKER 精读（本机）', feedUrl: 'http://127.0.0.1:1200/zaker/focusread', kind: 'rss', categories: ['领域·时政', '领域·民生', '性质·深度', '时效·软新闻', '主体·主流媒体'], enabled: false },
+
+  /* ==================================================================
+   * E. 阶段 C（2026-09-25）：**按内容领域补齐空档**
+   *
+   * 上一轮把类别扩到 28 个（五维度）之后，"哪些类别**点进去是空的**"变成了
+   * 一个必须回答的问题：一个类别有没有内容，只取决于**有没有源绑给它**。
+   * 当时算下来有 7 个领域一个源都没有（体育/教育/医疗健康/汽车/房产/美食/旅游）。
+   * 这一组就是去补它们 —— 逐个在本机自建 RSSHub 上**实测过**（下表是实测数字）。
+   *
+   * ⚠️ 全部是**本机地址**（http://127.0.0.1:1200/…），因此：
+   *    ① 需要本机跑着 RSSHub（见 HANDOFF-阶段B.md 第 3.7 节）；
+   *    ② 受 MB_ALLOW_LOCAL_FEEDS=1 那道闸管，没开开关时抓取层**根本不发请求**；
+   *    ③ 默认 enabled:false —— 与 D 组同一个理由（不是每个人本机都有 RSSHub）。
+   *
+   * 实测（2026-09-25，本机自建实例，逐个路由真抓）：
+   *   懂球帝头条       200 · 15 条 · 最新当天        虎扑 NBA      200 · 35 条 · 当天
+   *   中华网军事       200 · 100 条 · 最新 09-23     中华网时事    200 · 100 条 · 当天
+   *   观察者网头条     200 · 20 条 · 当天            人民网首页    200 · 16 条 · 当天
+   *   凤凰网资讯       200 · 20 条 · 当天            江苏教育考试院 200 · 20 条 · 09-23
+   *   北京教育考试院   200 · 30 条 · 09-07           健康界        200 · 50 条 · 当天
+   *   电动邦           200 · 25 条 · 09-24           FoodTalks     200 · 15 条 · 09-24
+   *   马蜂窝游记热榜   200 · 10 条 · **没有时间**    澎湃明查      200 · 16 条 · 09-16
+   *   澎湃美数课       200 · 24 条 · **没有时间**    财联社话题    200 · 20 条 · 当天
+   *   观察者网话题     200 · 21 条 · 当天            雪球财经播客  200 · 30 条 · 当天
+   *
+   * ⚠️ 实测**没通过**、因此**没有**加进来的（别浪费时间再试一遍）：
+   *   · /ke/researchResults（贝壳研究院·房产）        503
+   *   · /sina/sports（新浪体育）                      503
+   *   · /hupu/news/:team、/m4/mil（四月网军事）       503
+   *   · /zhibo8/more/nba（直播吧）                    200 但 **23.7 秒**（超过 15 秒抓取超时）
+   *   · /cctv/world（央视新闻）                       200 但 **18.9 秒**（同上）
+   *   · /yicai/feed/669（第一财经）                   200 但最新一条是 **2026-01**（馊的）
+   *   · /caixin/blog/*（财新博客）                    200 但最新一条是 **2024-01**（馊的）
+   *   · /radio/:id（云听）、/apple/podcast（播客）    503
+   *   · /qingting/podcast/293411（蜻蜓FM）            200 但最新是 **2019**（馊的）
+   * ⇒ **房产**因此仍然没有源，所以"领域·房产"这个类别**没有建**（建了就是永远空的）。
+   *   短视频 / 直播 / 交互式三种形态同理：没有可用源，不建。
+   * ================================================================== */
+  { name: '懂球帝头条（本机）', feedUrl: 'http://127.0.0.1:1200/dongqiudi/top_news/1', kind: 'rss', categories: ['领域·体育', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'], enabled: false },
+  { name: '虎扑 NBA（本机）', feedUrl: 'http://127.0.0.1:1200/hupu/nba', kind: 'rss', categories: ['领域·体育', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'], enabled: false },
+  { name: '中华网军事（本机）', feedUrl: 'http://127.0.0.1:1200/china/news/military', kind: 'rss', categories: ['领域·军事', '领域·国际', '性质·快讯', '时效·硬新闻', '主体·主流媒体'], enabled: false },
+  { name: '中华网时事（本机）', feedUrl: 'http://127.0.0.1:1200/china/news', kind: 'rss', categories: ['领域·时政', '性质·快讯', '时效·硬新闻', '主体·主流媒体'], enabled: false },
+  { name: '观察者网头条（本机）', feedUrl: 'http://127.0.0.1:1200/guancha/headline', kind: 'rss', categories: ['领域·时政', '领域·国际', '性质·观点', '时效·硬新闻', '主体·主流媒体'], enabled: false },
+  { name: '人民网头条（本机）', feedUrl: 'http://127.0.0.1:1200/people', kind: 'rss', categories: ['领域·时政', '领域·民生', '性质·快讯', '时效·硬新闻', '主体·官方'], enabled: false },
+  { name: '凤凰网资讯（本机）', feedUrl: 'http://127.0.0.1:1200/ifeng/news', kind: 'rss', categories: ['领域·时政', '领域·国际', '性质·快讯', '时效·硬新闻', '主体·主流媒体'], enabled: false },
+  { name: '江苏教育考试院（本机）', feedUrl: 'http://127.0.0.1:1200/jseea/news/zkyw', kind: 'rss', categories: ['领域·教育', '性质·实用', '主体·官方'], enabled: false },
+  { name: '北京教育考试院（本机）', feedUrl: 'http://127.0.0.1:1200/bjeea/bjeeagg', kind: 'rss', categories: ['领域·教育', '性质·实用', '主体·官方'], enabled: false },
+  { name: '健康界（本机）', feedUrl: 'http://127.0.0.1:1200/cn-healthcare/index', kind: 'rss', categories: ['领域·医疗健康', '性质·深度', '主体·垂直媒体'], enabled: false },
+  { name: '电动邦（本机）', feedUrl: 'http://127.0.0.1:1200/diandong/news', kind: 'rss', categories: ['领域·汽车', '性质·快讯', '主体·垂直媒体'], enabled: false },
+  { name: 'FoodTalks（本机）', feedUrl: 'http://127.0.0.1:1200/foodtalks', kind: 'rss', categories: ['领域·美食', '性质·快讯', '主体·垂直媒体'], enabled: false },
+  { name: '马蜂窝游记热榜（本机）', feedUrl: 'http://127.0.0.1:1200/mafengwo/note/hot', kind: 'rss', categories: ['领域·旅游', '性质·实用', '时效·软新闻', '主体·UGC'], enabled: false },
+  { name: '澎湃明查（本机）', feedUrl: 'http://127.0.0.1:1200/thepaper/factpaper', kind: 'rss', categories: ['性质·核查', '领域·时政', '时效·硬新闻', '主体·主流媒体'], enabled: false },
+  { name: '澎湃美数课（本机）', feedUrl: 'http://127.0.0.1:1200/thepaper/839studio', kind: 'rss', categories: ['性质·数据', '领域·时政', '主体·主流媒体'], enabled: false },
+  { name: '财联社话题（本机）', feedUrl: 'http://127.0.0.1:1200/cls/subject/1103', kind: 'rss', categories: ['时效·专题', '领域·财经', '主体·垂直媒体'], enabled: false },
+  { name: '观察者网话题（本机）', feedUrl: 'http://127.0.0.1:1200/guancha/topic/110/1', kind: 'rss', categories: ['时效·专题', '领域·国际', '主体·主流媒体'], enabled: false },
+  { name: '雪球财经播客（本机）', feedUrl: 'http://127.0.0.1:1200/ximalaya/album/299146', kind: 'rss', categories: ['形态·音频', '领域·财经', '时效·软新闻', '主体·UGC'], enabled: false },
 
   /* ==================================================================
    * 阶段 B0 的实测表（本机自建实例，2026-09-24）——把结论钉在这里，
@@ -246,9 +322,9 @@ export const DEFAULT_SOURCES = [
    * ================================================================== */
 
   // 实测已死 / 抓不到内容（留档，别浪费时间再试）
-  { name: '果壳', feedUrl: 'https://www.guokr.com/rss/', kind: 'rss', categories: ['科学新知'], enabled: false },
-  { name: '知乎日报', feedUrl: 'https://www.zhihu.com/rss', kind: 'rss', categories: ['行业动态'], enabled: false },
-  { name: 'V2EX 最热', feedUrl: 'https://www.v2ex.com/index.xml', kind: 'atom', categories: ['开源与工程'], enabled: false },
+  { name: '果壳', feedUrl: 'https://www.guokr.com/rss/', kind: 'rss', categories: ['领域·科技', '性质·实用', '时效·软新闻', '主体·垂直媒体'], enabled: false },
+  { name: '知乎日报', feedUrl: 'https://www.zhihu.com/rss', kind: 'rss', categories: ['领域·民生', '性质·实用', '时效·软新闻', '主体·UGC'], enabled: false },
+  { name: 'V2EX 最热', feedUrl: 'https://www.v2ex.com/index.xml', kind: 'atom', categories: ['领域·科技', '性质·实用', '主体·UGC'], enabled: false },
 ];
 
 

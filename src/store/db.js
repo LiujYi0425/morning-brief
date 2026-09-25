@@ -30,6 +30,10 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { canonicalizeUrl, dedupeKey } from '../ingest/urls.js';
+/* ⚠️ 又是那个"看着别扭但刻意"的方向（store → main）：feed-url.js 是**零依赖叶子模块**，
+   而"本机 / 内网地址"的**唯一口径**在那里。在 store 里再抄一份 isPrivateHost
+   就是第二份口径 —— 本项目在别处已经为此栽过四次。 */
+import { isPrivateHost } from '../main/feed-url.js';
 /* ★★ 「源 ↔ 类型」的**预置清单**只在这里被读一次，用来**播种**（见 migrate 的说明）。
  *
  * ⚠️ 播种之后**以 DB 为准**，代码里的这份清单不再参与任何决策。
@@ -459,7 +463,29 @@ export function upsertSources(db, sources, nowIso) {
      ON CONFLICT(feed_url) DO UPDATE SET
        name    = excluded.name,
        kind    = excluded.kind,
-       enabled = excluded.enabled,
+       /* ★★ 「enabled」**刻意不在这里更新**（阶段 C 的修复，2026-09-25）。
+        *
+        * ⚠️ 原来这一行是「enabled = excluded.enabled」，后果是两件事，而且都很严重：
+        *   ① 预置清单里的 enabled:false 会**每次抓取都写回库里** ——
+        *      于是那个源**永远打不开**（用户就算有办法改，下次抓取也被抹掉）；
+        *   ② 而全项目**没有任何地方**能让用户启用一个预置源
+        *      （界面里那个勾选框管的是"绑到哪个类型"，不是"抓不抓"）。
+        *   ⇒ 两者合起来 = 标了 enabled:false 的预置源是**死源**：
+        *     注释里写着"有代理的机器可以把它们打开"，而实际上打不开。
+        *
+        * ⇒ 现在的口径与**类型映射**那条完全一致（见本文件 source_category 的说明）：
+        *     代码里的清单是**首次登记时的默认值**，此后 **DB 是唯一真相**。
+        *   · 新源 INSERT  ⇒ 用清单里的默认值；
+        *   · 已有源      ⇒ 保持库里的值（用户 / 一次性命令改过就算数）；
+        *   · 清单里**删掉**的源仍然由下面的退役逻辑停用（那条路是显式的）。
+        *
+        * ⚠️ 别再改回去：那会让"启用一个预置源"这件事在物理上不可能，
+        *    而它的失败形态是"这个功能看起来做了、其实没有"。
+        *
+        * ⚠️⚠️ 这段注释住在**模板字符串里**（它就是这条 SQL 的一部分），
+        *    所以这里**一个反引号都不能有** —— 有的话会提前闭合模板字符串，
+        *    报 SyntaxError: missing ) after argument list，而且位置指得很远。
+        *    （交接文档里记过这个坑，本次又踩了一次。） */
        /* ★ 一个源只要出现在预置清单里，它就是预置源。
           这条 UPDATE 顺手修掉一种历史遗留：老库里可能有行是
           origin='custom'（v3 迁移前的默认值），而它其实来自预置清单。 */
@@ -559,6 +585,128 @@ export function deleteCustomSource(db, sourceId) {
   }
   db.prepare('DELETE FROM source WHERE id = ?').run(id);
   return { ok: true, name: row.name };
+}
+
+/**
+ * 分类体系的版本。**改动 DEFAULT_CATEGORIES 的结构时 +1**，
+ * 迁移据此决定"这一轮要不要把已有源补进新体系"。
+ */
+export const TAXONOMY_VERSION = 2;
+
+/**
+ * 一次性把**已经在库里的预置源**补进新的分类体系（阶段 C）。
+ *
+ * ---------------------------------------------------------------------
+ * 为什么需要它（不写这一步，新加的类别会**永远是空的**）
+ * ---------------------------------------------------------------------
+ * 一个类别有没有内容，只取决于**有没有源绑给它**（见 source_category 的说明）。
+ * 而播种那条路的判据是"**已经有绑定的源，一行都不许动**"（阶段 A 连错五次定下来的，
+ * 为的是不把用户取消掉的源加回来）。升级上来的库里，源**早就都有绑定**了
+ * ⇒ 光是把新类别写进 DEFAULT_CATEGORIES，什么也不会发生。
+ *
+ * ⇒ 这里做一次**显式的、带版本号的一次性迁移**：给每个预置源**追加**它在新体系里的
+ *   绑定。三条纪律，一条都不能破：
+ *     ① **只加不删** —— 不碰任何已有的 source_category 行，也不碰 item_category
+ *        （条目上的标签是抓取那一刻的历史事实，见那两张表的说明）；
+ *     ② **跳过用户主动摘干净的源**（unbound_by_user: 记号）——
+ *        与播种同一条判据，否则"我把它摘干净了，升级之后又自己回来了"；
+ *     ③ **带版本号、只跑一次** —— 否则用户在新体系里取消勾选的源会被反复加回来。
+ *
+ * @param {object} db
+ * @param {string} nowIso
+ * @returns {{ok:boolean, version:number, added:number, skippedByUser:number, skippedUnbound:number, skipped?:string}}
+ */
+export function migrateTaxonomy(db, nowIso) {
+  const cur = Number(getMeta(db, 'taxonomy_version') || 0);
+  if (Number.isFinite(cur) && cur >= TAXONOMY_VERSION) {
+    return { ok: true, version: cur, added: 0, skippedByUser: 0, skippedUnbound: 0, skipped: 'already' };
+  }
+
+  // ① 先把新类登记进 category 表（排序按清单顺序 —— 那决定了 chips 与滑块的次序）
+  DEFAULT_CATEGORIES.forEach((name, i) => upsertCategory(db, name, i, nowIso));
+  const catId = new Map(listCategories(db).map((c) => [String(c.name), Number(c.id)]));
+
+  // ② 用户在界面上**主动摘干净**过的源：一行都不许加回来
+  const removedByUser = new Set(
+    db
+      .prepare("SELECT key FROM meta WHERE key LIKE 'unbound_by_user:%'")
+      .all()
+      .map((r) => Number(String(r.key).slice('unbound_by_user:'.length)))
+      .filter((n) => Number.isFinite(n)),
+  );
+
+  /* ★★ 只补**已经有绑定**的源 —— 这一条是职责分工，不是优化。
+   *
+   * ⚠️ 为什么必须区分（真机上是**变异测试**把它逼出来的）：这个函数和
+   *    seedSourceCategories 都会往 source_category 里写行。若不区分，迁移会把
+   *    **全新库**里所有源一并绑上 —— 于是"播种"那条路**做了什么都看不出来**，
+   *    连"不播种"这种坏实现都抓不住（变异体当场漏网，本轮真实发生过）。
+   * ⇒ 分工：
+   *      · 迁移 = 源**早就播过**了，只是那时只有旧维度的标签（升级路径）
+   *      · 播种 = 源**一条绑定都没有**（新登记的源、升级留下的孤儿）
+   *    判据就是"有没有绑定"，与播种那边"已经有绑定的源一行都不许动"正好互补。 */
+  const boundNow = new Set(
+    db.prepare('SELECT DISTINCT source_id FROM source_category').all().map((r) => Number(r.source_id)),
+  );
+  const srcIdByUrl = new Map(listSources(db).map((s) => [String(s.feed_url), Number(s.id)]));
+  const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
+  let added = 0;
+  let skippedByUser = 0;
+  let skippedUnbound = 0;
+  for (const s of DEFAULT_SOURCES) {
+    const id = srcIdByUrl.get(String(s.feedUrl));
+    if (id == null) continue; // 这个源还没登记进库（第一次抓取时才登记）—— 不归这一轮管
+    if (!boundNow.has(id)) {
+      skippedUnbound += 1; // 交给播种那条路（它才是"从零开始绑"的地方）
+      continue;
+    }
+    if (removedByUser.has(id)) {
+      skippedByUser += 1;
+      continue;
+    }
+    for (const name of s.categories || []) {
+      const cid = catId.get(String(name));
+      if (cid == null) continue;
+      added += Number(ins.run(id, cid).changes || 0);
+    }
+  }
+
+  setMeta(db, 'taxonomy_version', String(TAXONOMY_VERSION));
+  return { ok: true, version: TAXONOMY_VERSION, added, skippedByUser, skippedUnbound };
+}
+
+/**
+ * 把所有**本机地址**的预置源一次性开 / 关（阶段 C）。
+ *
+ * ⚠️ 为什么需要它：那组源（自建 RSSHub）**刻意不做进界面**（理由见 feed-url.js：
+ *    能让程序去打本机端口的开关，应当由"明确知道自己开了什么服务"的用户来打开）。
+ *    而 enabled 在阶段 C 之前是**改不了的**（见 upsertSources 里那段说明）——
+ *    ⇒ 光有清单里的 enabled:false、却没有一条"打开"的路径，
+ *      那组源就是死的，它们撑着的那些类别也就永远是空的。
+ *
+ * ⇒ 给一条**命令行**的口子：npm run ingest -- --enable-local
+ *   与 MB_ALLOW_LOCAL_FEEDS 同一个哲学：这件事由明确知道自己在开什么的人来做。
+ *
+ * @param {object} db
+ * @param {boolean} enabled
+ * @returns {{changed:number, total:number}}
+ */
+export function setLocalSourcesEnabled(db, enabled) {
+  const want = enabled ? 1 : 0;
+  const urls = DEFAULT_SOURCES.filter((s) => isPrivateHost(hostOf(s.feedUrl))).map((s) => String(s.feedUrl));
+  const st = db.prepare('UPDATE source SET enabled = ? WHERE feed_url = ? AND enabled <> ?');
+  let changed = 0;
+  for (const u of urls) changed += Number(st.run(want, u, want).changes || 0);
+  return { changed, total: urls.length };
+}
+
+/** 取 hostname（解析不了就返回空串 ⇒ 不会被当成"本机地址"） */
+function hostOf(url) {
+  try {
+    return new URL(String(url)).hostname;
+  } catch {
+    return '';
+  }
 }
 
 export function listSources(db, onlyEnabled = false) {

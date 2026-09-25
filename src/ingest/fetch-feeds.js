@@ -52,6 +52,9 @@ import {
   tagItem,
   sourceHealth,
   setMeta,
+  /* ★ 阶段 C：分类体系的一次性迁移（见 db.js 里那段说明）——
+     不写这一步，新加的类别会永远是空的。 */
+  migrateTaxonomy,
 } from '../store/db.js';
 import { DEFAULT_SOURCES, DEFAULT_CATEGORIES } from './sources.js';
 
@@ -221,6 +224,23 @@ export async function runIngest(opts) {
       }
       // 预置类别（用户之后可增删改）
       DEFAULT_CATEGORIES.forEach((name, i) => upsertCategory(db, name, i, nowIso));
+      /* ★★ 阶段 C：把**已经在库里**的预置源补进新的分类体系。
+       *
+       * ⚠️ 少了这一步，扩出来的类别会**永远是空的**：升级上来的库里源早就都有绑定，
+       *    而播种那条路"已经有绑定的源一行都不许动"（阶段 A 连错五次定下来的）。
+       *    迁移是**显式的一次性动作**：带版本号、只加不删、跳过被用户摘干净的源。 */
+      try {
+        const tx = migrateTaxonomy(db, nowIso);
+        if (!tx.skipped && tx.added) {
+          log(
+            '分类体系升到 v' + tx.version + '：补了 ' + tx.added + ' 条「源 ↔ 类型」绑定' +
+              (tx.skippedByUser ? '（跳过 ' + tx.skippedByUser + ' 个被用户摘干净的源）' : ''),
+          );
+        }
+      } catch (err) {
+        /* 迁移失败**不许拖垮抓取** —— 它只是把标签补齐，抓取本身照常。 */
+        log('⚠️ 分类体系迁移失败（不影响本次抓取）：' + (err && err.message ? err.message : String(err)));
+      }
 
       /* ★★ 给"标签缺了"的预置源补一次标签（每个源只做一次）。
        *
