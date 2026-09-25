@@ -5,6 +5,7 @@
  *     npm run ingest                # 抓一次
  *     npm run ingest -- --dry       # 只解析不入库（看源通不通）
  *     npm run ingest -- --db <path> # 指定库文件
+ *     npm run ingest -- --migrate        # 只跑分类体系迁移（登记新类 + 补绑定 + 回填历史标签）
  *     npm run ingest -- --enable-local   # 打开「本机 RSSHub」那一组预置源
  *     npm run ingest -- --disable-local  # 再关掉它们
  *
@@ -48,10 +49,23 @@ const dbFile =
 
 const t0 = Date.now();
 const setLocal = argv.includes('--enable-local') ? true : argv.includes('--disable-local') ? false : null;
+const doMigrate = argv.includes('--migrate');
 console.log('晨报机 · 抓取');
 console.log(`库文件：${dbFile}`);
 console.log(`模式  ：${dry ? 'dry-run（只解析，不入库）' : '正常（解析 + 入库）'}`);
 console.log('');
+
+if (doMigrate) {
+  /* 只跑分类体系迁移（不抓任何源）。它是**幂等**的：跑过就跑不出新东西。 */
+  const { openDb, migrateTaxonomy } = await import('../src/store/db.js');
+  const db = await openDb(dbFile);
+  const r0 = migrateTaxonomy(db, new Date().toISOString());
+  db.close();
+  console.log(r0.skipped === 'already'
+    ? '分类体系已经是最新的（v' + r0.version + '），本次什么都没做'
+    : '分类体系升到 v' + r0.version + '：补 ' + r0.added + ' 条源↔类型绑定、回填 ' + r0.backfilled + ' 条历史条目标签');
+  process.exit(0);
+}
 
 if (setLocal !== null) {
   /* 只做一件事：把「本机 RSSHub」那组预置源开 / 关，然后退出。

@@ -4126,7 +4126,14 @@ await aok('★★ 分类体系迁移的三条纪律：只加不删 / 幂等 / �
     removedRows,
     '「领域·文娱」的绑定没有被补回来',
   );
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n, tags0, '★ 迁移改动了 item_category —— 那是抓取那一刻的历史事实，不许回溯改写');
+  /* ★ 回填的边界：条目标签**只增不删**。
+     ⚠️ 这里原来是"条数必须一模一样" —— 那是 v2 的口径，而它在真机上的后果是
+        「新体系几乎空着、旧的行业动态占着全部 906 条历史条目」。
+        现在改成：迁移可以**一次性回填**（见下一条断言），但**一条都不许删**。 */
+  assert.ok(
+    db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n >= tags0,
+    '★ 迁移把已有的条目标签删掉了 —— 回填只许增',
+  );
   assert.ok(db.prepare('SELECT COUNT(*) AS n FROM source_category').get().n >= bound0, '迁移把已有的绑定删掉了（只加不删）');
   assert.ok(db.prepare('SELECT COUNT(*) AS n FROM category').get().n >= cat0, '迁移把类别删掉了');
 
@@ -4139,6 +4146,56 @@ await aok('★★ 分类体系迁移的三条纪律：只加不删 / 幂等 / �
   db.close();
 });
 
+
+await aok('★★ 分类迁移必须把新维度标签**回填到历史条目**上（否则新类别永远是空的）', async () => {
+  /* ⚠️⚠️ 这条是**真机上被用户骂出来的**：v2 只回填了「源 ↔ 类别」，没回填「条目 ↔ 类别」，
+   * 于是升级之后新体系几乎空着（只有升级后新抓的那几条），
+   * 而旧的「行业动态」留着全部历史条目 —— 用户看到的是
+   * 「除了行业动态，别的类型都特别少甚至没有」。 */
+  const f = tmpDbFile('taxonomy-backfill');
+  const fetcher = async () => ({ ok: true, text: GOOD_RSS });
+  await runIngest({ dbFile: f, trigger: 'manual', ensureSources: true, fetcher });
+  const db = await openDb(f);
+  const now = new Date().toISOString();
+
+  /* 造出「迁移之前」的样子：条目上只有**旧体系**的标签（名字里没有「·」） */
+  const oldCat = upsertCategory(db, '行业动态', 99, now);
+  const items = db.prepare('SELECT id FROM item').all();
+  assert.ok(items.length > 0, '前置条件：库里应当有条目');
+  db.prepare('DELETE FROM item_category').run();
+  const insOld = db.prepare('INSERT OR IGNORE INTO item_category (item_id, category_id) VALUES (?, ?)');
+  for (const it of items) insOld.run(Number(it.id), Number(oldCat));
+  const oldTags = db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n;
+  db.prepare("DELETE FROM meta WHERE key = 'taxonomy_version'").run();
+
+  const r = migrateTaxonomy(db, now);
+  assert.ok(
+    r.backfilled > 0,
+    '历史条目一条新维度标签都没补上 —— 新类别会永远是空的（真机上就是这个症状）',
+  );
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM item_category WHERE category_id = ?').get(oldCat).n),
+    oldTags,
+    '★ 回填动了旧体系的标签 —— 回填只许增，不许改也不许删',
+  );
+  const noNew = Number(
+    db
+      .prepare(
+        'SELECT COUNT(*) AS n FROM item WHERE id NOT IN ' +
+          '(SELECT item_id FROM item_category WHERE category_id IN (SELECT id FROM category WHERE name LIKE ?))',
+      )
+      .get('%·%').n,
+  );
+  assert.equal(noNew, 0, '还有 ' + noNew + ' 条条目一条新维度标签都没有');
+
+  /* 幂等：再跑一次，已经打过的不许重复打 */
+  db.prepare("DELETE FROM meta WHERE key = 'taxonomy_version'").run();
+  const tagsBefore = db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n;
+  const r2 = migrateTaxonomy(db, now);
+  assert.equal(r2.backfilled, 0, '第二次回填又打了一遍（判据写错了）');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_category').get().n, tagsBefore);
+  db.close();
+});
 ok('★ 扩出来的每个类别**都要有源撑着**（没源的类别就是「点进去永远空」的类别）', () => {
   /* ⚠️ 这条是这一轮最重要的一条**设计**断言：
    *   一个类别有没有内容，只取决于有没有源绑给它。

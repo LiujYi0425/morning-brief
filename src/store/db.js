@@ -591,7 +591,7 @@ export function deleteCustomSource(db, sourceId) {
  * 分类体系的版本。**改动 DEFAULT_CATEGORIES 的结构时 +1**，
  * 迁移据此决定"这一轮要不要把已有源补进新体系"。
  */
-export const TAXONOMY_VERSION = 2;
+export const TAXONOMY_VERSION = 3;
 
 /**
  * 一次性把**已经在库里的预置源**补进新的分类体系（阶段 C）。
@@ -614,12 +614,12 @@ export const TAXONOMY_VERSION = 2;
  *
  * @param {object} db
  * @param {string} nowIso
- * @returns {{ok:boolean, version:number, added:number, skippedByUser:number, skippedUnbound:number, skipped?:string}}
+ * @returns {{ok:boolean, version:number, added:number, skippedByUser:number, skippedUnbound:number, backfilled:number, skipped?:string}}
  */
 export function migrateTaxonomy(db, nowIso) {
   const cur = Number(getMeta(db, 'taxonomy_version') || 0);
   if (Number.isFinite(cur) && cur >= TAXONOMY_VERSION) {
-    return { ok: true, version: cur, added: 0, skippedByUser: 0, skippedUnbound: 0, skipped: 'already' };
+    return { ok: true, version: cur, added: 0, skippedByUser: 0, skippedUnbound: 0, backfilled: 0, skipped: 'already' };
   }
 
   // ① 先把新类登记进 category 表（排序按清单顺序 —— 那决定了 chips 与滑块的次序）
@@ -671,8 +671,64 @@ export function migrateTaxonomy(db, nowIso) {
     }
   }
 
+  /* ★★ v3：把新维度的标签**回填到历史条目**上。
+   *
+   * ⚠️⚠️ 这一段是**真机上被用户骂出来的**：v2 只回填了「源 ↔ 类别」（source_category），
+   *    没回填「条目 ↔ 类别」（item_category）。后果是升级之后：
+   *      · 新体系里几乎空着（只有升级后新抓的那几条）
+   *      · 而旧的「行业动态」留着**全部历史条目**（真机上 906 条 vs 新类别最多 143）
+   *    用户看到的就是"除了行业动态，别的都特别少甚至没有"。
+   *
+   *    v2 里我写的是"item_category 是历史事实，不许回溯改写" —— **守过头了**。
+   *    项目自己在 v1→v2 那一步就做过一次性回填（见上面 source_category_backfill 那段），
+   *    口径是：**结构迁移那一次可以回填，平时的用户改动绝不回填**。
+   *    这两件事必须分清，否则"重构分类"这个动作本身就是做不到的。
+   *
+   * ⚠️ 三条边界，一条都不能越：
+   *   ① **只增不改不删** —— 一条已有的 item_category 行都不动；
+   *   ② 只回填**一条新维度标签都没有**的条目（已经打过的绝不重复打，也不会被改写）；
+   *   ③ 只回填**新维度**的类别（带「·」前缀的那些），旧的 8 个类别不再往条目上加。 */
+  let backfilled = 0;
+  if (cur < 3) {
+    const newIds = listCategories(db)
+      .filter((c) => String(c.name).includes('·'))
+      .map((c) => Number(c.id));
+    if (newIds.length) {
+      const ph = newIds.map(() => '?').join(',');
+      const pairs = db
+        .prepare(
+          'SELECT i.id AS item_id, sc.category_id AS category_id ' +
+            'FROM item i JOIN source_category sc ON sc.source_id = i.source_id ' +
+            'WHERE sc.category_id IN (' + ph + ')',
+        )
+        .all(...newIds);
+      const hasNew = new Set(
+        db
+          .prepare('SELECT DISTINCT item_id FROM item_category WHERE category_id IN (' + ph + ')')
+          .all(...newIds)
+          .map((r) => Number(r.item_id)),
+      );
+      const insTag = db.prepare('INSERT OR IGNORE INTO item_category (item_id, category_id) VALUES (?, ?)');
+      db.exec('BEGIN');
+      try {
+        for (const p of pairs) {
+          if (hasNew.has(Number(p.item_id))) continue;
+          backfilled += Number(insTag.run(Number(p.item_id), Number(p.category_id)).changes || 0);
+        }
+        db.exec('COMMIT');
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK');
+        } catch {
+          /* 已经回滚过了 */
+        }
+        throw err;
+      }
+    }
+  }
+
   setMeta(db, 'taxonomy_version', String(TAXONOMY_VERSION));
-  return { ok: true, version: TAXONOMY_VERSION, added, skippedByUser, skippedUnbound };
+  return { ok: true, version: TAXONOMY_VERSION, added, skippedByUser, skippedUnbound, backfilled };
 }
 
 /**

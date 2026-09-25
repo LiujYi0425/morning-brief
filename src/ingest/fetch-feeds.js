@@ -231,9 +231,10 @@ export async function runIngest(opts) {
        *    迁移是**显式的一次性动作**：带版本号、只加不删、跳过被用户摘干净的源。 */
       try {
         const tx = migrateTaxonomy(db, nowIso);
-        if (!tx.skipped && tx.added) {
+        if (!tx.skipped && (tx.added || tx.backfilled)) {
           log(
             '分类体系升到 v' + tx.version + '：补了 ' + tx.added + ' 条「源 ↔ 类型」绑定' +
+              (tx.backfilled ? '、给 ' + tx.backfilled + ' 条历史条目补上了新维度标签' : '') +
               (tx.skippedByUser ? '（跳过 ' + tx.skippedByUser + ' 个被用户摘干净的源）' : ''),
           );
         }
