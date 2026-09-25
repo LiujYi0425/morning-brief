@@ -81,7 +81,7 @@ import {
   setLocalSourcesEnabled,
   TAXONOMY_VERSION,
 } from '../src/store/db.js';
-import { DEFAULT_CATEGORIES, DEFAULT_SOURCES } from '../src/ingest/sources.js';
+import { DEFAULT_CATEGORIES, DEFAULT_SOURCES, LOCAL_ONLY_CATEGORIES, isLocalOnlyCategory } from '../src/ingest/sources.js';
 import { runIngest, shouldRunNow, explainFetchFailure } from '../src/ingest/fetch-feeds.js';
 import {
   nextRunAt,
@@ -4215,7 +4215,7 @@ ok('★ 扩出来的每个类别**都要有源撑着**（没源的类别就是�
   assert.equal(new Set(DEFAULT_CATEGORIES).size, DEFAULT_CATEGORIES.length, '预置类别里有重名');
 });
 
-ok('★★ 全新用户不该看到「点进去永远空」的类别（只许剩下的 6 个已知例外）', () => {
+ok('★★ 全新用户不该看到「点进去永远空」的类别（本机专属的那几个不算）', () => {
   /* ⚠️ 这条是**从"能不能发给别人用"这个角度**加的。
    *
    * 背景：阶段 C 把类别扩到 28 个，但撑其中 10 个的源全在本机 RSSHub 上、默认关闭
@@ -4227,23 +4227,26 @@ ok('★★ 全新用户不该看到「点进去永远空」的类别（只许剩
    *   新华网 300 条但零时间、人民网整站 RSS 已馊、垂直站都没有对外 RSS），
    *   详见 sources.js 的 F 组说明。
    *
-   * ⇒ 这里把这 6 个**钉成显式清单**：以后谁再新增一个「新用户填不满」的类别，
-   *   这条当场红，逼他回答"那别人拿到手点什么"。 */
+   * ⇒ 这里把口径钉死：**新用户能看到的类别，必须条条都有源撑着**。
+   *   本机专属的那几个不在「新用户能看到」之列（LOCAL_ONLY_CATEGORIES），
+   *   它们由 ensureLocalCategories 在本机源被启用时才登记 ——
+   *   以后谁再新增一个「新用户填不满」的类别，这条当场红，
+   *   逼他回答「那别人拿到手点什么」。 */
   const on = DEFAULT_SOURCES.filter((s) => s.enabled !== false);
   const used = new Set();
   for (const s of on) for (const c of s.categories || []) used.add(c);
-  const empty = DEFAULT_CATEGORIES.filter((c) => !used.has(c));
-  const KNOWN = ['领域·军事', '领域·汽车', '领域·旅游', '性质·核查', '形态·音频', '时效·专题'];
-  assert.deepEqual(
-    empty.slice().sort(),
-    KNOWN.slice().sort(),
-    '新用户会看到空的类别变了（多出来的那些在公网上没有源 —— 先看 sources.js 的 F 组说明）',
-  );
-  /* 反向：这 6 个必须**真的有源绑着**（只是默认关闭），否则它们连"以后打开就有内容"都做不到 */
+  /* ★ 用户拍板的做法：公网源撑得起来的类别照建；**本机专属的那几个不建给新用户**
+     （等本机源真的被启用时才登记，见 db.js 的 ensureLocalCategories）。 */
+  const empty = DEFAULT_CATEGORIES.filter((c) => !isLocalOnlyCategory(c) && !used.has(c));
+  assert.deepEqual(empty, [], '新用户会看到这些永远空的类别：' + empty.join(' / '));
+  /* 反向：本机专属的那几个必须**真的有源绑着**（只是那些源在本机、默认关闭），
+     否则它们连「以后打开就有内容」都做不到 —— 那就不是「暂缓」，是「永远空」。 */
   const all = new Set();
   for (const s of DEFAULT_SOURCES) for (const c of s.categories || []) all.add(c);
-  for (const name of KNOWN) {
-    assert.ok(all.has(name), name + ' 一个源都没绑 —— 那它不只是"新用户空"，是永远空');
+  assert.equal(LOCAL_ONLY_CATEGORIES.length, 6, '本机专属名单变了 —— 它是实测结论，改之前先看 sources.js');
+  for (const name of LOCAL_ONLY_CATEGORIES) {
+    assert.ok(all.has(name), name + ' 一个源都没绑 —— 那它不只是「新用户空」，是永远空');
+    assert.ok(!used.has(name), name + ' 其实有默认打开的源撑着 ⇒ 它不该留在「本机专属」名单里');
   }
 });
 
@@ -4289,6 +4292,56 @@ await aok('★ setLocalSourcesEnabled：只动本机那一组，公网源一个�
   db.close();
 });
 
+await aok('★★ 本机专属的那 6 个类别：新库不建，开了本机源才登记', async () => {
+  /* ⚠️⚠️ 这条断言守的是「**能不能发给别人用**」。
+   *
+   * 背景：阶段 C 把类别扩到 28 个，但撑其中 10 个的源全在本机 RSSHub 上、默认关闭。
+   *   而「一个类别有没有内容，只取决于有没有源绑给它」
+   *   ⇒ 全新用户装完之后会看到 10 个点进去永远空的 chip。
+   *   后来补了 8 条公网源（把 10 压到 6），剩下的 6 个**公网上确实没有可用源**
+   *   （约 90 个候选逐个实测，见 sources.js 的 LOCAL_ONLY_CATEGORIES）。
+   * ⇒ 用户拍板：这 6 个**不建给新用户**，等本机源被启用时再登记。
+   *
+   * 两个方向都要管：
+   *   ① 新库里**不许**出现它们（否则就是「看起来像 bug」的空 chip）；
+   *   ② 开了本机源之后**必须**补出来、并绑到**启用着的**源上
+   *      （否则这 6 个就成了「永远不存在」，比空 chip 更糟）。 */
+  const f = tmpDbFile('local-only-cats');
+  const fetcher = async () => ({ ok: true, text: GOOD_RSS });
+  await runIngest({ dbFile: f, trigger: 'manual', ensureSources: true, fetcher });
+  const db = await openDb(f);
+  const names = () => listCategories(db).map((c) => String(c.name));
+
+  for (const n of LOCAL_ONLY_CATEGORIES) {
+    assert.ok(!names().includes(n), '新库里不该有「' + n + '」—— 撑它的源全在本机、默认关闭');
+  }
+  assert.equal(
+    listCategories(db).length,
+    DEFAULT_CATEGORIES.length - LOCAL_ONLY_CATEGORIES.length,
+    '新库登记出来的类别数不对（多了就是给新用户空 chip）',
+  );
+
+  const on = setLocalSourcesEnabled(db, true);
+  assert.equal(on.categoriesCreated, LOCAL_ONLY_CATEGORIES.length, '开了本机源却没把这 6 个类别补出来');
+  assert.ok(on.categoriesBound > 0, '类别建出来了却一条绑定都没有 ⇒ 点进去还是空的');
+  const enabledBound = db.prepare(
+    'SELECT COUNT(*) AS n FROM source_category sc JOIN source s ON s.id = sc.source_id ' +
+      'WHERE sc.category_id = ? AND s.enabled = 1',
+  );
+  for (const n of LOCAL_ONLY_CATEGORIES) {
+    assert.ok(names().includes(n), '开了本机源之后「' + n + '」还是不存在 —— 它成了永远不存在的类别');
+    const cid = db.prepare('SELECT id FROM category WHERE name = ?').get(n).id;
+    assert.ok(Number(enabledBound.get(cid).n) > 0, '「' + n + '」绑的全是关着的源 ⇒ 点进去还是空的');
+  }
+
+  /* 幂等：再开一次不许重复建。关掉**不删**类别与绑定（只加不删）。 */
+  assert.equal(setLocalSourcesEnabled(db, true).categoriesCreated, 0, '重复打开又建了一遍类别');
+  setLocalSourcesEnabled(db, false);
+  for (const n of LOCAL_ONLY_CATEGORIES) {
+    assert.ok(names().includes(n), '关掉本机源就把类别删了 —— 那是「只加不删」的反面');
+  }
+  db.close();
+});
 
 /* ==================================================================
  * 第十九层 · 刷新按钮不许**永久变灰**（一次 ReferenceError 就够）

@@ -55,8 +55,11 @@ import {
   /* ★ 阶段 C：分类体系的一次性迁移（见 db.js 里那段说明）——
      不写这一步，新加的类别会永远是空的。 */
   migrateTaxonomy,
+  /* ★ 阶段 D：预置类别的登记 —— 本机专属的那几个**按需**建（见 db.js） */
+  ensurePresetCategories,
+  localOnlyCategoriesWanted,
 } from '../store/db.js';
-import { DEFAULT_SOURCES, DEFAULT_CATEGORIES } from './sources.js';
+import { DEFAULT_SOURCES } from './sources.js';
 
 const FETCH_TIMEOUT_MS = 15000;
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -223,7 +226,7 @@ export async function runIngest(opts) {
         }
       }
       // 预置类别（用户之后可增删改）
-      DEFAULT_CATEGORIES.forEach((name, i) => upsertCategory(db, name, i, nowIso));
+      ensurePresetCategories(db, nowIso, localOnlyCategoriesWanted(db, DEFAULT_SOURCES));
       /* ★★ 阶段 C：把**已经在库里**的预置源补进新的分类体系。
        *
        * ⚠️ 少了这一步，扩出来的类别会**永远是空的**：升级上来的库里源早就都有绑定，

@@ -475,7 +475,21 @@ const MUTANTS = [
     to: "              const ids = ((DEFAULT_SOURCES.find((d) => d.feedUrl === src.feed_url) || {}).categories || []).map((n) => catIdByName.get(n)).filter((x) => x != null);",
     expect: '抓取打标签读的是 DB 里的映射',
   },
-]
+  /* ── 阶段 D：本机专属类别**按需**登记（改坏了就是「新用户看到空 chip」或「类别根本不存在」）── */
+  {
+    file: DB,
+    why: '本机专属的那几个类别又无条件登记 ⇒ 全新用户重新看到「点进去永远空」的 chip（公网上没有源撑得住）',
+    from: '    if (!includeLocalOnly && isLocalOnlyCategory(name)) return;',
+    to: '    if (false) return;',
+    expect: '本机专属的那 6 个类别',
+  },
+  {
+    file: DB,
+    why: '开了本机源却不登记本机专属类别 ⇒ 用户抓回来一堆条目，筛选栏里连这个类别都没有',
+    from: '  const cats = enabled ? ensureLocalCategories(db, nowIso) : { created: 0, added: 0 };',
+    to: '  const cats = { created: 0, added: 0 };',
+    expect: '本机专属的那 6 个类别',
+  },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。
  *
@@ -502,6 +516,9 @@ const readOrig = (rel) => {
 }
 
 let allCaught = true
+/* 子进程的输出落在这个文件里（见下面「不能走管道」那段说明） */
+const CHILD_LOG = path.join(os.tmpdir(), 'mb-mutant-child.log')
+
 for (const m of MUTANTS) {
   const original = readOrig(m.file)
   const abs = path.join(ROOT, m.file)
@@ -526,14 +543,34 @@ for (const m of MUTANTS) {
   fs.writeFileSync(SENTINEL, JSON.stringify({ file: m.file, files: { [m.file]: original } }), 'utf8')
   fs.writeFileSync(abs, replaceLiteral(original, m.from, m.to), 'utf8')
   let out = ''
+  let spawnErr = ''
+  let childFd = null
   try {
+    /* ⚠️⚠️ 子进程的输出**必须走文件描述符，不能走管道**（这一条是实测撞出来的）。
+     *
+     * `stdio` 的缺省值是 'pipe'，而在带文件沙箱的环境里创建管道会被拒：
+     *   spawnSync 返回 status === null / error.code === 'EPERM' / stdout === undefined
+     * ⇒ 输出永远是空的 ⇒ **每一个**变异体都被判成「测试根本没跑起来」。
+     *   44 个变异体一起报「无效」，看着像自己的锚点全写错了，
+     *   而真相是子进程压根没起来 —— 这个误导性极大，所以在这里写死。
+     * 文件描述符没有这个限制，顺带也不再需要 maxBuffer（大输出不会被截断）。 */
+    childFd = fs.openSync(CHILD_LOG, 'w')
     const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'test-all.mjs')], {
-      cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      cwd: ROOT, stdio: ['ignore', childFd, childFd],
     })
-    out = (r.stdout || '') + (r.stderr || '')
+    if (r.error) spawnErr = String(r.error.code || r.error.message || r.error)
+    out = fs.readFileSync(CHILD_LOG, 'utf8')
   } finally {
+    if (childFd !== null) fs.closeSync(childFd)
     fs.writeFileSync(abs, original, 'utf8')
     fs.rmSync(SENTINEL, { force: true })
+  }
+  /* ★ 子进程**起不来**与「测试跑了但没结论」是两件事，绝不能混成一句
+     —— 混了的话，环境问题会被读成「我的断言全废了」。 */
+  if (spawnErr) {
+    console.log(`\n✗✗✗ 子进程起不来（${spawnErr}）—— 这个环境跑不了变异测试，别再往下看了`)
+    console.log('   （沙箱拒绝创建管道时会这样；把 stdio 换成文件描述符即可，见上面那段注释）')
+    process.exit(1)
   }
   const ranAtAll = /结论：/.test(out)
   const failed = /结论：❌ FAIL/.test(out)

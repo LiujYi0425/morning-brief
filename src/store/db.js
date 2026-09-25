@@ -43,7 +43,7 @@ import { isPrivateHost } from '../main/feed-url.js';
  *
  * ⚠️ 方向是 db → ingest（而不是反过来）：ingest 不许反向依赖 db 的判断，
  *    否则"谁说了算"又要靠约定维持，而约定会腐烂。 */
-import { DEFAULT_SOURCES, DEFAULT_CATEGORIES } from '../ingest/sources.js';
+import { DEFAULT_SOURCES, DEFAULT_CATEGORIES, isLocalOnlyCategory } from '../ingest/sources.js';
 
 /** schema 版本。改结构时 +1，并在 migrate() 里加一段 —— 否则老库会静默少字段 */
 export const SCHEMA_VERSION = 3;
@@ -321,6 +321,95 @@ function migrate(db, from) {
 }
 
 /**
+ * 登记预置类别（幂等）。
+ *
+ * @param {boolean} includeLocalOnly 要不要连「只有本机源撑得起来」的那几个也建出来。
+ *   ⚠️ 缺省 **false** —— 建了就是给全新用户一个点进去永远是空的 chip
+ *      （见 sources.js 的 LOCAL_ONLY_CATEGORIES 说明）。
+ * @returns {number} 这次**新登记**了几个（已存在的不算）
+ */
+export function ensurePresetCategories(db, nowIso, includeLocalOnly = false) {
+  let created = 0;
+  DEFAULT_CATEGORIES.forEach((name, i) => {
+    if (!includeLocalOnly && isLocalOnlyCategory(name)) return;
+    const existed = db.prepare('SELECT 1 FROM category WHERE name = ?').get(name) != null;
+    upsertCategory(db, name, i, nowIso);
+    if (!existed) created += 1;
+  });
+  return created;
+}
+
+/**
+ * 「这一批源里，有没有**启用着的**源撑着本机专属类别」。
+ *
+ * 判据刻意是**库里的启用状态**，而不是「清单里有没有」：
+ * 类别是给用户点的，一个默认关闭的源不会给它带来任何内容
+ * （见 LOCAL_ONLY_CATEGORIES 说明）。
+ */
+export function localOnlyCategoriesWanted(db, pool) {
+  const byUrl = new Map(listSources(db).map((s) => [String(s.feed_url), s]));
+  for (const s of pool || []) {
+    const row = byUrl.get(String(s.feedUrl));
+    if (!row || !row.enabled) continue;
+    for (const c of s.categories || []) if (isLocalOnlyCategory(c)) return true;
+  }
+  return false;
+}
+
+/**
+ * ★★ 把「本机专属类别」按需登记出来，并绑给**已经启用**的那些本机源。
+ *
+ * 由 setLocalSourcesEnabled(db, true) 调用 —— 也就是用户明确说
+ * 「我要用本机 RSSHub 了」的那一刻。在此之前这些类别根本不存在，
+ * 所以全新用户不会看到那几个永远空的 chip。
+ *
+ * 三条纪律（与播种 / 迁移完全一致，破坏任何一条都会变成「两份口径」）：
+ *   ① **只加不删** —— 关闭本机源不删类别、不删绑定（用户可能只是临时关掉）；
+ *   ② **跳过用户主动摘干净的源**（unbound_by_user: 记号）；
+ *   ③ **幂等** —— 反复开关不会重复建、不会重复绑。
+ *
+ * @returns {{created:number, added:number}}
+ */
+export function ensureLocalCategories(db, nowIso) {
+  const byUrl = new Map(listSources(db).map((s) => [String(s.feed_url), s]));
+  const removedByUser = new Set(
+    db
+      .prepare("SELECT key FROM meta WHERE key LIKE 'unbound_by_user:%'")
+      .all()
+      .map((r) => Number(String(r.key).slice('unbound_by_user:'.length)))
+      .filter((n) => Number.isFinite(n)),
+  );
+  /* 要建哪几个类别、各绑给谁 —— 只认**启用着的**源 */
+  const want = new Map();
+  for (const s of DEFAULT_SOURCES) {
+    const row = byUrl.get(String(s.feedUrl));
+    if (!row || !row.enabled) continue;
+    const id = Number(row.id);
+    if (removedByUser.has(id)) continue;
+    for (const name of s.categories || []) {
+      if (!isLocalOnlyCategory(name)) continue;
+      if (!want.has(name)) want.set(name, new Set());
+      want.get(name).add(id);
+    }
+  }
+  const catId = new Map(listCategories(db).map((c) => [String(c.name), Number(c.id)]));
+  const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
+  let created = 0;
+  let added = 0;
+  for (const [name, ids] of want) {
+    let cid = catId.get(name);
+    if (cid == null) {
+      const i = DEFAULT_CATEGORIES.indexOf(name);
+      cid = Number(upsertCategory(db, name, i < 0 ? 99 : i, nowIso));
+      catId.set(name, cid);
+      created += 1;
+    }
+    for (const id of ids) added += Number(ins.run(id, cid).changes || 0);
+  }
+  return { created, added };
+}
+
+/**
  * 用代码里的预置清单**播种**「源 ↔ 类型」映射。
  *
  * ⚠️⚠️ 三条口径，缺一条这个功能就会变成"改了不生效"或"改了被覆盖"：
@@ -378,9 +467,8 @@ export function seedSourceCategories(db, nowIso, opts = {}) {
 
   /* 预置类别也一并登记（新库第一次打开时类别表是空的，
      而映射的种子依赖类别名 → id；不先建类别，种子会全部落空）。 */
-  DEFAULT_CATEGORIES.forEach((name, i) => {
-    if (!cats.has(name)) cats.set(name, upsertCategory(db, name, i, nowIso));
-  });
+  ensurePresetCategories(db, nowIso, localOnlyCategoriesWanted(db, pool));
+  for (const c of listCategories(db)) cats.set(String(c.name), Number(c.id));
 
   const srcIds = new Map();
   for (const s of listSources(db)) srcIds.set(s.feed_url, s.id);
@@ -623,7 +711,7 @@ export function migrateTaxonomy(db, nowIso) {
   }
 
   // ① 先把新类登记进 category 表（排序按清单顺序 —— 那决定了 chips 与滑块的次序）
-  DEFAULT_CATEGORIES.forEach((name, i) => upsertCategory(db, name, i, nowIso));
+  ensurePresetCategories(db, nowIso, localOnlyCategoriesWanted(db, DEFAULT_SOURCES));
   const catId = new Map(listCategories(db).map((c) => [String(c.name), Number(c.id)]));
 
   // ② 用户在界面上**主动摘干净**过的源：一行都不许加回来
@@ -745,15 +833,20 @@ export function migrateTaxonomy(db, nowIso) {
  *
  * @param {object} db
  * @param {boolean} enabled
- * @returns {{changed:number, total:number}}
+ * @param {string} [nowIso]
+ * @returns {{changed:number, total:number, categoriesCreated:number, categoriesBound:number}}
  */
-export function setLocalSourcesEnabled(db, enabled) {
+export function setLocalSourcesEnabled(db, enabled, nowIso = new Date().toISOString()) {
   const want = enabled ? 1 : 0;
   const urls = DEFAULT_SOURCES.filter((s) => isPrivateHost(hostOf(s.feedUrl))).map((s) => String(s.feedUrl));
   const st = db.prepare('UPDATE source SET enabled = ? WHERE feed_url = ? AND enabled <> ?');
   let changed = 0;
   for (const u of urls) changed += Number(st.run(want, u, want).changes || 0);
-  return { changed, total: urls.length };
+  /* ★★ 打开了本机源 ⇒ **现在**才登记「本机专属类别」并把源绑上去。
+     ⚠️ 这一步不能省：全新库里那几个类别根本不存在（见 ensureLocalCategories），
+        少了它，用户开了本机源、抓回来一堆条目，筛选栏里却**连类别都没有**。 */
+  const cats = enabled ? ensureLocalCategories(db, nowIso) : { created: 0, added: 0 };
+  return { changed, total: urls.length, categoriesCreated: cats.created, categoriesBound: cats.added };
 }
 
 /** 取 hostname（解析不了就返回空串 ⇒ 不会被当成"本机地址"） */
