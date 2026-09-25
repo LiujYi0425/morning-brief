@@ -63,6 +63,16 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const SCAN_DIRS = ['.', 'docs', 'agents'];
 const SKIP_PREFIX = '_';
+/* ★ 本地交接文档（HANDOFF*）**不进文档治理体系** —— 它们不是 SSOT 的一部分：
+ *   它们是「发给下一个会话」的临时上下文，登记在 .gitignore 里（那三行就是登记处），
+ *   本来就**不该**有 doc_id/version，也不该出现在 §6 同步矩阵里。
+ *
+ * ⚠️ 但校验器原来只豁免 `_` 前缀与 README.md，于是这三份文件每次都被判成
+ *   「缺少元数据块（文件必须以 --- 开头）」⇒ **门禁长期是红的**，
+ *   而 README 里写着「同步校验全部通过」。**闸门红着没人看，等于没有闸门。**
+ *   修法：让扫描器的豁免与 .gitignore 的那份登记**同一个口径**（按前缀认），
+ *   以后新加 HANDOFF-阶段X.md 不必再改这里。 */
+const SKIP_FILES = /^HANDOFF(-|\.|$)/;
 const MASTER_PLAN = '项目计划工程书.md';
 const REGISTRY = 'agents/registry.json';
 
@@ -171,6 +181,7 @@ function collectMarkdown(dir) {
     if (!name.endsWith('.md')) continue;
     if (name.startsWith(SKIP_PREFIX)) continue; // 模板文件不参与校验
     if (dir === '.' && name === 'README.md') continue;
+    if (dir === '.' && SKIP_FILES.test(name)) continue; // 本地交接文档，见上方 SKIP_FILES 说明
     out.push(full);
   }
   return out;
