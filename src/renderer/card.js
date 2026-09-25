@@ -158,7 +158,21 @@
     var level = h.bad > 0 ? 'warn' : 'ok';
     if (h.bad >= h.total) level = 'bad';
     elHealth.setAttribute('data-level', level);
-    elHealthText.textContent = h.bad > 0 ? h.ok + '/' + h.total + ' 正常' : h.total + ' 源';
+    /* ★ 把「从未抓过」和「异常」分开说（阶段 C）。
+       ⚠️ 原来只说 `ok/total 正常`：用户看到「21/47 正常」会读成
+          "只有 21 个源有用"，而真相是**一条都没坏**，只是那 26 条本机源
+          还没被跑过（刷新是按当前类型范围的）。
+          诊断指错方向比没有诊断更糟 —— 这句文案就是那个"方向"。 */
+    var neverN = Number(h.never) || 0;
+    var badN = Number(h.bad) || 0;
+    if (!badN && !neverN) {
+      elHealthText.textContent = h.total + ' 源';
+    } else {
+      var bits = [h.ok + ' 正常'];
+      if (badN) bits.push(badN + ' 异常');
+      if (neverN) bits.push(neverN + ' 未跑');
+      elHealthText.textContent = bits.join(' · ');
+    }
     elHealth.title =
       '正常 ' + h.ok + ' 个 · 异常 ' + h.bad + ' 个 · 从未抓过 ' + h.never + ' 个' +
       (d.lastIngestAt ? '\n上次抓取：' + relTime(d.lastIngestAt) : '\n尚未抓取过');

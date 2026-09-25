@@ -31,6 +31,41 @@ if (!fs.existsSync(exe)) {
   process.exit(1)
 }
 
+/* ★★ 版本号守卫（阶段 C 补丁）：这个版本**已经发过**就不许再生成清单。
+ *
+ * ⚠️ 真机上的隐患：`npm run dist` 不会动 package.json 的 version，
+ *    所以「改了代码 → 直接 dist → release」会用**同一个版本号**再打一份，
+ *    而装了那个版本的人比较版本号时会判「已是最新」⇒ **永远收不到这次的东西**；
+ *    更糟的是安装包换了、sha256 变了，而清单里的版本号没变，两边对不上。
+ *
+ * ⇒ 在生成清单**之前**查一下本地 tag：`v<version>` 已经存在就红着脸退出。
+ *    为什么用本地 tag 当判据：发版流程的最后一步就是
+ *    `git tag -a v<version>`（本脚本自己打印的那两条命令），所以它是最可靠的信号，
+ *    而且**只用 fs 读 .git**，不需要起 git 子进程。
+ *
+ * ⚠️ 确实要重发同一个版本（上一次传坏了）：加 `--force` 跳过这道闸。
+ */
+function tagExistsLocally(v) {
+  const name = 'v' + v;
+  if (fs.existsSync(path.join(ROOT, '.git', 'refs', 'tags', name))) return true;
+  try {
+    const packed = fs.readFileSync(path.join(ROOT, '.git', 'packed-refs'), 'utf8');
+    return packed.split('\n').some((l) => l.trim().endsWith('refs/tags/' + name));
+  } catch {
+    return false;
+  }
+}
+if (!process.argv.includes('--force') && tagExistsLocally(version)) {
+  console.error(
+    `\n✗ v${version} 这个版本**已经发布过**了（本地有 tag v${version}）。\n` +
+      `  同一个版本号再发一次，装了它的机器比版本号时会判「已是最新」，永远收不到这次的内容。\n\n` +
+      `  正确做法：把 package.json 的 version 改成新版本（比如 ${version.split('.').slice(0, 2).join('.')}.` +
+      `${Number(version.split('.')[2] || 0) + 1}），再跑一次 npm run dist 和本命令。\n` +
+      `  确实要重发同一版：加 --force。\n`,
+  );
+  process.exit(1);
+}
+
 const buf = fs.readFileSync(exe)
 const sha256 = crypto.createHash('sha256').update(buf).digest('hex')
 const size = buf.length

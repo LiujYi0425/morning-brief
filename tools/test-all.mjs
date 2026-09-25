@@ -4215,6 +4215,38 @@ ok('★ 扩出来的每个类别**都要有源撑着**（没源的类别就是�
   assert.equal(new Set(DEFAULT_CATEGORIES).size, DEFAULT_CATEGORIES.length, '预置类别里有重名');
 });
 
+ok('★★ 全新用户不该看到「点进去永远空」的类别（只许剩下的 6 个已知例外）', () => {
+  /* ⚠️ 这条是**从"能不能发给别人用"这个角度**加的。
+   *
+   * 背景：阶段 C 把类别扩到 28 个，但撑其中 10 个的源全在本机 RSSHub 上、默认关闭
+   * ⇒ **一个全新用户**装完之后会看到 10 个点进去永远空的 chip，
+   *   而那正是本项目最警戒的「看起来像 bug」。
+   *
+   * ⇒ 阶段 C 续补了 8 条**公网**源（中新网 7 个频道 + 食品伙伴网，全部实测有时间有链接），
+   *   把 10 个压到 **6 个**。剩下这 6 个是**实测结论**（试了约 90 个候选，
+   *   新华网 300 条但零时间、人民网整站 RSS 已馊、垂直站都没有对外 RSS），
+   *   详见 sources.js 的 F 组说明。
+   *
+   * ⇒ 这里把这 6 个**钉成显式清单**：以后谁再新增一个「新用户填不满」的类别，
+   *   这条当场红，逼他回答"那别人拿到手点什么"。 */
+  const on = DEFAULT_SOURCES.filter((s) => s.enabled !== false);
+  const used = new Set();
+  for (const s of on) for (const c of s.categories || []) used.add(c);
+  const empty = DEFAULT_CATEGORIES.filter((c) => !used.has(c));
+  const KNOWN = ['领域·军事', '领域·汽车', '领域·旅游', '性质·核查', '形态·音频', '时效·专题'];
+  assert.deepEqual(
+    empty.slice().sort(),
+    KNOWN.slice().sort(),
+    '新用户会看到空的类别变了（多出来的那些在公网上没有源 —— 先看 sources.js 的 F 组说明）',
+  );
+  /* 反向：这 6 个必须**真的有源绑着**（只是默认关闭），否则它们连"以后打开就有内容"都做不到 */
+  const all = new Set();
+  for (const s of DEFAULT_SOURCES) for (const c of s.categories || []) all.add(c);
+  for (const name of KNOWN) {
+    assert.ok(all.has(name), name + ' 一个源都没绑 —— 那它不只是"新用户空"，是永远空');
+  }
+});
+
 ok('★ 新补的那批源：一律是本机 RSSHub、一律默认关闭（与阶段 B 同一个口径）', () => {
   const local = DEFAULT_SOURCES.filter((s) => String(s.feedUrl).startsWith('http://127.0.0.1:1200/'));
   assert.ok(local.length >= 20, '本机源太少：' + local.length);
@@ -4291,6 +4323,61 @@ ok('★★ 刷新处理器：不许引用未定义的变量、置真与还原必
     /try\s*\{[\s\S]*ingestRunning\s*=\s*true[\s\S]*finally\s*\{[\s\S]*ingestRunning\s*=\s*false/.test(body),
     'ingestRunning 的置真/还原没有包在同一个 try/finally 里 —— 中间任何一句抛错都会让刷新按钮永久变灰',
   );
+});
+
+/* ==================================================================
+ * 第二十层 · 交付收口（版本号守卫 / 开发态资源 / 健康度文案）
+ * ------------------------------------------------------------------
+ * 这三条都不是功能，而是**交付给别人时才会疼**的地方 ——
+ * 而它们的失败方式都是「看着正常、其实没有」：
+ *   · 同一个版本号发两次 ⇒ 装了它的人永远收不到更新
+ *   · 开发态找不到托盘图标 ⇒ 没有退出入口（而那是唯一的入口）
+ *   · 健康度只说「21/47 正常」⇒ 用户读成「只有 21 个源有用」
+ * ================================================================== */
+say();
+say('--- 第二十层 · 交付收口 ---');
+
+ok('★★ 发布脚本必须拦住「同一个版本号发两次」', () => {
+  /* ⚠️ npm run dist 不会动 package.json 的 version ⇒ 「改了代码 → 直接 dist → release」
+     会用同一个版本号再打一份，而装了那个版本的人比版本号时判「已是最新」。 */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'tools', 'release.mjs'), 'utf8');
+  assert.ok(/function tagExistsLocally\(/.test(src), 'release.mjs 没有版本号守卫 —— 同一个版本号能被发两次');
+  /* ★★ 光是「定义了」不算数 —— 本项目在 B4 收过一条一模一样的账：
+     checkChannelParity **定义了却从未被调用**（死守卫），谁也没发现。
+     ⇒ 这里咬的是**调用点**，不是定义点。 */
+  assert.ok(
+    /if \([^\n]*tagExistsLocally\(version\)/.test(src),
+    '版本号守卫定义了却没被调用（死守卫）—— 那它一行都拦不住',
+  );
+  assert.ok(/refs', 'tags'/.test(src), '守卫没有去查本地 tag（那它拿什么判「发过没有」）');
+  assert.ok(/process\.exit\(1\)/.test(src), '守卫没有真的中止（打印一句然后照常生成清单 = 没守）');
+  assert.ok(/--force/.test(src), '没有 --force 旁路 —— 上一次传坏了就没法重发同一版');
+});
+
+ok('★★ 开发态也必须找得到托盘图标（托盘菜单是唯一的退出入口）', () => {
+  /* ⚠️ runtimeAsset 在开发态原来只找 <项目>/<rel>，而托盘图标实际住在
+     src/renderer/assets/ ⇒ npm start 时托盘**静默消失**，用户只能去任务管理器。 */
+  const icon = path.resolve(HERE, '..', 'src', 'renderer', 'assets', 'tray-16.png');
+  assert.ok(fs.existsSync(icon), '托盘图标文件不在：' + icon);
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  assert.ok(
+    /path\.join\(ROOT, 'src', 'renderer', rel\)/.test(src),
+    'runtimeAsset 没有开发态回退到 src/renderer —— 打包态正常、npm start 时托盘会消失',
+  );
+  /* 打包态那条路不能被这次改动破坏：extraResources 把图标铺到 resources/assets/ */
+  assert.ok(/app\.isPackaged && process\.resourcesPath/.test(src), '打包态那条分支被弄丢了');
+});
+
+ok('★ 健康度必须把「从未抓过」和「异常」分开说（否则读成只有 21 个源有用）', () => {
+  /* ⚠️ 真机上用户就是这么读的：显示 21/47 正常，他以为另外 26 个坏了，
+     而真相是一条都没坏、只是还没被跑过（刷新是按当前类型范围的）。 */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'renderer', 'card.js'), 'utf8');
+  const i = src.indexOf('function renderHealth');
+  assert.ok(i > 0, '找不到 renderHealth');
+  const body = src.slice(i, i + 1600);
+  assert.ok(/未跑/.test(body), '健康度文案里没有「未跑」—— 用户会把「没跑过」读成「坏了」');
+  assert.ok(/异常/.test(body), '健康度文案里没有「异常」—— 那就分不出真坏的');
+  assert.ok(/h\.never/.test(body), '没有用到 never 这个数（主进程早就算好了，之前一直没用上）');
 });
 say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
 /** 每个变异体：改坏一处，期望"至少有一条断言失败" */

@@ -414,6 +414,28 @@ const MUTANTS = [
     to: '        var scopeName = d.activeChip && d.activeChip.id != null ? d.activeChip.name : null;',
     expect: '引用了未定义的 d',
   },
+  /* ── 交付收口：三条「发给别人才会疼」的地方 ── */
+  {
+    file: 'tools/release.mjs',
+    why: '版本号守卫形同虚设（定义了却没被调用）⇒ 同一个版本号能被发两次，装了它的人永远收不到更新',
+    from: "if (!process.argv.includes('--force') && tagExistsLocally(version)) {",
+    to: 'if (false) {',
+    expect: '死守卫',
+  },
+  {
+    file: MAIN,
+    why: 'runtimeAsset 去掉开发态回退 ⇒ npm start 时托盘**静默消失**，而没有托盘就没有退出入口',
+    from: "  const devAlt = path.join(ROOT, 'src', 'renderer', rel);",
+    to: "  const devAlt = path.join(ROOT, 'nope', 'renderer', rel);",
+    expect: '没有开发态回退',
+  },
+  {
+    file: 'src/renderer/card.js',
+    why: '健康度文案又只说「N/总数 正常」⇒ 用户把「没跑过」读成「坏了」（真机上发生过）',
+    from: "      if (neverN) bits.push(neverN + ' 未跑');",
+    to: '      if (neverN) bits.push(String(neverN));',
+    expect: '没有「未跑」',
+  },
   /* ── 阶段 C：分类体系扩五维度 + 补源（改坏了都是「界面看着正常、其实没了」）── */
   {
     file: DB,

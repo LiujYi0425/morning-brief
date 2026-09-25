@@ -103,7 +103,17 @@ function runtimeAsset(rel) {
        如实报出来，别悄悄退回 asar 里那个 PowerShell 读不了的路径。 */
     console.error(`[main] ⚠️ 打包资源缺失：${packed}（检查 package.json 的 build.extraResources）`);
   }
-  return path.join(ROOT, rel);
+  /* ⚠️ 开发态：先按 <项目>/<rel> 找（`tools/win/set-window-level.ps1` 就在那儿 ✓），
+     找不到再退到 `src/renderer/<rel>` —— **托盘图标**就是后一种：
+     它实际住在 `src/renderer/assets/tray-16.png`，打包时由 extraResources
+     铺成 `resources/assets/`（于是打包态走上面那条路 ✓）。
+     少了这一步，`npm start` 时托盘会**静默消失**，而托盘菜单里的「退出晨报机」
+     是**唯一的退出入口**（卡片上没有关闭按钮，这是设计如此）。 */
+  const dev = path.join(ROOT, rel);
+  if (fs.existsSync(dev)) return dev;
+  const devAlt = path.join(ROOT, 'src', 'renderer', rel);
+  if (fs.existsSync(devAlt)) return devAlt;
+  return dev;
 }
 
 /* 数据目录：开发态在项目内 `data/`，**打包态在 Electron 的 userData 下**，
