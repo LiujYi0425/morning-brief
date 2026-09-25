@@ -90,6 +90,8 @@
   var btnMore = $('btnMore');
   var btnAll = $('btnAll');
   var btnRefresh = $('btnRefresh');
+  var btnAi = $('btnAi');
+  var elAiPanel = $('aiPanel');
   var btnCollapse = $('btnCollapse');
 
   /* ---------------- 轻提示 ---------------- */
@@ -141,7 +143,7 @@
   /* ================================================================== */
   /* 渲染：全部从 derive(view) 取值，分块记忆化（避免拖动滑动条时重绘列表）  */
   /* ================================================================== */
-  var memo = { chips: null, slider: null, list: null, listArr: null, foot: null, head: null, health: null };
+  var memo = { chips: null, slider: null, list: null, listArr: null, foot: null, head: null, health: null, ai: null };
   var lastDerived = null;
 
   function renderHealth(d) {
@@ -179,10 +181,18 @@
   }
 
   function renderHeadline(d) {
-    var key = d.headline.text + '|' + (d.headline.empty ? 'e' : 'n');
+    /* ★ 降级/失败的原因挂在 tooltip 上：总览句那一行只有 360px 宽，
+       把「API Key 被拒绝（HTTP 401）…」塞进去会把整行挤爆 ——
+       但**不写出来**又违反「失败必须可见」。⇒ 一行短标记 ＋ 悬停看全文。
+       ⚠️ 它必须进 memo 键：不进的话，简报从「降级」变成「正常」时
+          tooltip 会留着上一次的旧原因（而正文已经变了）。 */
+    var detail = (view.ai && view.ai.brief && view.ai.brief.detail) || '';
+    var key = d.headline.text + '|' + (d.headline.empty ? 'e' : 'n') + '|' + detail;
     if (memo.head === key) return;
     memo.head = key;
     elHeadline.textContent = d.headline.text;
+    if (detail) elHeadline.title = detail;
+    else elHeadline.removeAttribute('title');
     if (d.headline.empty) elHeadline.setAttribute('data-empty', 'on');
     else elHeadline.removeAttribute('data-empty');
   }
@@ -285,7 +295,11 @@
   }
 
   function renderList(d) {
-    var key = view.phase + '|' + (d.stale ? 'stale' : 'fresh') + '|' + view.activeCategory + '|' + d.empty;
+    /* ⚠️ 键里必须带上「这是不是简报视图」和简报的日期：
+       少了它，从「简报」切到「全部」时列表**不会重画**（条目数组换了但键没换），
+       而用户看到的是「点了没反应」。 */
+    var key = view.phase + '|' + (d.stale ? 'stale' : 'fresh') + '|' + view.activeCategory + '|' + d.empty +
+      '|' + (view.briefView ? 'brief' : 'all') + '|' + ((view.ai && view.ai.brief && view.ai.brief.date) || '-');
     if (memo.list === key && memo.listArr === view.items) return;
     memo.list = key;
     memo.listArr = view.items;
@@ -331,6 +345,11 @@
 
       row.appendChild(el('div', 'item__title', it.title));
 
+      /* ★ 简报视图里每条带一到两句摘要（AI 写的）。
+         ⚠️ 没有摘要就**不占位** —— 降级形态下十几条全是空行会很难看，
+            而且「这里本该有摘要」这件事总览句已经说过了。 */
+      if (it.digest) row.appendChild(el('div', 'item__digest', it.digest));
+
       var meta = el('div', 'item__meta');
       if (it.source_name) meta.appendChild(el('span', 'item__source', it.source_name));
       meta.appendChild(el('span', null, relTime(it.published_at)));
@@ -340,6 +359,146 @@
       frag.appendChild(row);
     });
     elList.appendChild(frag);
+  }
+
+  /* ---------------- AI 设置面板（本次功能） ----------------
+   * ⚠️ 面板里**唯一不来自 view-model 的东西是 Key 输入框的内容** ——
+   *    它刻意只活在 DOM 里：view 状态会被诊断自检整个打出来（见 selfCheckSoon），
+   *    把 Key 放进状态等于顺手写进日志。⇒ 点「保存」的那一刻才现读 input.value。
+   *
+   * ⚠️ 每个动作都走 runAi()：它保证三件事同时发生 ——
+   *    ① 按钮进入「忙」并禁用（否则用户会连点，而每次连点都可能是一次真调用）；
+   *    ② 结果（成功或失败）**一定**显示出来（静默失败在这里等于「点了没反应」）；
+   *    ③ 完成后重新取一次数据，界面与库一致。
+   */
+  function aiRow(label, node) {
+    var row = el('div', 'aipanel__row');
+    row.appendChild(el('span', 'aipanel__label', label));
+    row.appendChild(node);
+    return row;
+  }
+
+  function runAi(what, fn) {
+    dispatch({ type: 'aiBusy', what: what });
+    return Promise.resolve()
+      .then(fn)
+      .then(function (r) {
+        var res = r || { ok: true, text: '完成' };
+        dispatch({ type: 'aiMsg', msg: { ok: res.ok !== false, text: String(res.message || res.reason || (res.ok === false ? '失败' : '完成')) } });
+      })
+      .catch(function (e) {
+        /* ⚠️ 异常也要说出来。桥那头抛错时如果只 console.error，
+           用户看到的就是「点了没反应」—— 本项目最忌讳的失败形态。 */
+        dispatch({ type: 'aiMsg', msg: { ok: false, text: '出错了：' + String((e && e.message) || e) } });
+      })
+      .then(function () {
+        fetchIO.done = null;   // 让下一次 syncFetch 真的去取（否则会被「同 key 不重复取」挡掉）
+        syncFetch();
+      });
+  }
+
+  function renderAiPanel(d) {
+    if (!elAiPanel) return;
+    var p = d.aiPanel;
+    var key = [p.open, p.busy, p.msg ? (p.msg.ok ? '1' : '0') + p.msg.text : '', p.key.configured, p.key.maskedTail,
+      p.key.mode, p.key.encryption, p.key.broken, p.config.endpoint, p.config.model, p.config.pickCount,
+      p.usage.total, p.usage.briefs, p.brief ? p.brief.status + p.brief.date : '-', p.lastBriefDate].join('|');
+    if (memo.ai === key) return;
+    memo.ai = key;
+
+    if (btnAi) btnAi.classList.toggle('chip--on', !!p.open);
+    elAiPanel.hidden = !p.open;
+    elAiPanel.textContent = '';
+    if (!p.open) return;
+
+    /* ① Key 状态。三种情况都要说清 —— 尤其是「文件读不出来」那种，
+          它以前会安静地表现成「没配过」，用户会以为自己记错了。 */
+    var stateText = p.key.configured
+      ? '已配置 ' + (p.key.maskedTail || '') + '（' +
+        (p.key.mode === 'encrypted' ? '系统加密存储' : p.key.mode === 'memory' ? '只在内存里，重启要重填' : '明文落盘') + '）'
+      : (p.key.broken ? '读不出来了（换过机器或系统钥匙串变了）—— 请重新填一次' : '还没有配置');
+    elAiPanel.appendChild(el('div', 'aipanel__hint', 'Key：' + stateText));
+
+    /* ② Key 输入 + 保存（系统加密不可用时，必须让用户**显式选**存法） */
+    var inp = el('input', 'aipanel__input');
+    inp.type = 'password';
+    inp.autocomplete = 'off';
+    inp.placeholder = p.key.configured ? '要换就粘一个新的' : '粘一个 API Key（只留在本机）';
+    elAiPanel.appendChild(aiRow('API Key', inp));
+    var modeSel = null;
+    if (!p.key.encryption) {
+      modeSel = el('select', 'aipanel__input');
+      var o1 = el('option', null, '只存内存（重启要重填）'); o1.value = 'memory';
+      var o2 = el('option', null, '明文落盘（不推荐）'); o2.value = 'plaintext';
+      modeSel.appendChild(o1); modeSel.appendChild(o2);
+      elAiPanel.appendChild(el('div', 'aipanel__hint', '⚠️ 这台机器没有可用的系统加密，Key 没法加密保存 —— 必须你选一种：'));
+      elAiPanel.appendChild(aiRow('存法', modeSel));
+    }
+    var row1 = el('div', 'catpanel__foot');
+    var saveBtn = el('button', 'btn', p.busy === 'key' ? '保存中…' : '保存 Key');
+    saveBtn.type = 'button';
+    saveBtn.disabled = !!p.busy;
+    saveBtn.addEventListener('click', function () {
+      var v = inp.value;   // ← Key 只在这一刻被读出来，用完即弃
+      if (!v) { dispatch({ type: 'aiMsg', msg: { ok: false, text: '先把 Key 粘进来' } }); return; }
+      runAi('key', function () { return api.ai.setKey(v, modeSel ? modeSel.value : undefined); });
+    });
+    var testBtn = el('button', 'btn', p.busy === 'test' ? '测试中…' : '测试连通性');
+    testBtn.type = 'button';
+    testBtn.disabled = !!p.busy || !p.key.configured;
+    testBtn.addEventListener('click', function () { runAi('test', function () { return api.ai.testKey(); }); });
+    var clearBtn = el('button', 'btn', '清除');
+    clearBtn.type = 'button';
+    clearBtn.disabled = !!p.busy || !p.key.configured;
+    clearBtn.addEventListener('click', function () { runAi('clear', function () { return api.ai.clearKey(); }); });
+    row1.appendChild(saveBtn); row1.appendChild(testBtn); row1.appendChild(clearBtn);
+    elAiPanel.appendChild(row1);
+
+    /* ③ 端点 / 模型 / 精选条数 */
+    var ep = el('input', 'aipanel__input'); ep.type = 'text'; ep.value = p.config.endpoint || '';
+    var md = el('input', 'aipanel__input'); md.type = 'text'; md.value = p.config.model || '';
+    var pc = el('input', 'aipanel__input aipanel__input--n'); pc.type = 'number'; pc.min = '3'; pc.max = '12'; pc.value = String(p.config.pickCount || 10);
+    elAiPanel.appendChild(aiRow('端点', ep));
+    elAiPanel.appendChild(aiRow('模型', md));
+    elAiPanel.appendChild(aiRow('每天精选', pc));
+    var row2 = el('div', 'catpanel__foot');
+    var cfgBtn = el('button', 'btn', p.busy === 'config' ? '保存中…' : '保存设置');
+    cfgBtn.type = 'button';
+    cfgBtn.disabled = !!p.busy;
+    cfgBtn.addEventListener('click', function () {
+      runAi('config', function () {
+        return api.ai.setConfig({ endpoint: ep.value, model: md.value, pickCount: Number(pc.value) || 10 });
+      });
+    });
+    var genBtn = el('button', 'btn', p.busy === 'generate' ? '生成中…' : '重新生成简报');
+    genBtn.type = 'button';
+    genBtn.disabled = !!p.busy || !p.key.configured;
+    genBtn.title = '会真的调用一次模型（花钱），并覆盖今天已有的那一份';
+    genBtn.addEventListener('click', function () { runAi('generate', function () { return api.ai.generate(true); }); });
+    row2.appendChild(cfgBtn); row2.appendChild(genBtn);
+    elAiPanel.appendChild(row2);
+
+    /* ④ 用量与今天那一份的状态。
+          ★ 北极星辅助指标写着「Token 消耗必须可见」—— 所以它在这里，
+            而且**拿不到真实用量时明说「不知道」**，不显示成 0。 */
+    var u = p.usage || {};
+    var usageText = '今天用了 ' + (u.total || 0) + ' tokens（' + (u.knownBriefs || 0) + ' 份有记账）';
+    if (u.unknownBriefs) usageText += '，另有 ' + u.unknownBriefs + ' 份拿不到用量';
+    var b = p.brief;
+    var briefText = b
+      ? '今天的简报：' + b.status + (b.detail ? '（' + b.detail + '）' : '') + ' · 候选 ' + (b.rawCount == null ? '?' : b.rawCount) + ' 条 → 精选 ' + (b.keptCount == null ? '?' : b.keptCount) + ' 条'
+      : (p.lastBriefDate ? '今天还没有简报（最近一份是 ' + p.lastBriefDate + '）' : '还没有生成过简报');
+    elAiPanel.appendChild(el('div', 'aipanel__hint', usageText));
+    elAiPanel.appendChild(el('div', 'aipanel__hint', briefText));
+    if (p.msg) elAiPanel.appendChild(el('div', 'aipanel__msg', (p.msg.ok ? '✔ ' : '✗ ') + p.msg.text));
+
+    var row3 = el('div', 'catpanel__foot');
+    row3.appendChild(el('span', 'catpanel__spacer'));
+    var close = el('button', 'btn', '关闭');
+    close.type = 'button';
+    close.addEventListener('click', function () { dispatch({ type: 'closeAi' }); });
+    row3.appendChild(close);
+    elAiPanel.appendChild(row3);
   }
 
   /**
@@ -612,6 +771,7 @@
     renderChips(d);
     renderSlider(d);
     renderPanel(d);
+    renderAiPanel(d);
     renderList(d);
     renderFoot(d);
     selfCheckSoon();
@@ -1402,6 +1562,19 @@
    *      但把一个"幂等的一次动作"变成"按点击次数放大"仍然是错的。）
    */
   var ingestRunning = false;
+
+  /* ★ 齿轮：开/关 AI 设置面板。
+     ⚠️ 它与「编辑类型」面板**互斥**：两个浮层同时开着会叠在一起，
+        而 .catbar 只有一行高 —— 用户看到的是「面板串味了」。 */
+  if (btnAi) {
+    btnAi.addEventListener('click', function () {
+      if (view.aiPanelOpen) dispatch({ type: 'closeAi' });
+      else {
+        if (view.editorOpen) dispatch({ type: 'closeEditor' });
+        dispatch({ type: 'openAi' });
+      }
+    });
+  }
 
   if (btnRefresh) {
     btnRefresh.addEventListener('click', async function () {

@@ -85,6 +85,30 @@ export function registerIpc(deps) {
     log(`[ipc] 手动触发抓取（${trigger || 'manual'}${ids && ids.length ? '，类型 ' + ids.join('/') : '，全部源'}）`);
     return deps.runIngest(trigger || 'manual', ids && ids.length ? ids : null);
   });
+  /* ---------------- AI 摘要（M1 交付物的最后一项） ----------------
+   * ⚠️ 这七条通道的边界（架构文档 §4.2 的安全约束）：
+   *   · `apikey:status` 只回布尔与掩码尾巴 —— **没有"读回明文"这条路**；
+   *   · Key 只经 `apikey:set` 进来，方向是**单向**的；
+   *   · 日志里**不许出现 Key**（下面每条只记"发生了一件事"，不记内容）。 */
+  ipcMain.handle('apikey:status', () => deps.keyStatus());
+  ipcMain.handle('apikey:set', (_e, payload) => {
+    const p = payload || {};
+    log('[ipc] 写入 API Key 请求（按规矩不记内容）');
+    return deps.setKey(p.key, p.mode);
+  });
+  ipcMain.handle('apikey:clear', () => {
+    log('[ipc] 清除 API Key');
+    return deps.clearKey();
+  });
+  ipcMain.handle('apikey:test', async () => deps.testKey());
+  ipcMain.handle('ai:config', () => deps.getAiConfig());
+  ipcMain.handle('ai:setConfig', (_e, cfg) => deps.setAiConfig(cfg || {}));
+  ipcMain.handle('brief:generate', async (_e, payload) => {
+    const force = !!(payload && payload.force);
+    log('[ipc] 生成简报请求' + (force ? '（强制重生成）' : ''));
+    return deps.generateBrief(force);
+  });
+
   ipcMain.handle('category:list', () => deps.listCategories());
 
   ipcMain.handle('card:setState', (_e, next) => {

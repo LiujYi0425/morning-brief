@@ -111,6 +111,17 @@
         <button class="chip chip--add" id="btnAddCat" type="button" title="新增一个自定义类型">＋</button>
 
         <!--
+          设置入口（AI 摘要）。
+          ★ 为什么放在 .catbar 而不是底栏：底栏已经有四个按钮，
+            而卡片自己的自检里有一条「底栏内容被横向裁掉（按钮挤不下）」——
+            再加一个就会当场触发它。
+          ★ 为什么是一个独立按钮而不是让健康度可点：顶栏整体是
+            role=button（展开/收起），在里面再放一个可点元素
+            会让「点一下到底发生什么」变得要靠猜。
+        -->
+        <button class="chip chip--gear" id="btnAi" type="button" title="设置：API Key / 模型 / 简报">⚙</button>
+
+        <!--
           编辑面板：**空容器**，内容全部由 card.js 每次从 `derive().editor` 重建。
           ⚠️ 面板住在 .catbar 里（而不是 .filters 里）：`.filters` 有
              `overflow-x: auto`，放进去会被裁成一个横向滚动条里的小方块。
@@ -119,6 +130,10 @@
              与当初的 window.prompt 同源、不可靠。
         -->
         <div class="catpanel" id="catPanel" role="group" aria-label="编辑类型的源与喜好" hidden></div>
+
+        <!-- AI 设置面板：**空容器**，内容全部由 card.js 每次从 d.aiPanel 重建。
+             复用 .catpanel 的样式（同一个浮层语言），只多一个类名便于定位。 -->
+        <div class="catpanel aipanel" id="aiPanel" role="group" aria-label="AI 设置" hidden></div>
       </div>
 
       <!-- ============ 列表 ============ -->

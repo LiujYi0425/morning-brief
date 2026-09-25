@@ -186,6 +186,11 @@
       /** 服务端算出的"今天 00:00"（本地日）。翻页时**原样带回去**，
        *  否则跨过午夜之后第 2 页会换一个日期边界、与第 1 页接不上。 */
       sinceIso: null,
+      ai: null,          // AI 简报状态（Key 配没配 / 端点 / 用量 / 今天那一份）
+      briefView: false,  // 列表现在显示的是不是简报（**由主进程算**，界面不自己推）
+      aiPanelOpen: false, // AI 设置面板开着没有
+      aiBusy: '',         // 面板里正在忙什么（save / test / config / generate）
+      aiMsg: null,        // 上一次操作的结果（{ok, text}）—— 失败必须说出来
 
       /* —— 筛选栏编辑面板（本次功能） ——
        *
@@ -384,6 +389,8 @@
         lastSuccessAt: p.lastSuccessAt === undefined ? v.lastSuccessAt : p.lastSuccessAt,
         fetchedToday: p.fetchedToday === undefined ? v.fetchedToday : !!p.fetchedToday,
         sinceIso: p.sinceIso === undefined ? v.sinceIso : p.sinceIso,
+      ai: p.ai === undefined ? v.ai : p.ai,
+      briefView: p.briefView === undefined ? v.briefView : p.briefView,
         /* 服务端若知道"用户上次选的类别"而本地还没选，采纳它；否则尊重本地 */
         activeCategory: v.activeCategory == null ? (p.activeCategory == null ? null : p.activeCategory) : v.activeCategory,
         /* 取数回来 ⇒ 撤销"等你再点一次删除"（用户不点就等于放弃，别让一个
@@ -512,6 +519,30 @@
      *   就又回到"每个处理器自己改一处、顺序不同结果不同"那条老路上去了
      *   —— 那正是第三轮返工花了一整轮才拆掉的东西。
      * ------------------------------------------------------------------ */
+
+    /* ---------------- AI 设置面板（本次功能） ----------------
+     * ⚠️⚠️ 这里**刻意没有** aiKeyDraft 之类的字段：
+     *    Key 输入框的内容只活在 DOM 里，绝不进 view 状态。
+     *    理由不是洁癖 —— 状态对象会被诊断自检**整个打出来**（见 card.js 末尾的快照），
+     *    把 Key 放进状态等于顺手写进日志，而 R-E05 要求它一步都不许离开主进程那一侧。
+     *    ⇒ 点「保存」时才现读 input.value。 */
+    openAi: function (v) {
+      return copy(v, { aiPanelOpen: true, aiBusy: '', aiMsg: null });
+    },
+    closeAi: function (v) {
+      return copy(v, { aiPanelOpen: false, aiBusy: '', aiMsg: null });
+    },
+    /** 面板里「正在忙」与「上一次的结果」——两者都要有，否则用户点了不知道在等什么 */
+    aiBusy: function (v, action) {
+      return copy(v, { aiBusy: String((action && action.what) || ''), aiMsg: null });
+    },
+    aiMsg: function (v, action) {
+      var m = (action && action.msg) || null;
+      return copy(v, {
+        aiBusy: '',
+        aiMsg: m ? { ok: !!m.ok, text: String(m.text || '') } : null,
+      });
+    },
 
     /** 打开面板：把**当前选中的类型**作为编辑对象（绝不为别的类型开） */
     openEditor: function (v) {
@@ -731,6 +762,18 @@
     var parts = ['显示 ' + d.shown + ' 条'];
     var cat = d.activeChip && d.activeChip.id != null ? d.activeChip.name : null;
     if (cat) parts[0] += '（' + cat + '）';
+    /* ★★ L1（总览一句话）—— 简报视图下，AI 写的那句话**排在最前面**。
+       ⚠️ 三种「没有摘要」的情况都必须**如实说出来**，而不是安静地少一句话：
+          · 没配 Key        → 告诉他在哪配（否则他永远不知道有这个功能）；
+          · 降级（fallback）→ 说清这不是 AI 挑的（完整原因挂在 tooltip 上，不塞满这一行）；
+          · 还没生成        → 同上，短标记。 */
+    var ai = view.ai || null;
+    var brief = ai && ai.brief;
+    var lead = '';
+    if (brief && brief.headline) lead = brief.headline;
+    else if (ai && ai.key && !ai.key.configured) lead = '未配置 API Key（点 ⚙ 设置）';
+    else if (brief && brief.status === 'fallback') lead = '未生成摘要';
+    if (lead) parts.unshift(lead);
     parts.push((view.showingAll ? '今天全部 ' : '今天共 ') + d.filteredTotal + ' 条');
     var older = Math.max(0, d.shown - d.filteredTotal);
     if (older > 0) parts.push('另含更早 ' + older + ' 条');
@@ -855,6 +898,21 @@
       lastIngestAt: v.lastIngestAt,
     };
     d.headline = headlineOf(v, d);
+
+    /* ---------------- AI 设置面板（本次功能） ----------------
+     * ★ 面板里每一个可见结果都在这里决定（与筛选栏编辑面板同一条规矩），
+     *   只有 Key 输入框的内容例外 —— 它**故意**不在这里（见 REDUCERS.openAi 的说明）。 */
+    var aiState = v.ai || null;
+    d.aiPanel = {
+      open: !!v.aiPanelOpen,
+      busy: String(v.aiBusy || ''),
+      msg: v.aiMsg || null,
+      key: (aiState && aiState.key) || { configured: false, maskedTail: '', mode: null, encryption: true, broken: false },
+      config: (aiState && aiState.config) || { endpoint: '', model: '', pickCount: 10 },
+      usage: (aiState && aiState.usage) || { total: 0, knownBriefs: 0, unknownBriefs: 0, briefs: 0 },
+      brief: (aiState && aiState.brief) || null,
+      lastBriefDate: (aiState && aiState.lastBriefDate) || '',
+    };
 
     /* —— 筛选栏编辑面板（本次功能）——
      * ★ 面板的**每一个**可见结果都在这里决定（没有一个字来自 card.js 里的临时变量）：

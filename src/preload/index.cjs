@@ -17,6 +17,13 @@ const IPC = Object.freeze({
   BRIEF_MORE: 'brief:more', // R → M：翻页（游标式）
   BRIEF_INGEST: 'brief:ingest', // R → M：手动触发抓取（可带当前类型）
   BRIEF_UPDATED: 'brief:updated', // M → R：抓取完成后主动推新数据
+  BRIEF_GENERATE: 'brief:generate', // R → M：生成/重新生成今天的简报
+  AI_CONFIG: 'ai:config',
+  AI_SET_CONFIG: 'ai:setConfig',
+  APIKEY_STATUS: 'apikey:status', // ★ 只回布尔与掩码尾巴，**没有读回明文这条路**
+  APIKEY_SET: 'apikey:set',
+  APIKEY_CLEAR: 'apikey:clear',
+  APIKEY_TEST: 'apikey:test',
   CATEGORY_LIST: 'category:list',
   CATEGORY_CREATE: 'category:create',
   CATEGORY_DELETE: 'category:delete', // ★ 只删分类与绑定，绝不删条目
@@ -64,6 +71,19 @@ const api = Object.freeze({
           （"这个地址不是可解析的 feed（实际拿到的是「HTML 网页」）"）。 */
     addSource: (payload) => ipcRenderer.invoke(IPC.SOURCE_ADD, payload),
     onUpdated: (cb) => subscribe(IPC.BRIEF_UPDATED, cb),
+  }),
+
+  /* ★ AI 摘要（M1 交付物的最后一项）。
+     ⚠️ 这一组里**没有**任何"把 Key 读回来"的方法 —— 不是忘了写，
+        而是架构文档 §4.2 的安全约束 ②：没有那条通道，渲染进程从设计上就拿不到 Key（R-E05）。 */
+  ai: Object.freeze({
+    keyStatus: () => ipcRenderer.invoke(IPC.APIKEY_STATUS),
+    setKey: (key, mode) => ipcRenderer.invoke(IPC.APIKEY_SET, { key, mode }),
+    clearKey: () => ipcRenderer.invoke(IPC.APIKEY_CLEAR),
+    testKey: () => ipcRenderer.invoke(IPC.APIKEY_TEST),
+    getConfig: () => ipcRenderer.invoke(IPC.AI_CONFIG),
+    setConfig: (cfg) => ipcRenderer.invoke(IPC.AI_SET_CONFIG, cfg),
+    generate: (force) => ipcRenderer.invoke(IPC.BRIEF_GENERATE, { force: !!force }),
   }),
 
   card: Object.freeze({

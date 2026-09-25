@@ -928,3 +928,29 @@ body {
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+/* 简报视图里的条目摘要（AI 写的一到两句）。
+   ⚠️ 用透明度而不是更浅的颜色：两套形态（玻璃 / 实底）下都要成立，
+      而颜色令牌是分形态的、透明度不是（S-01：形态差异只活在令牌层）。 */
+.item__digest {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.72;
+}
+
+/* AI 设置面板（本次功能）。复用 .catpanel 的浮层，只补它自己要的排版。 */
+.aipanel__row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.aipanel__label { flex: 0 0 auto; font-size: 11px; opacity: 0.7; min-width: 56px; }
+.aipanel__input {
+  flex: 1 1 auto; min-width: 0;
+  font: inherit; font-size: 11px;
+  padding: 3px 6px; border-radius: 6px;
+  border: 1px solid var(--card-border, rgba(127, 127, 127, 0.35));
+  background: transparent; color: inherit;
+}
+.aipanel__input--n { flex: 0 0 56px; }
+.aipanel__hint { font-size: 11px; opacity: 0.7; margin: 4px 0; line-height: 1.4; }
+.aipanel__msg { font-size: 11px; margin: 4px 0; line-height: 1.4; }
+/* 齿轮按钮：开着的时候要能看出来 */
+.chip--on { outline: 1px solid currentColor; }

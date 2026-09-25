@@ -46,7 +46,7 @@ import { isPrivateHost } from '../main/feed-url.js';
 import { DEFAULT_SOURCES, DEFAULT_CATEGORIES, isLocalOnlyCategory } from '../ingest/sources.js';
 
 /** schema 版本。改结构时 +1，并在 migrate() 里加一段 —— 否则老库会静默少字段 */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const DDL = `
 PRAGMA journal_mode = WAL;
@@ -164,8 +164,30 @@ CREATE TABLE IF NOT EXISTS brief (
   brief_date  TEXT NOT NULL UNIQUE,     -- YYYY-MM-DD（本地日）
   created_at  TEXT NOT NULL,
   curated_ids TEXT,                     -- JSON 数组：默认呈现的那 N 条
-  headline    TEXT                      -- 总览句（阶段 3 由 AI 生成）
+  headline    TEXT,                     -- 总览句（由 AI 生成）
+  -- ↓ 阶段 M1「AI 摘要」补齐的列（此前只有上面五列，表是提前建好的）
+  status      TEXT NOT NULL DEFAULT 'none',  -- ok | partial | fallback | failed | none
+  model       TEXT,                     -- 这一份是哪个模型生成的（换模型要能看出来）
+  input_hash  TEXT,                     -- 输入指纹：同一天同一批候选 + 同模型 ⇒ 不再花第二次钱
+  token_used  INTEGER,                  -- 真实用量；拿不到就是 NULL，不拿估算冒充
+  raw_count   INTEGER,                  -- 当天候选多少条（压缩率的分母）
+  kept_count  INTEGER,                  -- 精挑多少条（压缩率的分子）
+  detail      TEXT                      -- 失败/降级原因，**中文、直接可显示**
 );
+
+/* 简报与条目的关联。
+ * ⚠️ 为什么不把摘要塞进 brief 的一坨 JSON：
+ *   「这一条为什么被选中」必须能被逐条查到（rank 就是排序），
+ *   而塞进 JSON 之后，任何按条目反查简报的问题都要在应用层重写一遍。 */
+CREATE TABLE IF NOT EXISTS brief_item (
+  brief_id   INTEGER NOT NULL REFERENCES brief(id) ON DELETE CASCADE,
+  item_id    INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+  rank       INTEGER NOT NULL DEFAULT 0,
+  section    TEXT,                      -- 分组名
+  ai_summary TEXT,                      -- 这一条的摘要（≤2 行）
+  PRIMARY KEY (brief_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_briefitem_item ON brief_item (item_id);
 `;
 
 /**
@@ -317,6 +339,31 @@ function migrate(db, from) {
     const n = db.prepare("UPDATE source SET origin = 'preset' WHERE origin IS NULL OR origin = 'custom'").run();
     console.log(`[db] 已把 ${n.changes} 个既有源标记为「预置」（升级前不存在用户自加的源）`);
   }
+  /* ---- v3 → v4：AI 简报（M1 交付物里的最后一项）----
+   *
+   * ⚠️ `brief` 表在阶段 1 就建好了，但当时只有「日期 / 头图 / 精选 id / 总览句」四列，
+   *    而 AI 摘要真正跑起来之后，**至少还要能回答三个问题**：
+   *      ① 这一份是怎么来的（`status` + `model` + `detail`）；
+   *      ② 今天花了多少钱（`token_used`，北极星辅助指标要求它可见）；
+   *      ③ 压缩率是多少（`raw_count` / `kept_count` —— 没有这两个数就只能靠猜）；
+   *    `input_hash` 则是**花钱的闸门**：同一批候选不许调第二次。
+   *
+   * ⚠️ 老库必须靠 ALTER 补列（`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作），
+   *    这就是 `hasColumn` 存在的理由 —— 重复执行不会炸。
+   * 已有的 `brief` 行（如果用户在阶段 1 存过）保持原样：status 默认 'none'，
+   * 意思是「这一份不是 AI 生成的」，这是**如实描述**，不是把旧数据当成失败。 */
+  if (from < 4) {
+    const addCol = (col, ddl) => { if (!hasColumn('brief', col)) db.exec('ALTER TABLE brief ADD COLUMN ' + ddl); };
+    addCol('status', "status TEXT NOT NULL DEFAULT 'none'");
+    addCol('model', 'model TEXT');
+    addCol('input_hash', 'input_hash TEXT');
+    addCol('token_used', 'token_used INTEGER');
+    addCol('raw_count', 'raw_count INTEGER');
+    addCol('kept_count', 'kept_count INTEGER');
+    addCol('detail', 'detail TEXT');
+    console.log('[db] brief 表已补齐 AI 简报所需的列（老数据保持原样，不会被当成失败）');
+  }
+
   console.log(`[db] schema ${from} → ${SCHEMA_VERSION} 迁移完成（数据未删除）`);
 }
 
@@ -1352,3 +1399,166 @@ export function listEnabledSourcesOfCategories(db, categoryIds) {
   return db.prepare(sql).all(...ids);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* AI 简报（M1 交付物的最后一项）                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 取「某一天该进简报」的候选条目。
+ *
+ * ★★ 这里的「今天」必须与 `queryItems({todayOnly, sinceIso})` / `countItems({sinceIso})`
+ *    **逐字一致** —— 否则卡片会同时展示两个互不相同的"今天"：
+ *    简报说 12 条，点「看今天全部（N）」却翻出另一个数字，而两边单看都是对的。
+ *    ⇒ 判据（含 fetched_at 兜底）：`published_at >= ? OR (published_at IS NULL AND fetched_at >= ?)`。
+ *    ⚠️ 我第一版写的是 `fetched_at >= ?` —— 那是**另一个口径**（"今天抓到的"），
+ *       它会和「看今天全部」对不上。真机上的表现是"简报里的条目在全部列表里找不到"。
+ */
+export function itemsForBrief(db, opts = {}) {
+  const since = String(opts.sinceIso || '');
+  const limit = Math.max(1, Math.min(1000, Number(opts.limit) || 400));
+  const rows = db
+    .prepare(
+      'SELECT id, title, url, summary, source_name, published_at, fetched_at FROM item ' +
+        'WHERE (published_at >= ? OR (published_at IS NULL AND fetched_at >= ?)) ' +
+        'ORDER BY (published_at IS NULL) ASC, published_at DESC, id DESC LIMIT ?',
+    )
+    .all(since, since, limit);
+  return rows.map((r) => ({
+    id: Number(r.id),
+    title: r.title,
+    url: r.url,
+    summary: r.summary,
+    sourceName: r.source_name,
+    publishedAt: r.published_at,
+    fetchedAt: r.fetched_at,
+  }));
+}
+
+/** 把一份简报连同它的条目一起写进去（同一天覆盖 —— 一天只有一份） */
+export function saveBrief(db, brief, nowIso) {
+  const b = brief || {};
+  const date = String(b.date || '').trim();
+  if (!date) return { ok: false, reason: '简报日期不能为空' };
+  const now = nowIso || new Date().toISOString();
+  const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+
+  db.prepare(
+    'INSERT INTO brief (brief_date, created_at, curated_ids, headline, status, model, input_hash, token_used, raw_count, kept_count, detail) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(brief_date) DO UPDATE SET ' +
+      'created_at = excluded.created_at, curated_ids = excluded.curated_ids, headline = excluded.headline, ' +
+      'status = excluded.status, model = excluded.model, input_hash = excluded.input_hash, ' +
+      'token_used = excluded.token_used, raw_count = excluded.raw_count, kept_count = excluded.kept_count, ' +
+      'detail = excluded.detail',
+  ).run(
+    date,
+    now,
+    JSON.stringify((b.curatedIds || []).map(Number)),
+    String(b.headline || ''),
+    String(b.status || 'ok'),
+    b.model ? String(b.model) : null,
+    b.inputHash ? String(b.inputHash) : null,
+    num(b.tokenUsed),
+    num(b.rawCount),
+    num(b.keptCount),
+    b.detail ? String(b.detail) : null,
+  );
+
+  const bid = Number(db.prepare('SELECT id FROM brief WHERE brief_date = ?').get(date).id);
+  db.prepare('DELETE FROM brief_item WHERE brief_id = ?').run(bid);
+  const ins = db.prepare(
+    'INSERT OR IGNORE INTO brief_item (brief_id, item_id, rank, section, ai_summary) VALUES (?, ?, ?, ?, ?)',
+  );
+  let rank = 0;
+  for (const g of b.groups || []) {
+    for (const it of g.items || []) {
+      rank += 1;
+      ins.run(bid, Number(it.id), rank, String(g.name || ''), String(it.digest || ''));
+    }
+  }
+  return { ok: true, id: bid, date, items: rank };
+}
+
+function safeJsonArray(text) {
+  try {
+    const v = JSON.parse(String(text || '[]'));
+    return Array.isArray(v) ? v.map(Number).filter((n) => Number.isFinite(n)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 读一份简报（不给日期就取最近的一份）。
+ * 返回的结构就是渲染层要认识的全部 —— 它不需要知道任何采集/模型细节（架构文档 D1）。
+ */
+export function getBrief(db, date) {
+  const row = date
+    ? db.prepare('SELECT * FROM brief WHERE brief_date = ?').get(String(date))
+    : db.prepare('SELECT * FROM brief ORDER BY brief_date DESC LIMIT 1').get();
+  if (!row) return null;
+
+  const rows = db
+    .prepare(
+      'SELECT bi.item_id, bi.rank, bi.section, bi.ai_summary, i.title, i.url, i.source_name, i.published_at ' +
+        'FROM brief_item bi JOIN item i ON i.id = bi.item_id WHERE bi.brief_id = ? ORDER BY bi.rank',
+    )
+    .all(Number(row.id));
+
+  /* 从 brief_item 还原分组：**按 rank 的顺序**，而不是按 section 第一次出现的顺序 ——
+     否则"最重要的那组"会因为组名的字典序被排到后面去。 */
+  const order = [];
+  const bySection = new Map();
+  for (const it of rows) {
+    const name = it.section || '要点';
+    if (!bySection.has(name)) { bySection.set(name, []); order.push(name); }
+    bySection.get(name).push({
+      id: Number(it.item_id),
+      title: it.title,
+      url: it.url,
+      source: it.source_name,
+      digest: it.ai_summary || '',
+      publishedAt: it.published_at,
+    });
+  }
+  return {
+    id: Number(row.id),
+    date: row.brief_date,
+    headline: row.headline || '',
+    groups: order.map((name) => {
+      const items = bySection.get(name);
+      return { name, count: items.length, items };
+    }),
+    status: row.status || 'none',
+    detail: row.detail || '',
+    model: row.model || '',
+    tokenUsed: row.token_used == null ? null : Number(row.token_used),
+    rawCount: row.raw_count == null ? null : Number(row.raw_count),
+    keptCount: row.kept_count == null ? null : Number(row.kept_count),
+    curatedIds: safeJsonArray(row.curated_ids),
+    inputHash: row.input_hash || '',
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * 今天（含往前若干天）一共花了多少 token —— 北极星辅助指标写着「必须可见」。
+ * ⚠️ 只统计**有真实用量**的那些行；拿不到用量的（老数据 / 端点不回 usage）不计入 0，
+ *    而是单独报一个 `unknown` 计数 —— 把"不知道"混进"0"就是在编数字。
+ */
+export function briefTokenUsage(db, sinceDate) {
+  const r = db
+    .prepare(
+      'SELECT COALESCE(SUM(token_used), 0) AS total, COUNT(token_used) AS known, ' +
+        'SUM(CASE WHEN token_used IS NULL THEN 1 ELSE 0 END) AS unknown, COUNT(*) AS briefs ' +
+        'FROM brief WHERE brief_date >= ?',
+    )
+    .get(String(sinceDate || '0000-00-00'));
+  return {
+    total: Number(r.total) || 0,
+    knownBriefs: Number(r.known) || 0,
+    unknownBriefs: Number(r.unknown) || 0,
+    briefs: Number(r.briefs) || 0,
+  };
+}

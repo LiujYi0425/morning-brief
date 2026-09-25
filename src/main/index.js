@@ -63,6 +63,13 @@ import { selectByQuota, quotaOf, scopedQuota } from '../shared/quota.js';
    ⚠️ 另写一份的话，"添加时验得过"与"抓取时抓得动"会各自漂移，
       而那正是本项目反复栽过的"两份口径"。 */
 import { validateExternalUrl } from './url-guard.js';
+import { localDay } from '../shared/day.js';
+/* ⚠️ 别名（getStoredBrief）：本文件里已经有一个叫 getBrief 的**deps 回调**，
+   两个同名会让"读的是库里那份还是渲染层那份"变成要读上下文才知道的事。 */
+import { getBrief as getStoredBrief } from '../store/db.js';
+import { readKey, status as keyStatus, setKey, clearKey } from './keystore.js';
+import { generateBrief, readAiConfig, writeAiConfig, todayUsage } from './brief-service.js';
+import { createAiClient, testConnection } from '../shared/ai/client.js';
 import { fetchText } from '../ingest/fetch-feeds.js';
 import { parseFeed } from '../ingest/feed-parse.js';
 /* ★ "这个地址能不能当源"是**纯判定**，拆在 feed-url.js 里 ——
@@ -422,6 +429,45 @@ function serialize(fn) {
   return writeChain;
 }
 
+/**
+ * 组一份「AI 状态」给界面：配没配 Key、端点与模型、今天的用量、今天那一份简报。
+ *
+ * ⚠️ 这里**只放"配没配"和一个掩码尾巴**，永远不放 Key 本身 ——
+ *    渲染进程能拿到的关于 Key 的全部信息，就是这个函数的返回值（R-E05）。
+ */
+function buildAiState(d) {
+  const today = localDay();
+  const todayBrief = getStoredBrief(d, today);
+  return {
+    key: keyStatus(),
+    config: readAiConfig(d),
+    usage: todayUsage(d),
+    brief: todayBrief,
+    /* 有旧简报时也要说清楚是哪天的 —— 否则用户会以为「今天的怎么还没生成」 */
+    lastBriefDate: todayBrief ? todayBrief.date : (getStoredBrief(d) || {}).date || '',
+  };
+}
+
+/**
+ * 生成今天的简报（**自动与手动共用一份口径**）。
+ *
+ * ⚠️ 与 doIngest 同一个理由：界面、托盘、定时三条路都会走到这里，
+ *    口径只许有一份（否则 "托盘的刷新会生成、界面的不会" 这种事一定会发生）。
+ */
+async function generateTodayBrief(force) {
+  const d = getDb();
+  const key = readKey();
+  const out = await generateBrief({
+    db: d,
+    apiKey: key || '',
+    force: !!force,
+    onLog: (m) => console.log('[ai]', m),
+  });
+  if (out.reason === 'no-key') console.log('[ai] 还没配置 API Key —— 跳过生成（一个请求都不发）');
+  if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
+  return out;
+}
+
 /** 组一份"当前简报"给界面 */
 function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } = {}) {
   const d = getDb();
@@ -566,13 +612,37 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
   const todayTotal = countItems(d, { sinceIso });
   const filteredTotal = categoryIds && categoryIds.length ? countItems(d, { sinceIso, categoryIds }) : todayTotal;
 
+  /* ★★ 简报即默认视图（用户拍板）。
+   *
+   * 规则刻意只有一条、而且很窄：
+   *   **只有「全部」、而且不是「看今天全部」时，列表才换成 AI 精选的那十几条。**
+   *   选了某个类型、或点了「看今天全部」，仍然走原来的全量列表 ——
+   *   于是这次改动**没有动任何已有的浏览方式**，只是把默认那一屏填上了简报。
+   *
+   * ⚠️ 降级形态（status 是 fallback）**照样用它的条目** —— 那是「今天必须有东西看」
+   *    的保证（R-E04）；而 headline 会如实说明这不是 AI 挑的。
+   * ⚠️ 换成简报视图时 `hasMore` 必须为 false：否则「展开更多」会往简报里
+   *    追加**没被 AI 挑中**的条目，而用户以为那是同一份东西。 */
+  const ai = buildAiState(d);
+  const briefView = !!(ai.brief && ai.brief.groups.length && (!categoryIds || !categoryIds.length) && !todayOnly);
+  const viewItems = briefView
+    ? ai.brief.groups.flatMap((g) =>
+        g.items.map((it) => ({
+          id: it.id, title: it.title, url: it.url, summary: it.digest || '', author: null,
+          source_id: null, source_name: it.source || '', published_at: it.publishedAt || null,
+          fetched_at: null, read_state: 'unread', digest: it.digest || '',
+        })),
+      )
+    : items;
+
   return {
-    items,
-    hasMore,
-    nextCursor,
+    items: viewItems,
+    hasMore: briefView ? false : hasMore,
+    nextCursor: briefView ? null : nextCursor,
+    briefView,
     todayTotal,
     filteredTotal,
-    totalShown: items.length,
+    totalShown: viewItems.length,
     health,
     categories: listCategories(d),
     lastIngestAt: lastIngest,
@@ -604,6 +674,9 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
     sinceIso,
     activeCategory: categoryIds && categoryIds.length ? categoryIds[0] : null,
     dataDir: DATA_DIR,
+    /* ★ AI 简报（M1 交付物的最后一项）。
+       ⚠️ 这里**没有 Key**，只有「配没配」和一个掩码尾巴（keystore.status 的返回值）。 */
+    ai,
   };
 }
 
@@ -828,6 +901,19 @@ async function bootstrap() {
         categoryIds,
         log: (m) => console.log('[ingest]', m),
       });
+      /* ★★ 抓完就生成当天的简报（用户拍板：自动 + 设置里可手动重生成）。
+       *
+       * ⚠️ 三条纪律：
+       *   ① **绝不能因为模型挂了就让抓取看起来失败** —— 简报是锦上添花，
+       *      抓到的条目才是主体，所以这里整段包在 try/catch 里（R-E04）；
+       *   ② 没配 Key 就**一个请求都不发**（see generateTodayBrief）；
+       *   ③ 同一批候选不重复花钱（缓存闸门在 brief-service 里，纯函数可断言）。 */
+      try {
+        const g = await generateTodayBrief(false);
+        if (g && !g.ok && g.reason !== 'no-key') console.log('[ai] 本次没生成简报：' + (g.detail || g.reason));
+      } catch (e) {
+        console.log('[ai] 生成简报时出错（不影响抓取结果）：' + String((e && e.message) || e));
+      }
       // 抓完通知界面刷新
       if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
       return {
@@ -1174,6 +1260,22 @@ async function bootstrap() {
       console.log(`[category] 「${r.name}」的偏好 = ${label}（在「全部」里最多 ${quotaOf(CURATED)} 条，且至少 1 条）`);
       return { ...r, categories: listCategories(d), quota: quotaOf(CURATED), quotaScope: 'all' };
     },
+
+    /* ---------------- AI 摘要（M1 交付物的最后一项） ----------------
+     * ⚠️ Key 的读写**只在这里**发生，且 setKey 的返回值不含明文
+     *    （它只回 {ok, mode, warn}）—— 渲染层拿不到 Key，也没有通道能拿到。 */
+    keyStatus: () => keyStatus(),
+    setKey: (key, mode) => setKey(key, mode),
+    clearKey: () => clearKey(),
+    testKey: async () => {
+      const k = readKey();
+      if (!k) return { ok: false, message: '还没有配置 API Key' };
+      const cfg = readAiConfig(getDb());
+      return testConnection(createAiClient({}), { endpoint: cfg.endpoint, model: cfg.model, apiKey: k });
+    },
+    getAiConfig: () => readAiConfig(getDb()),
+    setAiConfig: (cfg) => writeAiConfig(getDb(), cfg),
+    generateBrief: (force) => generateTodayBrief(force),
 
     runIngest: doIngest,
     listCategories: () => listCategories(getDb()),

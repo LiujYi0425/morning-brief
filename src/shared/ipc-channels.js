@@ -41,6 +41,13 @@ export const IPC_CHANNELS = Object.freeze([
   'brief:more', // R → M：翻页（游标式）
   'brief:ingest', // R → M：手动触发抓取（可带当前类型）
   'brief:updated', // M → R：抓完推新数据
+  'brief:generate', // R → M：生成/重新生成今天的简报（AI 摘要，会花钱）
+  'ai:config', // R → M：读 AI 设置（端点 / 模型 / 条数）—— **不含 Key**
+  'ai:setConfig', // R → M：写 AI 设置 —— **不含 Key**（Key 只走下面那四条）
+  'apikey:status', // R → M：Key 是否已配置 —— **永不返回明文**
+  'apikey:set', // R → M：写入 Key（主进程内 safeStorage 加密后落盘）
+  'apikey:clear', // R → M：清除已存 Key
+  'apikey:test', // R → M：一次最小连通性测试（会真的发一个请求）
   'category:list',
   'category:create',
   'category:delete', // ★ 只删分类与绑定，绝不删条目

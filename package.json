@@ -19,7 +19,7 @@
     "dist": "node tools/dist.mjs",
     "dist:check": "node tools/check-dist.mjs",
     "release": "node tools/release.mjs",
-    "test": "node tools/test-all.mjs && node tools/test-interaction.mjs",
+    "test": "node tools/test-all.mjs && node tools/test-interaction.mjs && node tools/test-ai-brief.mjs",
     "test:data": "node tools/test-all.mjs",
     "test:ui": "node tools/test-interaction.mjs",
     "test:mutants": "node tools/test-mutants.mjs"
