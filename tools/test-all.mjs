@@ -130,7 +130,14 @@ import {
   finishRollback,
   formatBytes,
   DEFAULT_MAX_ATTEMPTS,
+  canonicalVersion,
+  versionLabel,
 } from '../src/shared/update.js';
+/* ★ 更新的 **I/O 外壳**（updater.js）在纯 Node 里**加载得动** ——
+   它对 electron 是懒加载（`await import('electron')` 写在函数体里），
+   而"去哪儿取清单"是注入的（`net`）。所以「线上版本有没有真的落盘」这件事
+   可以**真的跑一遍 checkForUpdate** 来证，而不是靠读源码猜。 */
+import { checkForUpdate, loadState } from '../src/main/updater.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
 /* 「添加源」的地址判定（阶段 A）：同样是零依赖纯函数，
    所以它能被离线穷举 —— 这正是把它从 main/index.js 里拆出来的原因。 */
@@ -2516,6 +2523,102 @@ ok('★ 杂项：字节格式化与状态可序列化（要落盘，不能带函
   assert.deepEqual(normalizeState(round, '0.1.0'), round, '落盘再读回来被判成脏数据');
 });
 
+/* ==================================================================
+ * 版本号标签（用户 2026-09-26 要的）
+ * ------------------------------------------------------------------
+ * 用户原话：「在检查更新的上面，后面跟上版本号」。落地成托盘菜单里常驻的一行：
+ *
+ *     当前版本 v0.1.8 · 线上 v0.1.7
+ *
+ * 两件事都必须被钉住：
+ *   ① 这一行**两版并排**（原来只有「晨报机 vX」——那三个字不提供信息，
+ *      而线上那一版必须点一次检查才看得到，点完又被下一条结论盖掉）；
+ *   ② 线上版本**活过重启**（落在状态文件里）—— 否则"常驻"只能算半截。
+ * ================================================================== */
+say();
+say('--- 版本号标签 · 托盘里常驻「当前版本 vX · 线上 vY」---');
+
+ok('★★ 版本号标签：两版并排；不知道线上时不编一个出来', () => {
+  assert.equal(versionLabel({ current: '0.1.8', remote: '0.1.7' }), '当前版本 v0.1.8 · 线上 v0.1.7');
+  /* 两版相同时也**要写出来**："一致"本身就是用户想确认的事 */
+  assert.equal(versionLabel({ current: '0.1.8', remote: '0.1.8' }), '当前版本 v0.1.8 · 线上 v0.1.8');
+  /* 没查过 / 查不到 ⇒ 只写本机，**不许**编一个「线上 v?」（那看起来像查过了没查到） */
+  assert.equal(versionLabel({ current: '0.1.8' }), '当前版本 v0.1.8', '线上未知时不该编一个出来');
+  assert.equal(versionLabel({ current: '0.1.8', remote: null }), '当前版本 v0.1.8');
+  /* 外面回来的字符串先规范化：`v0.1.7 ` 这类写法直接拼上去就是「线上 vv0.1.7」 */
+  assert.equal(versionLabel({ current: '0.1.8', remote: 'v0.1.7 ' }), '当前版本 v0.1.8 · 线上 v0.1.7');
+  assert.equal(versionLabel({ current: '0.1.8', remote: '不是版本号' }), '当前版本 v0.1.8');
+  assert.equal(versionLabel({}), '当前版本 v?');
+  /* 规范化的口径本身也要在场：`v` 前缀 / 尾随空格 / 预发布后缀 */
+  assert.equal(canonicalVersion('v0.1.8 '), '0.1.8');
+  assert.equal(canonicalVersion('1.2.3-rc1'), '1.2.3-rc1');
+  assert.equal(canonicalVersion('1.2'), null);
+});
+
+ok('★★ 线上版本要能活过重启：合法值留住、畸形值丢掉、落盘再读回来不丢', () => {
+  assert.equal(createUpdateState('0.1.7').lastRemote, null, '全新状态不该凭空编一个线上版本');
+  assert.equal(normalizeState({ schema: 1, current: '0.1.7', lastRemote: '0.1.8' }, '0.1.7').lastRemote, '0.1.8');
+  assert.equal(normalizeState({ schema: 1, lastRemote: 'v0.1.8' }, '0.1.7').lastRemote, '0.1.8', 'v 前缀没被规范化');
+
+  /* ⚠️ 这个值**直接进菜单文案**，而状态文件是外部可改的 ——
+     一个畸形字符串原样拼上去就是「线上 v哈哈哈」。所以只认 x.y.z（与清单校验同一把尺子）。 */
+  for (const bad of ['哈哈哈', '1.2', '', '   ', 42, null, undefined, {}, ['0.1.8'], '0.1.8.9']) {
+    assert.equal(
+      normalizeState({ schema: 1, lastRemote: bad }, '0.1.7').lastRemote,
+      null,
+      `畸形线上版本 ${JSON.stringify(bad)} 竟然被留在状态里`,
+    );
+  }
+
+  /* ⚠️ normalizeState 是**白名单式重建** ⇒ 它不认的字段会被悄悄吃掉。
+     `lastAttemptAt` 就栽过一次（见那里的注释）。这条断言盯的就是这个失败方式。 */
+  const withRemote = normalizeState({ schema: 1, current: '0.1.7', lastRemote: '0.1.8', lastCheck: '2026-09-26T00:00:00.000Z' }, '0.1.7');
+  assert.equal(withRemote.lastRemote, '0.1.8');
+  assert.deepEqual(normalizeState(JSON.parse(JSON.stringify(withRemote)), '0.1.7'), withRemote, '落盘再读回来把线上版本弄丢了');
+});
+
+aok('★★ 检查更新必须把「线上是哪一版」写进状态文件（菜单那半截靠它常驻）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-remote-'));
+  const manifest = {
+    version: '0.2.0',
+    releasedAt: '2026-09-26T00:00:00.000Z',
+    url: 'https://example.com/MorningBrief-Setup-0.2.0.exe',
+    sha256: 'a'.repeat(64),
+    size: 1024,
+    minFrom: '',
+    notes: '测试用清单',
+  };
+  /* 假 net：`fetchText` 的协议就是 electron net 的那一小块（request → response → data/end） */
+  const okNet = {
+    request: () => {
+      const handlers = {};
+      const res = { statusCode: 200, resume() {} };
+      res.on = (ev, fn) => {
+        if (ev === 'data') fn(Buffer.from(JSON.stringify(manifest), 'utf8'));
+        else if (ev === 'end') fn();
+        return res;
+      };
+      const req = { on: (ev, fn) => { handlers[ev] = fn; return req; }, end: () => { queueMicrotask(() => handlers.response(res)); } };
+      return req;
+    },
+  };
+
+  const r = await checkForUpdate({ dataDir: dir, currentVersion: '0.1.7', net: okNet, log: () => {} });
+  assert.equal(r.action, 'available');
+  assert.equal(r.remoteVersion, '0.2.0');
+  const st = loadState(dir, '0.1.7');
+  assert.equal(st.lastRemote, '0.2.0', '线上版本没有落盘 ⇒ 重启之后菜单里「线上 vY」那半截就没了');
+  assert.ok(st.lastCheck, 'lastCheck 没写');
+
+  /* ★ 反面：**检查失败不许把已知的线上版本抹掉**。
+     网络抖一下菜单就少半截，是那种"看起来没坏、但信息在慢慢退化"的故障。 */
+  const failNet = { request: () => { throw new Error('offline'); } };
+  const bad = await checkForUpdate({ dataDir: dir, currentVersion: '0.1.7', net: failNet, log: () => {} });
+  assert.equal(bad.action, 'error');
+  assert.equal(loadState(dir, '0.1.7').lastRemote, '0.2.0', '一次检查失败就把已知的线上版本清掉了');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 /* ================================================================== */
 /* 第十六层 · 筛选栏（本次功能）：配额 / 删除类型 / 源↔类型映射不被覆盖     */
 /* ==================================================================
@@ -4431,6 +4534,37 @@ ok('★ 健康度必须把「从未抓过」和「异常」分开说（否则读
   assert.ok(/未跑/.test(body), '健康度文案里没有「未跑」—— 用户会把「没跑过」读成「坏了」');
   assert.ok(/异常/.test(body), '健康度文案里没有「异常」—— 那就分不出真坏的');
   assert.ok(/h\.never/.test(body), '没有用到 never 这个数（主进程早就算好了，之前一直没用上）');
+});
+
+ok('★★ 变异测试的哨兵必须会「过期」—— 否则它会把源码退回几天前的版本', () => {
+  /* ⚠️ 2026-09-26 真事故：`%TEMP%` 里一份**两天前**留下的哨兵被当成"上次中断的还原点"，
+     于是 `src/ingest/fetch-feeds.js` 被整段退回**阶段 C 之前**（迁移那整块代码没了），
+     而 `git status` 只多一个 M —— 看起来像你自己的改动，再往下就是被提交、被打包发出去。
+     根因：所谓"还原"是**盲写**。哨兵存的是写它那一刻的原文 ⇒
+     只有"刚刚被中断的那一次"留下的哨兵，还原才等于撤销变异体。 */
+  /* ⚠️⚠️ 断言扫的是**文件全文**，而变异体的锚点字面量恰好也写在同一张 `MUTANTS` 表里
+     ⇒ 一个"把这一行改坏"的变异体会被表里那行 `from:` 原文**救活**
+     （实测就这么漏过一次：判据说"还在"，实际代码已经被改成 `if (false)`）。
+     这与「扫描前先剥注释」是同一类教训：**先把它自己不打算断言的那部分切掉**。 */
+  const full = fs.readFileSync(path.resolve(HERE, '..', 'tools', 'test-mutants.mjs'), 'utf8');
+  const tableAt = full.indexOf('const MUTANTS = [');
+  const afterTable = full.indexOf('/* ⚠️⚠️ 所有替换都必须用');
+  assert.ok(tableAt > 0 && afterTable > tableAt, '定位不到 MUTANTS 表（本脚本结构变了？）');
+  const src = full.slice(0, tableAt) + full.slice(afterTable);
+  assert.ok(/SENTINEL_MAX_AGE_MS/.test(src), '哨兵没有过期判据 —— 一份几天前的哨兵会被当成中断还原点');
+  assert.ok(
+    /if \(!Number\.isFinite\(ageMs\) \|\| ageMs > SENTINEL_MAX_AGE_MS\) \{/.test(src),
+    '过期判据定义了却没被调用（死守卫）—— 那它一份哨兵都拦不住',
+  );
+  assert.ok(/at: Date\.now\(\)/.test(src), '哨兵没有写时间戳 ⇒ 下次运行无从判断它新不新鲜');
+  /* 过期分支里**一行都不许写盘**，而且必须中止：
+     只打印一句然后继续往下跑，等于还是盲写了一遍。 */
+  const start = src.indexOf('SENTINEL_MAX_AGE_MS) {');
+  const end = src.indexOf('for (const [rel, text] of files)', start);
+  assert.ok(start > 0 && end > start, '定位不到「过期哨兵」那个分支');
+  const branch = src.slice(start, end);
+  assert.ok(/process\.exit\(1\)/.test(branch), '过期哨兵只打印一句就继续 —— 那还是会往下盲写');
+  assert.ok(!/writeFileSync\(path\.join\(ROOT/.test(branch), '过期分支里居然还在写盘（盲写就是要防的那件事）');
 });
 say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
 /** 每个变异体：改坏一处，期望"至少有一条断言失败" */

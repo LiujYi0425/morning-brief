@@ -261,6 +261,42 @@ ok('★ 「检查更新」必须把线上与本机两个版本都写出来（否
   assert.ok(js.includes('检查失败' + "' + (r.why"), '检查失败没有说原因');
 });
 
+/* ---- 16. 版本号标签（用户 2026-09-26：「在检查更新的上面，后面跟上版本号」）----
+ *
+ * ⚠️ 这一条**没法离线跑起来**（index.js 顶层就 import electron，考裁判加载不了它），
+ *    所以判据落在源码上：位置（在「检查更新」之前）、两版都写（remote 必须传进去）、
+ *    常驻（从状态文件读）、查完立刻重建菜单。
+ *    ⚠️ 文案本身是纯函数（`shared/update.js` 的 versionLabel），
+ *       它的行为由 tools/test-all.mjs 真正跑着断言 —— 这里只钉接线。 */
+ok('★★ 托盘里常驻版本号标签，且在「检查更新」正上方（两版并排）', () => {
+  const js = readSrc('src/main/index.js');
+  assert.ok(js.includes('versionMenuLabel()'), '托盘菜单里没有版本号标签');
+  assert.ok(
+    js.includes('versionLabel({ current: app.getVersion(), remote: lastRemote })'),
+    '标签没把线上版本一起写出来 —— 「后面跟上版本号」要的就是这一半',
+  );
+  assert.ok(
+    js.includes('loadState(DATA_DIR'),
+    '线上版本没有从状态文件里读 ⇒ 重启之后菜单只剩本机那半截（"常驻"名不副实）',
+  );
+  const atLabel = js.indexOf('versionMenuLabel()');
+  const atCheck = js.indexOf('label: updateMenuLabel()');
+  assert.ok(atLabel > 0 && atCheck > 0, '找不到托盘里那两行菜单项');
+  assert.ok(atLabel < atCheck, '版本号标签跑到「检查更新」下面去了（用户要的是正上方）');
+
+  /* 检查完必须**立刻**重建菜单：托盘菜单只建一次、之后每次右键弹出的是同一份，
+     不重建的话文案会停在「正在处理更新…」或上一次的结论上。 */
+  assert.ok(
+    /\} finally \{\s*updateBusy = false;[\s\S]{0,600}?refreshMenu\(\);/.test(js),
+    '检查完之后（含失败路径）没有重建菜单 ⇒ 菜单停在旧文案上',
+  );
+  assert.ok(js.includes('refreshMenu = rebuildMenu'), 'refreshMenu 没接到真正的重建函数上（空实现 = 菜单永不刷新）');
+
+  const up = readSrc('src/shared/update.js');
+  assert.ok(up.includes('export function versionLabel'), '文案没做成纯函数 —— 拼在主进程里就没法离线穷举');
+  assert.ok(up.includes('lastRemote'), '状态里没有 lastRemote ⇒ 线上版本活不过重启');
+});
+
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 库还开着，删不掉就算了（临时目录） */ }
 process.exit(fail ? 1 : 0);

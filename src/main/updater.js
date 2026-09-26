@@ -208,6 +208,10 @@ export async function checkForUpdate({ dataDir, currentVersion, url, log = () =>
 
   const s = loadState(dataDir, currentVersion);
   s.lastCheck = new Date().toISOString();
+  /* ★ 顺手把"线上是哪一版"记进状态文件（用户要的托盘版本号标签靠它常驻）。
+     ⚠️ 落盘的位置就在这里、而不是在调用方：调用方（index.js）手上没有状态文件，
+        它只有这一次检查的结果 —— 而"上次查到的是哪版"必须活过重启。 */
+  s.lastRemote = parsed.manifest.version;
   saveState(dataDir, s);
   return d;
 }

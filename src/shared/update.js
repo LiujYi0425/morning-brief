@@ -41,6 +41,21 @@ export function parseVersion(s) {
 }
 
 /**
+ * 把版本号规整成 `x.y.z[-预发布]` 的规范写法；解析不了返回 `null`。
+ *
+ * ⚠️ 存在的理由：版本号会**从外面回来**（网络上的清单、状态文件里手改过的值），
+ *    而 `v0.1.8` / `0.1.8 ` 这类写法都是合法的输入。
+ *    直接把它拼进菜单就是「线上 vv0.1.8」—— 所以一律先过这一道。
+ * @param {string} s
+ * @returns {string|null}
+ */
+export function canonicalVersion(s) {
+  const v = parseVersion(s);
+  if (!v) return null;
+  return `${v.major}.${v.minor}.${v.patch}${v.pre ? '-' + v.pre : ''}`;
+}
+
+/**
  * 比较两个版本号。`a>b` 返回 1，`a<b` 返回 -1，相等返回 0。
  * ⚠️ 任意一边解析不了就返回 `null`，**不是**返回 0 ——
  *    "解析失败"和"版本相同"混为一谈，会让畸形清单被当成"已是最新"。
@@ -106,7 +121,7 @@ export function parseManifest(raw) {
   return {
     ok: true,
     manifest: {
-      version: `${v.major}.${v.minor}.${v.patch}${v.pre ? '-' + v.pre : ''}`,
+      version: canonicalVersion(o.version),
       url: o.url,
       sha256: hex,
       size,
@@ -160,6 +175,11 @@ export function createUpdateState(current, now = new Date()) {
     /* pending 存在 = "刚装了新版本，但还没证明它健康" */
     pending: null,
     lastCheck: null,
+    /* ★ 上一次检查时**线上**是哪一版 —— 用户要的「版本号标签」靠它常驻托盘菜单：
+         右键就能看到「当前版本 vX · 线上 vY」，不必先点一次「检查更新」。
+       ⚠️ 与 `lastCheck` 是两件事，不能合并：一个是"什么时候查的"，
+         一个是"查到的是什么"。只留时间戳的话，重启之后菜单里线上那半截就没了。 */
+    lastRemote: null,
     lastRollback: null,
     updatedAt: new Date(now).toISOString(),
   };
@@ -174,6 +194,9 @@ export function normalizeState(raw, current) {
   if (raw.schema !== UPDATE_SCHEMA) return createUpdateState(current);
   const s = createUpdateState(typeof raw.current === 'string' ? raw.current : current);
   s.lastCheck = typeof raw.lastCheck === 'string' ? raw.lastCheck : null;
+  /* ⚠️ 这个字段**直接进菜单文案**，所以按清单校验同一把尺子来：只认 `x.y.z`。
+     状态文件是外部可改的，一个畸形字符串原样拼上去就是「线上 v哈哈哈」。 */
+  s.lastRemote = canonicalVersion(raw.lastRemote);
   s.lastRollback = raw.lastRollback && typeof raw.lastRollback === 'object' ? raw.lastRollback : null;
   s.updatedAt = typeof raw.updatedAt === 'string' ? raw.updatedAt : s.updatedAt;
   const p = raw.pending;
@@ -293,4 +316,27 @@ export function formatBytes(n) {
   if (v < 1024) return `${v} B`;
   if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
   return `${(v / 1048576).toFixed(1)} MB`;
+}
+
+/**
+ * 托盘菜单里那行**版本号标签**：「当前版本 v0.1.8 · 线上 v0.1.7」。
+ *
+ * 为什么要有它、而且必须**常驻**（用户 2026-09-26 提的）：
+ *   右键托盘点「检查更新」之前，用户第一句想问的其实是"我装的是哪版、线上是哪版"。
+ *   原来菜单上只有一行灰字「晨报机 v0.1.7」——
+ *     · 「晨报机」这三个字没提供任何信息（用户当然知道自己开的是什么程序）；
+ *     · 线上那一版**必须点一次检查**才知道，点完菜单又被下一条结论盖掉。
+ *   现在两版并排写在同一行里，随时右键都能看见 —— 报问题时照着念就行。
+ *
+ * ⚠️ 线上版本**不知道就只写本机**（从没检查过 / 检查一直失败）。
+ *    不编一个「线上 v?」出来：那看起来像"查过了、但没查到"，是假信息。
+ *
+ * @param {{current?:string, remote?:string}} [o]
+ * @returns {string}
+ */
+export function versionLabel({ current, remote } = {}) {
+  const mine = canonicalVersion(current) || String(current == null ? '' : current).trim() || '?';
+  const line = `当前版本 v${mine}`;
+  const r = canonicalVersion(remote);
+  return r ? `${line} · 线上 v${r}` : line;
 }

@@ -35,8 +35,8 @@ import {
   probeWritable,
 } from '../shared/runtime-state.js';
 import { createBootMark, teeConsole, createLogSink } from '../shared/run-log.js';
-import { bootWatchdog, markHealthy, rollbackNow, checkForUpdate, downloadUpdate, applyUpdate } from './updater.js';
-import { formatBytes } from '../shared/update.js';
+import { bootWatchdog, markHealthy, rollbackNow, checkForUpdate, downloadUpdate, applyUpdate, loadState } from './updater.js';
+import { formatBytes, versionLabel } from '../shared/update.js';
 import { runIngest } from '../ingest/fetch-feeds.js';
 import {
   openDb,
@@ -1002,6 +1002,24 @@ async function bootstrap() {
   let updateReady = null;   // 已确认可用、等用户点第二次的清单
   let updateNote = '';      // 上一次检查的结论（显示在菜单里）
 
+  /* ★ 版本号标签（用户 2026-09-26 要的）：菜单里常驻一行「当前版本 vX · 线上 vY」。
+   *
+   * `lastRemote` 从**状态文件**里读，而不是只留这一次检查的结果 ——
+   * 这样重启之后它依然在，用户不必先点一次「检查更新」才看得到线上是哪版。
+   * 没有它的话，菜单只能写「当前版本 vX」：那一半信息永远缺着。 */
+  let lastRemote = null;
+  try {
+    if (!dataDirError) lastRemote = loadState(DATA_DIR, app.getVersion()).lastRemote;
+  } catch (err) {
+    /* 状态文件坏掉**不该影响启动**（它是附加信息，不是启动路径） */
+    console.log('[update] 读不到上次的线上版本：' + (err && err.message));
+  }
+
+  /* 托盘菜单是"建一次、之后每次右键弹出那一份"的 ⇒ 结论变了必须**重建**，
+     否则用户查到了新版本、菜单上却还写着上一次的字（要点一下左键才刷新）。
+     ⚠️ 托盘那段代码在下面才跑，所以这里先立一个空实现占位。 */
+  let refreshMenu = () => {};
+
   /* 外部触发：数据目录里放一个 `update-request` 文件，下次启动就真的去装。
      与 `stop-request` 完全同一套做法 —— 命令行、脚本、运维都用得上。
      它也让"演练一次真实升级"不必有人去点托盘的第二次点击。 */
@@ -1023,6 +1041,10 @@ async function bootstrap() {
     return updateNote ? `检查更新（${updateNote}）` : '检查更新';
   };
 
+  /* 「当前版本 vX · 线上 vY」—— 常驻在「检查更新」的**正上方**（用户要的位置）。
+     文案本身是纯函数（`shared/update.js` 的 versionLabel），能离线穷举。 */
+  const versionMenuLabel = () => versionLabel({ current: app.getVersion(), remote: lastRemote });
+
   const runUpdateCheck = async ({ interactive = false } = {}) => {
     if (updateBusy) return;
     /* 开发态不参与自更新：项目目录不是"装"出来的，没有装回去这回事。
@@ -1034,23 +1056,30 @@ async function bootstrap() {
     }
     if (!updateReady) {
       updateBusy = true;
+      refreshMenu();
       try {
         const r = await checkForUpdate({
           dataDir: DATA_DIR,
           currentVersion: app.getVersion(),
           log: (m) => console.log(m),
         });
+        /* ★ 线上版本只有一个来源：这一次检查的结果（`checkForUpdate` 已把它一并写进状态文件，
+           所以重启之后菜单上那半截还在）。 */
+        if (r.remoteVersion) lastRemote = r.remoteVersion;
         if (r.action === 'available') {
           updateReady = r.manifest;
           updateNote = '';
           if (interactive) console.log(`[update] 发现新版本 ${r.manifest.version}，再点一次即安装`);
         } else if (r.action === 'none') {
-          /* ★ 两个版本都写出来。原来只有「已是最新」四个字 ——
-             而在「本机比线上还新」这种真实情况下（0.1.4~0.1.7 从没发布过），
-             那句话虽然正确，却让人以为更新功能坏了。 */
+          /* ★ 两个版本在正上方那行已经是常驻的了，这里只说结论本身。
+             但**两者不一致时仍然写出来** —— 那正是"更新功能看起来坏了"的真实成因：
+             本机比线上还新（0.1.4~0.1.7 从没发布过），"已是最新"四个字没错，
+             却让人以为更新坏了。写成「线上 v0.1.3 < 本机 v0.1.7」一眼就懂。 */
           const remote = r.remoteVersion ? 'v' + r.remoteVersion : '?';
           const mine = 'v' + app.getVersion();
-          updateNote = '已是最新（线上 ' + remote + ' · 本机 ' + mine + '）';
+          updateNote = r.remoteVersion && r.remoteVersion !== app.getVersion()
+            ? `已是最新（线上 ${remote} < 本机 ${mine}）`
+            : '已是最新';
           if (interactive) {
             console.log('[update] 线上 ' + remote + '，本机 ' + mine +
               (r.remoteVersion && r.remoteVersion !== app.getVersion() ? ' —— ⚠️ 两者不同：线上那个不是最新发布的版本（很可能这几版从没发布过）' : ' —— 一致'));
@@ -1065,6 +1094,10 @@ async function bootstrap() {
         console.log('[update] 检查异常：' + (err && err.message));
       } finally {
         updateBusy = false;
+        /* ★ 重建菜单必须放在这里：结论（updateNote / updateReady / lastRemote）都已经写好了，
+           而且**异常路径也要走到** —— 检查失败时菜单同样得从「正在处理更新…」变回一句话。
+           少了这一句，菜单会停在旧文案上，直到用户左键点一下托盘才刷新。 */
+        refreshMenu();
       }
       if (!updateReady) return;
       if (!interactive) return;   // 自动检查只负责把菜单点亮
@@ -1439,7 +1472,11 @@ async function bootstrap() {
                 enabled: false,
               },
               { label: `下次抓取：${nextRunAt(new Date(), FETCH_TIME.hour, FETCH_TIME.minute).toLocaleString()}`, enabled: false },
-              { label: `晨报机 v${app.getVersion()}`, enabled: false },
+              /* ★ 版本号标签（用户 2026-09-26 要的）：常驻在「检查更新」正上方，
+                 两个版本并排写着 —— 「当前版本 v0.1.8 · 线上 v0.1.7」。
+                 原来这里写的是「晨报机 vX」：那三个字没提供信息（用户当然知道
+                 自己开的是什么程序），而线上那一版必须点一次检查才看得到。 */
+              { label: versionMenuLabel(), enabled: false },
               { type: 'separator' },
               {
                 label: updateMenuLabel(),
@@ -1455,6 +1492,9 @@ async function bootstrap() {
           );
         };
         rebuildMenu();
+        /* ★ 把重建函数交给更新那一块 —— 检查完（结论变了）要立刻重建菜单，
+           否则菜单会停在「正在处理更新…」或上一次的结论上（见 refreshMenu 的说明）。 */
+        refreshMenu = rebuildMenu;
         // 菜单里的"上次抓取/下次抓取"是会变的，展开/收起也是 —— 每次弹出前重算一次
         tray.on('click', () => {
           setCardExpanded(cardState.value !== 'expanded');

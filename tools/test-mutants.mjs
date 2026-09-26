@@ -45,12 +45,45 @@ const SENTINEL = path.join(
   os.tmpdir(),
   'mb-mutants-inflight-' + ROOT.replace(/[^A-Za-z0-9]+/g, '_') + '.json',
 )
+/* ★★ 哨兵「多久算过期」（2026-09-26 加的一道闸 —— 代价是一次真实的源码回退）。
+ *
+ * ⚠️ 事故经过：`%TEMP%` 里躺着一份**两天前**留下的哨兵（来自一次被中断的运行）。
+ *    下一次运行看到它，就老老实实"按哨兵还原"，把 `src/ingest/fetch-feeds.js`
+ *    **整段退回到阶段 C 之前**（`migrateTaxonomy` / `ensurePresetCategories`
+ *    连同那次迁移的整块注释一起没了），而 `git status` 只多一个 M ——
+ *    看起来**像你自己的改动**。再往下就是被顺手提交、打包发出去。
+ *
+ * ⚠️ 根因：所谓"还原"其实是一次**盲写**。哨兵里存的是**写哨兵那一刻**的原文，
+ *    所以只有"刚刚被中断的那一次运行"留下的哨兵，"还原"才等于"撤销变异体"。
+ *    中断与恢复之间隔得越久，写的就越是**过期的历史版本** —— 退得越远。
+ *
+ * ⇒ 判据换成"新不新鲜"：只有 6 小时以内留下的哨兵才自动还原。
+ *    更老的哨兵**一行都不写盘**，直接红着脸退出 —— 由人看一眼 `git diff` 再决定。
+ *    （没有 `at` 字段的老格式哨兵同样按过期处理：宁可让人来看，也不盲写。）
+ */
+const SENTINEL_MAX_AGE_MS = 6 * 3600 * 1000
 if (fs.existsSync(SENTINEL)) {
   try {
     const saved = JSON.parse(fs.readFileSync(SENTINEL, 'utf8'))
-    for (const [rel, text] of Object.entries(saved.files || {})) {
+    const ageMs = Date.now() - Number(saved.at || 0)
+    const files = Object.entries(saved.files || {})
+    if (!Number.isFinite(ageMs) || ageMs > SENTINEL_MAX_AGE_MS) {
+      console.log('✗ 哨兵文件在，但它**过期**了 —— 拒绝自动还原（一行都不动）。')
+      console.log(`  哨兵：${SENTINEL}`)
+      console.log(`  它记着这些文件的"原文"：${files.map(([rel]) => rel).join('、') || '（空）'}`)
+      console.log('  ⚠️ 按过期哨兵还原 = 把源码**退回当时的版本**（实测退掉过一整个阶段的代码），')
+      console.log('     而 git status 只会显示一个 M，看起来像你自己的改动。')
+      console.log('  正确做法：')
+      console.log('    ① `git status` / `git diff` 看清当前改动是不是你自己的（是 → 什么都不用做）；')
+      console.log('    ② 确认没有变异体残留，删掉哨兵文件，再跑一次本命令：');
+      console.log(`       del "${SENTINEL}"`);
+      console.log('    ③ 若确实要放弃当前改动、回到已提交的状态：');
+      console.log('       git checkout -- ' + (files.map(([rel]) => rel).join(' ') || '<文件>'));
+      process.exit(1)
+    }
+    for (const [rel, text] of files) {
       fs.writeFileSync(path.join(ROOT, rel), text, 'utf8')
-      console.log(`⚠️ 上一次变异测试是**被中断**的（没走到还原），已按哨兵还原：${rel}`)
+      console.log(`⚠️ 上一次变异测试是**被中断**的（${Math.round(ageMs / 60000)} 分钟前），已按哨兵还原：${rel}`)
     }
     fs.unlinkSync(SENTINEL)
     console.log('   接着跑之前先看一眼 `git diff` —— 确认剩下的改动确实是你自己的。\n')
@@ -529,6 +562,59 @@ const MUTANTS = [
     ].join(String.fromCharCode(10)),
     to: '  return d.toISOString().slice(0, 10);',
     expect: '本地日',
+  },
+  /* ── 版本号标签（用户 2026-09-26）：「在检查更新的上面，后面跟上版本号」
+   *    托盘里常驻一行「当前版本 vX · 线上 vY」。
+   * ⚠️ 这一组里**有两条只可能落在源码上**：`index.js` 顶层 import electron，
+   *    离线考裁判加载不了它 —— 所以那两条的 test 指向 test-ai-brief（与 release.mjs
+   *    的版本号守卫同一个路子）。文案本身的靶子落在 shared/update.js，**是真跑出来的**。 */
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: MAIN,
+    why: '版本号标签不写线上版本 ⇒ 用户还是得点一次「检查更新」才知道线上是哪版（他要的就是"后面跟上版本号"）',
+    from: 'versionLabel({ current: app.getVersion(), remote: lastRemote })',
+    to: 'versionLabel({ current: app.getVersion() })',
+    expect: '没把线上版本一起写出来',
+  },
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: MAIN,
+    why: '检查完不重建托盘菜单 ⇒ 查到了新版本、菜单上却还写着上一次的字（托盘菜单只建一次、之后每次弹的都是同一份）',
+    from: '        refreshMenu();\n      }',
+    to: '      }',
+    expect: '没有重建菜单',
+  },
+  {
+    file: UPDATE,
+    why: '线上版本落盘时不规范化 ⇒ 状态文件里一个畸形字符串原样进菜单（「线上 v哈哈哈」）',
+    from: '  s.lastRemote = canonicalVersion(raw.lastRemote);',
+    to: '  s.lastRemote = raw.lastRemote === undefined ? null : raw.lastRemote;',
+    /* ⚠️ 这条断言里**先**撞上的是「v 前缀没被规范化」那一句（它在畸形值那一段之前），
+       所以 expect 认的是它 —— 写「畸形线上版本」会把这个变异体误报成漏网
+       （实际测试确实失败了，只是失败信息对不上）。 */
+    expect: 'v 前缀没被规范化',
+  },
+  {
+    file: UPDATE,
+    why: '版本号标签丢掉线上那一半 ⇒ 「后面跟上版本号」只做了一半，用户仍然看不出线上是哪版',
+    from: '  return r ? `${line} · 线上 v${r}` : line;',
+    to: '  return line;',
+    expect: '版本号标签',
+  },
+  {
+    file: 'src/main/updater.js',
+    why: '检查更新不把线上版本写进状态文件 ⇒ 重启之后菜单里「线上 vY」那半截就没了（"常驻"名不副实）',
+    from: '  s.lastRemote = parsed.manifest.version;',
+    to: '  s.lastRemote = null;',
+    expect: '线上版本没有落盘',
+  },
+  /* ── 哨兵的新鲜度（2026-09-26 真事故：一份两天前的哨兵把源码退回了一整个阶段）── */
+  {
+    file: 'tools/test-mutants.mjs',
+    why: '哨兵没有过期判据 ⇒ 一份几天前的哨兵被当成"上次中断的还原点"，盲写把源码整段退回当时的版本',
+    from: '    if (!Number.isFinite(ageMs) || ageMs > SENTINEL_MAX_AGE_MS) {',
+    to: '    if (false) {',
+    expect: '过期判据定义了却没被调用',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。
@@ -588,8 +674,10 @@ for (const m of MUTANTS) {
    *    ⚠️ 这个坑在本脚本里踩过两次，所以下面这行旁边留着这段注释。 */
   /* ⚠️ 哨兵必须落在**写坏源码之前** —— 顺序反了就等于没写：
      进程如果在"已经改了文件、还没写哨兵"的那一瞬间横死，
-     下次启动看不到哨兵，于是带着变异体继续跑（正是要防的那件事）。 */
-  fs.writeFileSync(SENTINEL, JSON.stringify({ file: m.file, files: { [m.file]: original } }), 'utf8')
+     下次启动看不到哨兵，于是带着变异体继续跑（正是要防的那件事）。
+     ⚠️ `at` 是"新鲜度"的判据（见文件开头那段）：没有它，下一次运行无从判断
+     这份哨兵是"刚刚中断"还是"两天前留下的" —— 后者按它还原会退掉一整段代码。 */
+  fs.writeFileSync(SENTINEL, JSON.stringify({ at: Date.now(), file: m.file, files: { [m.file]: original } }), 'utf8')
   fs.writeFileSync(abs, replaceLiteral(original, m.from, m.to), 'utf8')
   let out = ''
   let spawnErr = ''
