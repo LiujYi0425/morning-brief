@@ -22,6 +22,13 @@ dist/
 out/
 release/
 
+# ⚠️ 2026-09-25 补：electron-builder 的**另一种**产物目录名（= productName）。
+#    它不在 `directories.output` 的配置里，所以 `release/` 那一条挡不住它。
+#    实测后果：一次 `npm run dist` 之后，`git add -A` 会把 **368 MB / 79 个文件**
+#    的 Electron 运行时整个暂存进去 —— 而 `git add -A` 正是这个项目的常规动作。
+#    （这次没有推上去，远端当场核对过：坏的提交只停在本地。）
+MorningBrief/
+
 # ── 应用图标 ──────────────────────────────────────────
 # ⚠️ 用 `build/*` + 反选，**不能**写成 `build/`：
 #    gitignore 的规则是"父目录被排除后，无法再反选其中的文件"，
