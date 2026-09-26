@@ -121,6 +121,32 @@ const b3 = await generateBrief({ db: d3, apiKey: 'sk-x', now: NOW, client: f3.cl
 await aok('没有 published_at 的条目也算今天（与「看今天全部」同口径）', () => assert.equal(b3.raw, 4));
 await aok('本地日不是 UTC 日（东八区 07:30 属于当天）', () => { assert.equal(localDay(NOW), '2026-09-25'); assert.ok(localDayStartIso(NOW).startsWith('2026-09-24T16:00:00')); });
 
+/* ---- 11. 界面硬约束（源码级）—— 2026-09-25 真机 UI 冲突的防回归 ----
+ * ⚠️ 这三条是**源码级**断言、不是行为断言：它们钉的是一个「CSS/DOM 属性漏了一处」的 bug，
+ *    那种 bug 在真机上表现为「点开设置面板填不了 Key」，而离线行为测试**看不见**。
+ *    断言写法很朴素（字符串存在性），但它守的三条结论都是硬的 ——
+ *    每一条背后都有一次真机返工。 */
+const readSrc = (rel) => fs.readFileSync(new URL('../' + rel, import.meta.url), 'utf8');
+ok('★ AI 面板打开时必须也隐藏列表（否则两层文字叠在一起，真机表现=填不了 Key）', () => {
+  const js = readSrc('src/renderer/card.js');
+  const line = js.split('\n').find((l) => l.includes("elList.setAttribute('data-editing', 'on')"));
+  assert.ok(line, '找不到设置 data-editing 的那一行');
+  assert.ok(line.includes('d.aiPanel.open'), '这一行只认编辑面板 —— AI 面板打开时列表不会被隐藏：' + String(line).trim());
+});
+ok('★ .aipanel 必须有自己的定位与高度（不能落回 .catpanel 那套按小面板手算的预算）', () => {
+  const css = readSrc('src/renderer/styles/card.css');
+  const at = css.indexOf('.aipanel {');
+  assert.ok(at >= 0, 'card.css 里找不到 .aipanel 规则块');
+  const block = css.slice(at, css.indexOf('.aipanel__row', at));
+  assert.ok(block.includes('max-height'), '.aipanel 没有自己的 max-height ⇒ 落回 .catpanel 的 168px（14 行内容塞不进去）');
+  assert.ok(block.includes('position: fixed'), '.aipanel 没挂到窗口上 ⇒ vh 与百分比会相对 30px 高的 catbar 算');
+  assert.ok(block.includes('transform: none'), '.aipanel 少了 transform: none ⇒ fixed 会被 .catpanel 的 translateZ(0) 降级成 absolute');
+});
+ok('★ .aipanel__row 不许被压扁（父容器是 flex 列 + 高度受限）', () => {
+  const css = readSrc('src/renderer/styles/card.css');
+  assert.ok(/\.aipanel__row\s*\{[^}]*flex:\s*0 0 auto/.test(css), '.aipanel__row 少了 flex: 0 0 auto ⇒ 每行会被 flex-shrink 压成几像素、文字互相叠');
+});
+
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 库还开着，删不掉就算了（临时目录） */ }
 process.exit(fail ? 1 : 0);

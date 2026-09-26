@@ -760,7 +760,14 @@
      * ⚠️ 是 `visibility: hidden` 而不是 `display: none`：
      *    前者保留布局（滚动位置不丢），后者会让列表重新排版、收起展开时跳一下。 */
     if (elList) {
-      if (d.editor.visible) elList.setAttribute('data-editing', 'on');
+      /* ⚠️⚠️ **两个浮层都算**（2026-09-25 修复）。
+       *
+       * 这条以前只认「编辑类型」面板，于是 AI 设置面板打开时列表照常绘制 ——
+       * 而上面的注释早就写死了结论：透明窗口下 z-index / translateZ / contain / isolation
+       * **逐个试过全部无效**，唯一的修法是「浮层打开期间不画列表」。
+       * 用户报的「点 ⚙ 之后背景与原界面冲突、填不了 Key」就是这个。
+       * ⇒ 这个属性的语义是**「有浮层盖在列表上」**，不是「正在编辑类型」。 */
+      if (d.editor.visible || d.aiPanel.open) elList.setAttribute('data-editing', 'on');
       else elList.removeAttribute('data-editing');
     }
     /* 顶栏是 Disclosure 按钮 ⇒ aria-expanded 必须跟着状态走

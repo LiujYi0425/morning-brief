@@ -939,7 +939,48 @@ body {
   opacity: 0.72;
 }
 
-/* AI 设置面板（本次功能）。复用 .catpanel 的浮层，只补它自己要的排版。 */
+/* ★★ AI 设置面板（2026-09-25 修复）——
+ *    它**不复用** .catpanel 的高度预算，因为它俩不是同一种东西。
+ *    用户报「点 ⚙ 之后背景和原界面冲突、填不了 Key」，根因是三条叠在一起：
+ *
+ *    ① **列表没被隐藏**。`data-editing` 原来只按「编辑类型」面板设，
+ *       而 card.js 的注释里早写着这条硬结论：透明窗口下单靠 z-index / translateZ
+ *       都挡不住滚动列表的文字**画在浮层上面**，唯一的修法是「浮层打开期间不画列表」。
+ *       ⇒ AI 面板也要算进「有浮层盖着列表」。
+ *    ② **高度预算错配**。`.catpanel` 的 `max-height: 168px` 是按「编辑类型」的内容
+ *       一行行算出来的（4+15+78+24+15+26+4），而这个面板有 14 行、约 400px ——
+ *       塞进去就成了一个 168px 的小滚动框，输入框和按钮全被挤在一小块里。
+ *    ③ **行会被压扁**。`.catpanel__row` 有 `flex: 0 0 auto`，而 `.aipanel__row` 忘了写；
+ *       父容器是「flex 列 + 高度受限」⇒ 每一行都被 `flex-shrink` 压成几像素，文字互相叠。
+ *
+ * ⚠️ 用 `position: fixed` 挂到**窗口**上，而不是继承 `.catpanel` 的「挂 .catbar」：
+ *    面板的包含块因此是视口，`vh` 与百分比才说得通。
+ *    （`.catpanel` 在这里栽过一次：`calc(100% - 150px)` 里的 100% 是 30px 高的 catbar，
+ *      算出负数被夹成 0，面板只剩 17px。见上面那段注释。）
+ * ⚠️ 必须显式 `transform: none`：`.catpanel` 上的 `translateZ(0)` 会把 fixed 降级成 absolute。
+ *    丢掉那层合成是**安全**的 —— 列表已经被隐藏（见 ①），不再有合成层压过浮层这回事。
+ * ⚠️ 底部对齐（`top: auto` + `bottom`）而不是顶部对齐：面板高度由内容决定，
+ *    从下往上长，永远不会「顶到卡片外面被 overflow: hidden 裁掉」。
+ * ⚠️ `max-height: 70vh` 是相对**窗口**的：留出上面 30% 给顶栏与筛选栏，
+ *    这样面板盖住列表时，用户还能看到自己在哪、还能点收起。 */
+.aipanel {
+  position: fixed;
+  top: auto;
+  bottom: calc(var(--win-pad, 0px) + var(--gap-3));
+  left: calc(var(--win-pad, 0px) + var(--gap-3));
+  right: calc(var(--win-pad, 0px) + var(--gap-3));
+  max-height: 70vh;
+  transform: none;
+  will-change: auto;
+  z-index: 5;
+  gap: 2px;
+}
+/* 行不参与压缩（见上面 ③） */
+.aipanel__row { flex: 0 0 auto; }
+/* ⚠️ 面板里有**两处** `.catpanel__foot`（Key 的那排按钮、底部的关闭排）。
+   它们默认是 `position: sticky; bottom: 0` —— 两行都吸底会**互相盖住**。
+   ⇒ 面板整体滚动，按钮行不吸底。 */
+.aipanel .catpanel__foot { position: static; }
 .aipanel__row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
 .aipanel__label { flex: 0 0 auto; font-size: 11px; opacity: 0.7; min-width: 56px; }
 .aipanel__input {
