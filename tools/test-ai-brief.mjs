@@ -212,6 +212,27 @@ ok('★ 条目被截断时面板必须说明（否则用户以为「我订阅的
   assert.ok(js.includes('送进模型'), '面板没有区分「今天共多少条」与「送进模型多少条」');
 });
 
+/* ---- 14. P2：恢复默认 / 版本号 / 36氪 ---- */
+ok('★ 设置面板必须有「恢复默认」，且默认值来自主进程（不是渲染层自己抄一份）', () => {
+  const js = readSrc('src/renderer/card.js');
+  assert.ok(js.includes('恢复默认'), '面板里没有「恢复默认」');
+  assert.ok(js.includes('config.defaults') || js.includes('p.config.defaults'), '恢复默认没有用主进程给的默认值 —— 自己抄一份就是两份口径');
+  const main = readSrc('src/main/index.js');
+  assert.ok(main.includes('DEFAULT_ENDPOINT') && main.includes('defaults:'), '主进程没有把默认值随载荷发下去');
+});
+ok('★ 版本号要看得见（用户报问题时第一句就是「我装的是哪版」）', () => {
+  const js = readSrc('src/renderer/card.js');
+  assert.ok(js.includes("'v' + p.version") || js.includes('p.version'), '设置面板里没有版本号');
+  const main = readSrc('src/main/index.js');
+  assert.ok(main.includes('app.getVersion()'), '主进程没有取版本号');
+});
+ok('★ 36氪不许默认开着（实测 3/3 都是反爬页，而每个新用户会永久看到「1 个源异常」）', () => {
+  const src = readSrc('src/ingest/sources.js');
+  const line = src.split('\n').find((l) => l.includes("name: '36氪'") && l.includes('36kr.com/feed'));
+  assert.ok(line, '找不到 36氪 那条源');
+  assert.ok(line.includes('enabled: false'), '36氪 还是默认开着：' + String(line).trim().slice(0, 120));
+});
+
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 库还开着，删不掉就算了（临时目录） */ }
 process.exit(fail ? 1 : 0);

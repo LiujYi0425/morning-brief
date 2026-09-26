@@ -497,7 +497,20 @@
     genBtn.disabled = !!p.busy || !p.key.configured;
     genBtn.title = '会真的调用一次模型（花钱），并覆盖今天已有的那一份';
     genBtn.addEventListener('click', function () { runAi('generate', function () { return api.ai.generate(true); }); });
-    row2.appendChild(cfgBtn); row2.appendChild(genBtn);
+    /* ★ P2：「恢复默认」。默认值**由主进程随载荷发下来**（`config.defaults`）——
+       渲染层要是自己抄一份，改了 prompt.js 而忘了改这里，
+       「恢复默认」就会恢复到一个不存在的端点。 */
+    var defBtn = el('button', 'btn', '恢复默认');
+    defBtn.type = 'button';
+    defBtn.disabled = !!p.busy;
+    defBtn.title = '端点、模型、每天精选条数回到出厂值';
+    defBtn.addEventListener('click', function () {
+      var dft = (p.config && p.config.defaults) || {};
+      runAi('config', function () {
+        return api.ai.setConfig({ endpoint: dft.endpoint, model: dft.model, pickCount: dft.pickCount });
+      });
+    });
+    row2.appendChild(cfgBtn); row2.appendChild(genBtn); row2.appendChild(defBtn);
     elAiPanel.appendChild(row2);
 
     /* ④ 用量与今天那一份的状态。
@@ -520,6 +533,8 @@
     if (p.msg) elAiPanel.appendChild(el('div', 'aipanel__msg', (p.msg.ok ? '✔ ' : '✗ ') + p.msg.text));
 
     var row3 = el('div', 'catpanel__foot');
+    /* ★ P2：版本号（用户报问题时第一句就是「我装的是哪版」） */
+    if (p.version) row3.appendChild(el('span', 'aipanel__hint', 'v' + p.version));
     row3.appendChild(el('span', 'catpanel__spacer'));
     var close = el('button', 'btn', '关闭');
     close.type = 'button';

@@ -189,6 +189,7 @@
       ai: null,          // AI 简报状态（Key 配没配 / 端点 / 用量 / 今天那一份）
       briefView: false,  // 列表现在显示的是不是简报（**由主进程算**，界面不自己推）
       unreadToday: 0,    // 今天还没点开过的条数（主进程算好给过来）
+      version: '',       // 主进程给的版本号（设置面板底部显示）
       aiPanelOpen: false, // AI 设置面板开着没有
       aiBusy: '',         // 面板里正在忙什么（save / test / config / generate）
       aiMsg: null,        // 上一次操作的结果（{ok, text}）—— 失败必须说出来
@@ -393,6 +394,7 @@
       ai: p.ai === undefined ? v.ai : p.ai,
       briefView: p.briefView === undefined ? v.briefView : p.briefView,
       unreadToday: p.unreadToday === undefined ? v.unreadToday : (Number(p.unreadToday) || 0),
+      version: p.version === undefined ? v.version : String(p.version || ''),
         /* 服务端若知道"用户上次选的类别"而本地还没选，采纳它；否则尊重本地 */
         activeCategory: v.activeCategory == null ? (p.activeCategory == null ? null : p.activeCategory) : v.activeCategory,
         /* 取数回来 ⇒ 撤销"等你再点一次删除"（用户不点就等于放弃，别让一个
@@ -921,6 +923,7 @@
       msg: v.aiMsg || null,
       key: (aiState && aiState.key) || { configured: false, maskedTail: '', mode: null, encryption: true, broken: false },
       config: (aiState && aiState.config) || { endpoint: '', model: '', pickCount: 10 },
+      version: String(v.version || ''),
       usage: (aiState && aiState.usage) || { total: 0, knownBriefs: 0, unknownBriefs: 0, briefs: 0 },
       brief: (aiState && aiState.brief) || null,
       lastBriefDate: (aiState && aiState.lastBriefDate) || '',

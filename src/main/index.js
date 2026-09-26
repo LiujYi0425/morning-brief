@@ -65,6 +65,9 @@ import { selectByQuota, quotaOf, scopedQuota } from '../shared/quota.js';
 import { validateExternalUrl } from './url-guard.js';
 import { localDay } from '../shared/day.js';
 import { startupNotice } from '../shared/startup-notice.js';
+/* ⚠️ 设置面板的「恢复默认」要用到它们 —— 由主进程**唯一**持有，
+   渲染层自己抄一份就是两份口径（改了这里忘了那里，恢复到一个不存在的值）。 */
+import { DEFAULT_ENDPOINT, DEFAULT_MODEL, DEFAULT_PICK_COUNT } from '../shared/ai/prompt.js';
 /* ⚠️ 别名（getStoredBrief）：本文件里已经有一个叫 getBrief 的**deps 回调**，
    两个同名会让"读的是库里那份还是渲染层那份"变成要读上下文才知道的事。 */
 import { getBrief as getStoredBrief } from '../store/db.js';
@@ -442,7 +445,11 @@ function buildAiState(d) {
   const todayBrief = getStoredBrief(d, today);
   return {
     key: keyStatus(),
-    config: readAiConfig(d),
+    /* ⚠️ `defaults` 由主进程给：渲染层要是自己抄一份默认端点，那就是**两份口径**
+       （改了 prompt.js 而忘了改渲染层 ⇒ 「恢复默认」恢复到一个不存在的值）。 */
+    config: Object.assign(readAiConfig(d), {
+      defaults: { endpoint: DEFAULT_ENDPOINT, model: DEFAULT_MODEL, pickCount: DEFAULT_PICK_COUNT },
+    }),
     usage: todayUsage(d),
     brief: todayBrief,
     /* 有旧简报时也要说清楚是哪天的 —— 否则用户会以为「今天的怎么还没生成」 */
@@ -683,6 +690,8 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
     /* ★ AI 简报（M1 交付物的最后一项）。
        ⚠️ 这里**没有 Key**，只有「配没配」和一个掩码尾巴（keystore.status 的返回值）。 */
     ai,
+    /* ★ P2：版本号给界面（设置面板底部显示，用户报问题时一眼就能看到） */
+    version: app.getVersion(),
   };
 }
 
@@ -1417,6 +1426,7 @@ async function bootstrap() {
                 enabled: false,
               },
               { label: `下次抓取：${nextRunAt(new Date(), FETCH_TIME.hour, FETCH_TIME.minute).toLocaleString()}`, enabled: false },
+              { label: `晨报机 v${app.getVersion()}`, enabled: false },
               { type: 'separator' },
               {
                 label: updateMenuLabel(),
