@@ -235,6 +235,23 @@ ok('★ 36氪不许默认开着（实测 3/3 都是反爬页，而每个新用�
   assert.ok(line.includes('enabled: false'), '36氪 还是默认开着：' + String(line).trim().slice(0, 120));
 });
 
+/* ---- 15. 真机反馈：两个「保存」按钮的歧义 + 精选上限 ---- */
+ok('★★ 「保存设置」也必须把 Key 栏里的内容一起存掉（用户分不清两个保存按钮 —— 那是设计问题）', () => {
+  const js = readSrc('src/renderer/card.js');
+  const at = js.indexOf('cfgBtn.addEventListener');
+  assert.ok(at >= 0, '找不到「保存设置」的处理器');
+  const body = js.slice(at, at + 1400);
+  assert.ok(body.includes('api.ai.setKey'), '「保存设置」不存 Key ⇒ 用户粘了 Key 点它会得到「完成」而 Key 没存上（真机踩到过）');
+  assert.ok(body.includes('Key 已保存'), '存完之后没有说清存了什么');
+});
+ok('★ 精选条数上限放到 30（用户反馈 12 太少），默认仍是 10', () => {
+  const plan = readSrc('src/shared/ai/plan.js');
+  assert.ok(/MAX_PICKS = 30/.test(plan), 'MAX_PICKS 不是 30');
+  const js = readSrc('src/renderer/card.js');
+  assert.ok(js.includes("pc.max = '30'"), '界面上的上限没跟着改 —— 输入框会挡住用户' );
+  assert.ok(/DEFAULT_PICK_COUNT = 10/.test(readSrc('src/shared/ai/prompt.js')), '默认条数不该跟着动');
+});
+
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 库还开着，删不掉就算了（临时目录） */ }
 process.exit(fail ? 1 : 0);

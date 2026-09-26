@@ -444,6 +444,7 @@
     /* ② Key 输入 + 保存（系统加密不可用时，必须让用户**显式选**存法） */
     var inp = el('input', 'aipanel__input');
     inp.type = 'password';
+    inp.id = 'aiKeyInput';   // ← 存失败时要把内容放回去（见下面「保存设置」的失败分支）
     inp.autocomplete = 'off';
     inp.placeholder = p.key.configured ? '要换就粘一个新的' : '粘一个 API Key（只留在本机）';
     elAiPanel.appendChild(aiRow('API Key', inp));
@@ -479,7 +480,7 @@
     /* ③ 端点 / 模型 / 精选条数 */
     var ep = el('input', 'aipanel__input'); ep.type = 'text'; ep.value = p.config.endpoint || '';
     var md = el('input', 'aipanel__input'); md.type = 'text'; md.value = p.config.model || '';
-    var pc = el('input', 'aipanel__input aipanel__input--n'); pc.type = 'number'; pc.min = '3'; pc.max = '12'; pc.value = String(p.config.pickCount || 10);
+    var pc = el('input', 'aipanel__input aipanel__input--n'); pc.type = 'number'; pc.min = '3'; pc.max = '30'; pc.value = String(p.config.pickCount || 10);
     elAiPanel.appendChild(aiRow('端点', ep));
     elAiPanel.appendChild(aiRow('模型', md));
     elAiPanel.appendChild(aiRow('每天精选', pc));
@@ -487,9 +488,36 @@
     var cfgBtn = el('button', 'btn', p.busy === 'config' ? '保存中…' : '保存设置');
     cfgBtn.type = 'button';
     cfgBtn.disabled = !!p.busy;
+    /* ★★ 2026-09-25 真机反馈修复：**两个「保存」让人点错**。
+     *
+     * 用户描述：把 Key 粘进框里、点了「保存设置」，下面提示「完成」，
+     * 但上面仍写着「还没有配置」，而且 Key 栏被清空了。
+     * 核查后确认代码没错 —— 他点的是「设置」那个按钮，它只存端点/模型/条数、不碰 Key；
+     * 而重绘又把输入框清空了（输入框的内容刻意只活在 DOM 里，见本段开头的说明）。
+     *
+     * ⇒ 结论不是「用户点错了」，而是**这个面板把两件事拆成了两个长得一样的按钮**，
+     *    而它有 12 个控件、全挤在 11px 里。
+     * ⇒ 修法：**Key 栏里有内容时，两个保存按钮都把它一起存掉** ——
+     *    用户不需要知道「Key」和「设置」在存储上是两件事，那是实现细节。 */
     cfgBtn.addEventListener('click', function () {
-      runAi('config', function () {
-        return api.ai.setConfig({ endpoint: ep.value, model: md.value, pickCount: Number(pc.value) || 10 });
+      var typed = inp.value;
+      runAi('config', async function () {
+        var keyRes = typed ? await api.ai.setKey(typed, modeSel ? modeSel.value : undefined) : null;
+        if (keyRes && keyRes.ok === false) {
+          /* ⚠️ 存失败时**把用户粘进来的 Key 放回输入框** ——
+             面板每次重绘都会重建输入框（内容刻意只活在 DOM 里），
+             不还回去就等于让用户重新粘一遍。这种事最劝退。 */
+          setTimeout(function () {
+            var again = document.getElementById('aiKeyInput');
+            if (again) again.value = typed;
+          }, 0);
+          return { ok: false, text: 'Key 没存上：' + (keyRes.reason || '未知原因') };
+        }
+        var cfgRes = await api.ai.setConfig({ endpoint: ep.value, model: md.value, pickCount: Number(pc.value) || 10 });
+        var keyPart = keyRes
+          ? 'Key 已保存' + (keyRes.mode === 'encrypted' ? '（系统加密存储）' : keyRes.mode === 'memory' ? '（只在内存里，重启要重填）' : '（明文落盘）')
+          : '设置已保存（Key 栏是空的，没有改 Key）';
+        return { ok: !cfgRes || cfgRes.ok !== false, text: keyRes ? keyPart + ' ＋ 设置已保存' : keyPart };
       });
     });
     var genBtn = el('button', 'btn', p.busy === 'generate' ? '生成中…' : '重新生成简报');
