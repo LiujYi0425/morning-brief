@@ -419,6 +419,28 @@
       : (p.key.broken ? '读不出来了（换过机器或系统钥匙串变了）—— 请重新填一次' : '还没有配置');
     elAiPanel.appendChild(el('div', 'aipanel__hint', 'Key：' + stateText));
 
+    /* ★ P0（2026-09-25）：**没配 Key 时必须告诉用户去哪儿拿。**
+     *
+     * 原来的样子是只有上面那行「还没有配置」—— 而用户既不知道 ⚙ 是干什么的、
+     * 也不知道 Key 去哪儿申请、要花多少钱、填错了会怎样。
+     * 结果是：功能做完了，但**用户根本走不到能用那一步**（首次可用时间 ≤5 分钟这条
+     * 北极星辅助指标，按原来的路径肯定超）。
+     *
+     * ⚠️ 链接走的是**同一条跳转通道**（`item:open`），因此同样过协议白名单；
+     *    第一个参数传 null：那不是一条资讯，不该被标记成「已读」。 */
+    if (!p.key.configured) {
+      elAiPanel.appendChild(el('div', 'aipanel__guide',
+        '三步就能用上 AI 摘要：① 去 platform.deepseek.com 注册、充几块钱（够用很久）；' +
+        '② 在那边建一个 API Key；③ 粘到下面的框里、点「保存 Key」。' +
+        '模型调用是你这台机器直连的，不经过任何服务器；按每天几百条资讯算，一天大约几分钱。'));
+      var helpBtn = el('button', 'btn', '打开申请页面');
+      helpBtn.type = 'button';
+      helpBtn.addEventListener('click', function () {
+        api.openItem(null, 'https://platform.deepseek.com/api_keys');
+      });
+      elAiPanel.appendChild(aiRow('', helpBtn));
+    }
+
     /* ② Key 输入 + 保存（系统加密不可用时，必须让用户**显式选**存法） */
     var inp = el('input', 'aipanel__input');
     inp.type = 'password';

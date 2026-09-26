@@ -18,6 +18,7 @@ import path from 'node:path';
 import { openDb, startRun, insertItem, getBrief } from 'file:///D:/morning-brief/src/store/db.js';
 import { generateBrief, readAiConfig, writeAiConfig, todayUsage } from 'file:///D:/morning-brief/src/main/brief-service.js';
 import { createAiClient } from 'file:///D:/morning-brief/src/shared/ai/client.js';
+import { startupNotice } from 'file:///D:/morning-brief/src/shared/startup-notice.js';
 import { localDay, localDayStartIso } from 'file:///D:/morning-brief/src/shared/day.js';
 
 let pass = 0, fail = 0;
@@ -145,6 +146,39 @@ ok('★ .aipanel 必须有自己的定位与高度（不能落回 .catpanel 那�
 ok('★ .aipanel__row 不许被压扁（父容器是 flex 列 + 高度受限）', () => {
   const css = readSrc('src/renderer/styles/card.css');
   assert.ok(/\.aipanel__row\s*\{[^}]*flex:\s*0 0 auto/.test(css), '.aipanel__row 少了 flex: 0 0 auto ⇒ 每行会被 flex-shrink 压成几像素、文字互相叠');
+});
+
+/* ---- 12. P0 三件：启动可见性 / Key 引导 / 开机自启 ---- */
+ok('★ 首次运行必须给可见提示、之后不许再打扰（L2）', () => {
+  const first = startupNotice({ firstRun: true });
+  const later = startupNotice({ firstRun: false });
+  assert.ok(first.frontMs >= 4000, '首次至少停 4 秒，否则用户来不及看到它在哪');
+  assert.equal(first.balloon, true, '首次必须弹一次系统气泡');
+  assert.ok(first.balloonText.includes('右下角'), '气泡得说清卡片在哪');
+  assert.ok(later.frontMs > 0 && later.frontMs <= 2000, '之后只闪一下（' + later.frontMs + 'ms）');
+  assert.equal(later.balloon, false, '之后不许再弹气泡 —— L2 不打扰');
+});
+ok('★ 没配 Key 时面板里必须有「去哪拿 Key」的引导（不是只有一行状态）', () => {
+  const js = readSrc('src/renderer/card.js');
+  assert.ok(js.includes('aipanel__guide'), '面板里没有引导块');
+  assert.ok(js.includes('platform.deepseek.com'), '引导里没有申请入口');
+  assert.ok(js.includes('一天大约几分钱'), '没说花费量级 —— 用户最怕的就是不知道要花多少');
+  assert.ok(js.includes('api.openItem(null'), '跳转没有走那条过白名单的通道');
+});
+ok('★ 开机自启必须在托盘里能开关，且开发态不许注册（别往开机项里塞 electron.exe）', () => {
+  const js = readSrc('src/main/index.js');
+  assert.ok(js.includes('setLoginItemSettings'), '没有实现开机自启');
+  assert.ok(js.includes('getLoginItemSettings'), '开关状态没有读系统真值（自己存一份就会和系统不一致）');
+  assert.ok(js.includes('app.isPackaged'), '没有区分打包态与开发态');
+});
+ok('★ 启动提示不许抢焦点（早上刚开机把焦点抢走很讨厌）', () => {
+  const js = readSrc('src/main/index.js');
+  const at = js.indexOf('async function announceWhereItIs');
+  assert.ok(at >= 0, '找不到 announceWhereItIs');
+  const body = js.slice(at, js.indexOf('async function applyBottomLevel', at));
+  assert.ok(body.includes('showInactive'), '用了 show() 会抢焦点 —— 必须是 showInactive()');
+  assert.ok(!/[^a-zA-Z]show\(\)/.test(body), '函数体里出现了 show()（抢焦点）');
+  assert.ok(body.includes('applyBottomLevel'), '没有落回置底 —— 临时置顶会变成永久置顶');
 });
 
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');

@@ -64,6 +64,7 @@ import { selectByQuota, quotaOf, scopedQuota } from '../shared/quota.js';
       而那正是本项目反复栽过的"两份口径"。 */
 import { validateExternalUrl } from './url-guard.js';
 import { localDay } from '../shared/day.js';
+import { startupNotice } from '../shared/startup-notice.js';
 /* ⚠️ 别名（getStoredBrief）：本文件里已经有一个叫 getBrief 的**deps 回调**，
    两个同名会让"读的是库里那份还是渲染层那份"变成要读上下文才知道的事。 */
 import { getBrief as getStoredBrief } from '../store/db.js';
@@ -756,6 +757,47 @@ function makeDragHandler(win) {
   };
 }
 
+/**
+ * 启动时让用户**看得见卡片在哪**（P0，2026-09-25）。
+ *
+ * 背景：卡片置底，装完启动时屏幕上可能什么都没有。见 shared/startup-notice.js 的说明。
+ * ⚠️ 三条纪律：
+ *   ① **不抢焦点**（`showInactive`）—— 早上刚开机就把焦点抢走是很讨厌的事；
+ *   ② 置顶只是**临时**的，`frontMs` 之后一定落回置底（调 `applyBottomLevel` 而不是自己写一段）；
+ *   ③ 整段包在 try 里 —— **提示失败绝不能影响主流程**。
+ */
+async function announceWhereItIs(win) {
+  if (!win || win.isDestroyed()) return;
+  let firstRun = false;
+  try {
+    firstRun = getMeta(getDb(), 'first_run_done') !== '1';
+  } catch {
+    /* 库还没就绪就当成「不是首次」—— 宁可少提示一次，也不要误报 */
+  }
+  const plan = startupNotice({ firstRun });
+  try {
+    win.setAlwaysOnTop(true);
+    win.showInactive();
+    win.moveTop();
+  } catch {
+    /* 提示失败不影响任何功能 */
+  }
+  setTimeout(() => { void applyBottomLevel(win); }, plan.frontMs);
+  if (plan.balloon && tray && !tray.isDestroyed()) {
+    try {
+      tray.displayBalloon({ title: plan.balloonTitle, content: plan.balloonText });
+    } catch {
+      /* 有的系统策略不允许气泡，忽略 */
+    }
+  }
+  try {
+    setMeta(getDb(), 'first_run_done', '1');
+  } catch {
+    /* 记不上就下次再提示一次 —— 这不算错 */
+  }
+  console.log('[startup] 可见性提示：' + (firstRun ? '首次运行' : '常规启动') + '，置顶 ' + plan.frontMs + 'ms' + (plan.balloon ? ' ＋ 托盘气泡' : ''));
+}
+
 /* ---------------- 置底 ---------------- */
 let levelApplied = { ok: false, status: 'not-attempted', detail: null };
 async function applyBottomLevel(win) {
@@ -1342,6 +1384,28 @@ async function bootstrap() {
               { type: 'separator' },
               { label: '立即刷新（抓一遍全部源）', click: () => { doIngest('tray'); } },
               { label: '打开数据目录', click: () => { shell.openPath(DATA_DIR); } },
+              /* ★ 开机自启（P0，2026-09-25）。
+                 这个产品的用法是「每天早上打开电脑就能看到」，而 07:30 的定时抓取
+                 **只在程序运行时**才会发生（错过会补抓，但补抓同样要求程序在跑）
+                 ⇒ 不设自启，用户得每天手动双击一次。
+                 ⚠️ 开发态（未打包）**不给开**：`setLoginItemSettings` 在未打包时会去
+                    注册 electron.exe —— 那等于往用户的开机项里塞一个开发工具，
+                    比不提供这个开关更糟。 */
+              {
+                label: app.isPackaged ? '开机自动启动' : '开机自动启动（打包版才能设）',
+                type: 'checkbox',
+                enabled: app.isPackaged,
+                checked: app.isPackaged ? !!app.getLoginItemSettings().openAtLogin : false,
+                click: (item) => {
+                  try {
+                    app.setLoginItemSettings({ openAtLogin: !!item.checked });
+                    console.log('[startup] 开机自启 = ' + (item.checked ? '开' : '关'));
+                  } catch (e) {
+                    console.log('[startup] 设置开机自启失败：' + String((e && e.message) || e));
+                  }
+                  rebuildMenu();
+                },
+              },
               { type: 'separator' },
               {
                 label: last ? `上次成功抓取：${new Date(last).toLocaleString()}` : '还没有成功抓取过',
@@ -1404,6 +1468,8 @@ async function bootstrap() {
   // 置底（窗口已建、尺寸已校正，此刻 hwnd 定了）
   try {
     await applyBottomLevel(cardWin);
+    /* ★ P0：让用户看得见它在哪（首次多停一会儿 + 气泡，之后只闪一下） */
+    void announceWhereItIs(cardWin);
     mark('level-applied', JSON.stringify(levelApplied.status));
   } catch (err) {
     mark('level-FAILED', String(err && err.message));
