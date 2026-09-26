@@ -1044,8 +1044,21 @@ async function bootstrap() {
           updateReady = r.manifest;
           updateNote = '';
           if (interactive) console.log(`[update] 发现新版本 ${r.manifest.version}，再点一次即安装`);
+        } else if (r.action === 'none') {
+          /* ★ 两个版本都写出来。原来只有「已是最新」四个字 ——
+             而在「本机比线上还新」这种真实情况下（0.1.4~0.1.7 从没发布过），
+             那句话虽然正确，却让人以为更新功能坏了。 */
+          const remote = r.remoteVersion ? 'v' + r.remoteVersion : '?';
+          const mine = 'v' + app.getVersion();
+          updateNote = '已是最新（线上 ' + remote + ' · 本机 ' + mine + '）';
+          if (interactive) {
+            console.log('[update] 线上 ' + remote + '，本机 ' + mine +
+              (r.remoteVersion && r.remoteVersion !== app.getVersion() ? ' —— ⚠️ 两者不同：线上那个不是最新发布的版本（很可能这几版从没发布过）' : ' —— 一致'));
+          }
         } else {
-          updateNote = r.action === 'none' ? '已是最新' : '检查失败';
+          /* 检查失败也要说清为什么（原来只有「检查失败」三个字） */
+          updateNote = '检查失败' + (r.why ? '：' + String(r.why).slice(0, 30) : '');
+          if (interactive) console.log('[update] ' + (r.why || '未知原因'));
         }
       } catch (err) {
         updateNote = '检查失败';

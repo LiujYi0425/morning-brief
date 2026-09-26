@@ -199,6 +199,11 @@ export async function checkForUpdate({ dataDir, currentVersion, url, log = () =>
     return { action: 'error', why: '清单不合格：' + parsed.error };
   }
   const d = decideUpdate({ manifest: parsed.manifest, currentVersion, allowPrerelease });
+  /* ★ 2026-09-26：把「线上是哪一版」一并带回去。
+     真机踩到过：用户本机 0.1.6、线上最新 0.1.3（0.1.4~0.1.7 从没发布过），
+     菜单只说「已是最新」—— 那句话是对的，但它没告诉用户**为什么**，
+     于是看起来像「更新功能坏了」。把两个版本都摆出来，一眼就能看出问题在哪。 */
+  if (parsed.manifest && parsed.manifest.version) d.remoteVersion = String(parsed.manifest.version);
   log(`[update] ${d.why}`);
 
   const s = loadState(dataDir, currentVersion);

@@ -252,6 +252,15 @@ ok('★ 精选条数上限放到 30（用户反馈 12 太少），默认仍是 1
   assert.ok(/DEFAULT_PICK_COUNT = 10/.test(readSrc('src/shared/ai/prompt.js')), '默认条数不该跟着动');
 });
 
+ok('★ 「检查更新」必须把线上与本机两个版本都写出来（否则「本机比线上新」看起来就像更新坏了）', () => {
+  const js = readSrc('src/main/index.js');
+  assert.ok(js.includes('已是最新（线上 '), '文案里没有线上版本');
+  assert.ok(js.includes('本机 '), '文案里没有本机版本');
+  const up = readSrc('src/main/updater.js');
+  assert.ok(up.includes('remoteVersion'), '检查结果没有带回线上版本');
+  assert.ok(js.includes('检查失败' + "' + (r.why"), '检查失败没有说原因');
+});
+
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 库还开着，删不掉就算了（临时目录） */ }
 process.exit(fail ? 1 : 0);
