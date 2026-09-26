@@ -965,12 +965,21 @@ body {
  *    这样面板盖住列表时，用户还能看到自己在哪、还能点收起。 */
 .aipanel {
   position: fixed;
-  top: auto;
-  bottom: calc(var(--win-pad, 0px) + var(--gap-3));
+  /* ★ 垂直居中（2026-09-25 用户反馈：面板太靠下）。
+   * 原来是「底部对齐、从下往上长」—— 内容不多时就贴在卡片下方，看着像个尾巴。
+   * ⇒ 改成 `top: 50%` + `translateY(-50%)`：面板的**中心**落在窗口中心。
+   * ⚠️ 只写 `top: 50%` 不写 translateY，面板会整体偏下半个身位（那正是「太靠下」的成因之一）。
+   * ⚠️ 这一句同时**顶掉了** `.catpanel` 的 `translateZ(0)`（合成层修正）。
+   *    那层合成是给「滚动列表画在浮层上面」准备的，而列表现在会被隐藏
+   *    （card.js 的 data-editing），所以丢掉它没有代价。
+   * ⚠️ 元素**自己**的 transform 不会把 fixed 降级成 absolute —— 只有**祖先**的 transform 会。
+   *    这里的祖先（.catbar / .card）都没有 transform，所以 fixed 仍然相对窗口。 */
+  top: 50%;
+  bottom: auto;
   left: calc(var(--win-pad, 0px) + var(--gap-3));
   right: calc(var(--win-pad, 0px) + var(--gap-3));
   max-height: 70vh;
-  transform: none;
+  transform: translateY(-50%);
   will-change: auto;
   z-index: 5;
   gap: 2px;

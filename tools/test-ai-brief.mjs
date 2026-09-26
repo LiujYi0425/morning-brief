@@ -141,7 +141,9 @@ ok('★ .aipanel 必须有自己的定位与高度（不能落回 .catpanel 那�
   const block = css.slice(at, css.indexOf('.aipanel__row', at));
   assert.ok(block.includes('max-height'), '.aipanel 没有自己的 max-height ⇒ 落回 .catpanel 的 168px（14 行内容塞不进去）');
   assert.ok(block.includes('position: fixed'), '.aipanel 没挂到窗口上 ⇒ vh 与百分比会相对 30px 高的 catbar 算');
-  assert.ok(block.includes('transform: none'), '.aipanel 少了 transform: none ⇒ fixed 会被 .catpanel 的 translateZ(0) 降级成 absolute');
+  assert.ok(block.includes('top: 50%'), '.aipanel 没有垂直居中 —— 用户明确要求面板显示在中间');
+  assert.ok(block.includes('translateY(-50%)'), '居中少了 translateY(-50%) ⇒ 只写 top:50% 会让面板整体偏下半个身位');
+  assert.ok(!/\n\s*bottom:\s*calc\(var\(--win-pad/.test(block), 'aipanel 又变成底部对齐了 —— 那正是「太靠下」的成因');
 });
 ok('★ .aipanel__row 不许被压扁（父容器是 flex 列 + 高度受限）', () => {
   const css = readSrc('src/renderer/styles/card.css');
