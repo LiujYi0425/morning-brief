@@ -46,7 +46,7 @@ import { isPrivateHost } from '../main/feed-url.js';
 import { DEFAULT_SOURCES, DEFAULT_CATEGORIES, isLocalOnlyCategory } from '../ingest/sources.js';
 
 /** schema 版本。改结构时 +1，并在 migrate() 里加一段 —— 否则老库会静默少字段 */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const DDL = `
 PRAGMA journal_mode = WAL;
@@ -172,6 +172,9 @@ CREATE TABLE IF NOT EXISTS brief (
   token_used  INTEGER,                  -- 真实用量；拿不到就是 NULL，不拿估算冒充
   raw_count   INTEGER,                  -- 当天候选多少条（压缩率的分母）
   kept_count  INTEGER,                  -- 精挑多少条（压缩率的分子）
+  pool_count  INTEGER,                  -- **真正送进模型的**有多少条（≤ MAX_RANK_POOL）
+                                        -- ⚠️ 它与 raw_count 不是一回事：条目太多时只送最新的 300 条，
+                                        --    两个数都要留着，否则「为什么我订阅的源更新了却没进简报」无法回答
   detail      TEXT                      -- 失败/降级原因，**中文、直接可显示**
 );
 
@@ -362,6 +365,18 @@ function migrate(db, from) {
     addCol('kept_count', 'kept_count INTEGER');
     addCol('detail', 'detail TEXT');
     console.log('[db] brief 表已补齐 AI 简报所需的列（老数据保持原样，不会被当成失败）');
+  }
+
+  /* ---- v4 → v5：把「送进模型多少条」也记下来 ----
+   *
+   * ⚠️ 起因是一个用户视角的问题：一天抓到 800 条时，只把**最新的 300 条**送进模型
+   *    （见 shared/ai/plan.js 的 MAX_RANK_POOL），而界面原来只显示「候选 800 条」——
+   *    用户看到的是「我订阅的源明明更新了，简报里却没有」，且没有任何地方解释。
+   * ⇒ 把 pool_count 单独记一列：raw_count 是「今天有多少条」，它是「模型看了多少条」。
+   *    两个数一起显示，截断就是**看得见**的事实，而不是一个沉默的猜测。 */
+  if (from < 5) {
+    if (!hasColumn('brief', 'pool_count')) db.exec('ALTER TABLE brief ADD COLUMN pool_count INTEGER');
+    console.log('[db] brief 表已加上 pool_count（送进模型的条数）');
   }
 
   console.log(`[db] schema ${from} → ${SCHEMA_VERSION} 迁移完成（数据未删除）`);
@@ -1444,8 +1459,8 @@ export function saveBrief(db, brief, nowIso) {
   const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
   db.prepare(
-    'INSERT INTO brief (brief_date, created_at, curated_ids, headline, status, model, input_hash, token_used, raw_count, kept_count, detail) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    'INSERT INTO brief (brief_date, created_at, curated_ids, headline, status, model, input_hash, token_used, raw_count, kept_count, pool_count, detail) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(brief_date) DO UPDATE SET ' +
       'created_at = excluded.created_at, curated_ids = excluded.curated_ids, headline = excluded.headline, ' +
       'status = excluded.status, model = excluded.model, input_hash = excluded.input_hash, ' +
@@ -1462,6 +1477,7 @@ export function saveBrief(db, brief, nowIso) {
     num(b.tokenUsed),
     num(b.rawCount),
     num(b.keptCount),
+    num(b.poolCount),
     b.detail ? String(b.detail) : null,
   );
 
@@ -1536,6 +1552,7 @@ export function getBrief(db, date) {
     tokenUsed: row.token_used == null ? null : Number(row.token_used),
     rawCount: row.raw_count == null ? null : Number(row.raw_count),
     keptCount: row.kept_count == null ? null : Number(row.kept_count),
+    poolCount: row.pool_count == null ? null : Number(row.pool_count),
     curatedIds: safeJsonArray(row.curated_ids),
     inputHash: row.input_hash || '',
     createdAt: row.created_at,
@@ -1547,6 +1564,24 @@ export function getBrief(db, date) {
  * ⚠️ 只统计**有真实用量**的那些行；拿不到用量的（老数据 / 端点不回 usage）不计入 0，
  *    而是单独报一个 `unknown` 计数 —— 把"不知道"混进"0"就是在编数字。
  */
+/**
+ * 今天还有多少条**没点开过**（P1：未读计数）。
+ *
+ * ⚠️ 「今天」的口径与 queryItems / countItems **逐字一致**（含 fetched_at 兜底），
+ *    否则会出现「显示 12 条、其中 15 条没读」这种自相矛盾的界面。
+ * ⚠️ 只算 unread：点过的条目是 `opened`，它会变暗（.item[data-read=opened]），
+ *    但原来**没有任何地方汇总** —— 用户没法回答「今天还有几条没看」。
+ */
+export function countUnreadToday(db, sinceIso) {
+  const r = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM item WHERE read_state = 'unread' " +
+        'AND (published_at >= ? OR (published_at IS NULL AND fetched_at >= ?))',
+    )
+    .get(String(sinceIso || ''), String(sinceIso || ''));
+  return Number(r && r.n) || 0;
+}
+
 export function briefTokenUsage(db, sinceDate) {
   const r = db
     .prepare(

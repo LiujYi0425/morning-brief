@@ -402,7 +402,7 @@
     var p = d.aiPanel;
     var key = [p.open, p.busy, p.msg ? (p.msg.ok ? '1' : '0') + p.msg.text : '', p.key.configured, p.key.maskedTail,
       p.key.mode, p.key.encryption, p.key.broken, p.config.endpoint, p.config.model, p.config.pickCount,
-      p.usage.total, p.usage.briefs, p.brief ? p.brief.status + p.brief.date : '-', p.lastBriefDate].join('|');
+      p.usage.total, p.usage.briefs, p.brief ? p.brief.status + p.brief.date + (p.brief.poolCount || '-') : '-', p.lastBriefDate].join('|');
     if (memo.ai === key) return;
     memo.ai = key;
 
@@ -508,7 +508,12 @@
     if (u.unknownBriefs) usageText += '，另有 ' + u.unknownBriefs + ' 份拿不到用量';
     var b = p.brief;
     var briefText = b
-      ? '今天的简报：' + b.status + (b.detail ? '（' + b.detail + '）' : '') + ' · 候选 ' + (b.rawCount == null ? '?' : b.rawCount) + ' 条 → 精选 ' + (b.keptCount == null ? '?' : b.keptCount) + ' 条'
+      ? '今天的简报：' + b.status +
+        ' · 今天共 ' + (b.rawCount == null ? '?' : b.rawCount) + ' 条 → 送进模型 ' + (b.poolCount == null ? (b.rawCount == null ? '?' : b.rawCount) : b.poolCount) + ' 条 → 精选 ' + (b.keptCount == null ? '?' : b.keptCount) + ' 条' +
+        /* ★ P1：**截断必须看得见**。条目太多时只送最新的 300 条（MAX_RANK_POOL），
+           而用户原来看到的是「我订阅的源明明更新了，简报里却没有」。 */
+        (b.poolCount != null && b.rawCount != null && b.poolCount < b.rawCount ? '（⚠ 今天条目太多，只把最新的 ' + b.poolCount + ' 条送进了模型）' : '') +
+        (b.detail ? ' · ' + b.detail : '')
       : (p.lastBriefDate ? '今天还没有简报（最近一份是 ' + p.lastBriefDate + '）' : '还没有生成过简报');
     elAiPanel.appendChild(el('div', 'aipanel__hint', usageText));
     elAiPanel.appendChild(el('div', 'aipanel__hint', briefText));

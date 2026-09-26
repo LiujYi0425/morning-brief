@@ -175,6 +175,8 @@ export async function generateBrief(opts = {}) {
     tokenUsed: usage ? usage.totalTokens : null,
     rawCount: sel.total,
     keptCount: kept,
+    /* ★ 送进模型的**实际**条数（P1）：条目太多时它小于 rawCount，而这件事必须看得见 */
+    poolCount: sel.rows.length,
     curatedIds: groups.flatMap((g) => g.items.map((i) => i.id)),
   }, now.toISOString());
 

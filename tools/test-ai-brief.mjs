@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openDb, startRun, insertItem, getBrief } from 'file:///D:/morning-brief/src/store/db.js';
+import { openDb, startRun, insertItem, getBrief, countUnreadToday } from 'file:///D:/morning-brief/src/store/db.js';
 import { generateBrief, readAiConfig, writeAiConfig, todayUsage } from 'file:///D:/morning-brief/src/main/brief-service.js';
 import { createAiClient } from 'file:///D:/morning-brief/src/shared/ai/client.js';
 import { startupNotice } from 'file:///D:/morning-brief/src/shared/startup-notice.js';
@@ -179,6 +179,37 @@ ok('★ 启动提示不许抢焦点（早上刚开机把焦点抢走很讨厌）
   assert.ok(body.includes('showInactive'), '用了 show() 会抢焦点 —— 必须是 showInactive()');
   assert.ok(!/[^a-zA-Z]show\(\)/.test(body), '函数体里出现了 show()（抢焦点）');
   assert.ok(body.includes('applyBottomLevel'), '没有落回置底 —— 临时置顶会变成永久置顶');
+});
+
+/* ---- 13. P1：未读计数 / 截断可见 / 降级原因前置 ---- */
+await aok('★ 未读计数：点开一条就少一条（口径与「今天」同源）', async () => {
+  const dU = await seed(tmpDb(), 5);
+  const day0 = localDayStartIso(NOW);
+  assert.equal(countUnreadToday(dU, day0), 5, '刚抓到的条目应当都算未读');
+  dU.prepare("UPDATE item SET read_state = 'opened' WHERE id = (SELECT MIN(id) FROM item)").run();
+  assert.equal(countUnreadToday(dU, day0), 4, '点开一条之后未读应当少一');
+  assert.equal(countUnreadToday(dU, new Date('2030-01-01').toISOString()), 0, '不是今天的条目不该算进来');
+});
+await aok('★ 简报要记下「送进模型多少条」—— 条目太多被截断时，这件事必须看得见', async () => {
+  const dP = await seed(tmpDb(), 12);
+  const fP = fakeClient((i, ctx) => ctx.isRank
+    ? '{"picks":[' + idsFromPrompt(ctx.user).slice(0, 2).map((id) => '{"id":' + id + '}').join(',') + ']}'
+    : '{"headline":"h","groups":[{"name":"g","items":[' + idsFromBrief(ctx.user).slice(0, 1).map((id) => '{"id":' + id + ',"digest":"d"}').join(',') + ']}]}');
+  await generateBrief({ db: dP, apiKey: 'sk-x', now: NOW, client: fP.client });
+  const b = getBrief(dP);
+  assert.equal(b.rawCount, 12, 'raw_count 是「今天共多少条」');
+  assert.equal(b.poolCount, 12, 'pool_count 是「真正送进模型多少条」（12 < 上限，应当相等）');
+  assert.ok(b.poolCount <= b.rawCount, 'pool_count 不许大于 raw_count');
+});
+ok('★ 降级原因不许只挂在 tooltip 里（用户不会去悬停）', () => {
+  const vm = readSrc('src/renderer/view-model.js');
+  assert.ok(vm.includes("split('——')"), '没有把降级原因的前半句提到总览句里');
+  assert.ok(vm.includes("'⚠ '"), '降级时总览句没有醒目标记');
+});
+ok('★ 条目被截断时面板必须说明（否则用户以为「我订阅的源更新了却没进简报」）', () => {
+  const js = readSrc('src/renderer/card.js');
+  assert.ok(js.includes('只把最新的'), '面板里没有截断说明');
+  assert.ok(js.includes('送进模型'), '面板没有区分「今天共多少条」与「送进模型多少条」');
 });
 
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');

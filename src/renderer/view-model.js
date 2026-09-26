@@ -188,6 +188,7 @@
       sinceIso: null,
       ai: null,          // AI 简报状态（Key 配没配 / 端点 / 用量 / 今天那一份）
       briefView: false,  // 列表现在显示的是不是简报（**由主进程算**，界面不自己推）
+      unreadToday: 0,    // 今天还没点开过的条数（主进程算好给过来）
       aiPanelOpen: false, // AI 设置面板开着没有
       aiBusy: '',         // 面板里正在忙什么（save / test / config / generate）
       aiMsg: null,        // 上一次操作的结果（{ok, text}）—— 失败必须说出来
@@ -391,6 +392,7 @@
         sinceIso: p.sinceIso === undefined ? v.sinceIso : p.sinceIso,
       ai: p.ai === undefined ? v.ai : p.ai,
       briefView: p.briefView === undefined ? v.briefView : p.briefView,
+      unreadToday: p.unreadToday === undefined ? v.unreadToday : (Number(p.unreadToday) || 0),
         /* 服务端若知道"用户上次选的类别"而本地还没选，采纳它；否则尊重本地 */
         activeCategory: v.activeCategory == null ? (p.activeCategory == null ? null : p.activeCategory) : v.activeCategory,
         /* 取数回来 ⇒ 撤销"等你再点一次删除"（用户不点就等于放弃，别让一个
@@ -772,11 +774,21 @@
     var lead = '';
     if (brief && brief.headline) lead = brief.headline;
     else if (ai && ai.key && !ai.key.configured) lead = '未配置 API Key（点 ⚙ 设置）';
-    else if (brief && brief.status === 'fallback') lead = '未生成摘要';
+    else if (brief && brief.status === 'fallback') {
+      /* ★ P1：降级**不能只挂 tooltip** —— 用户不会去悬停，于是既不知道今天这份不是 AI 挑的，
+         也不知道是不是自己 Key 没钱了。把原因的前半句直接写在总览句里（完整原因仍在 tooltip）。
+         取「——」之前那一段：classifyFailure 的文案都是「短结论——怎么办」这个形状。 */
+      var why = String(brief.detail || '').split('——')[0].trim().slice(0, 24);
+      lead = '⚠ ' + (why || '摘要没生成');
+    }
     if (lead) parts.unshift(lead);
     parts.push((view.showingAll ? '今天全部 ' : '今天共 ') + d.filteredTotal + ' 条');
     var older = Math.max(0, d.shown - d.filteredTotal);
     if (older > 0) parts.push('另含更早 ' + older + ' 条');
+    /* ★ P1：未读计数。原来点过的条目只会变暗（.item[data-read=opened]），
+       但**没有任何地方汇总** —— 用户没法回答「今天还有几条没看」。 */
+    var unread = num(view.unreadToday);
+    if (unread > 0) parts.push('还有 ' + unread + ' 条没看');
     var bad = num(view.health && view.health.bad);
     if (bad > 0) parts.push(bad + ' 个源异常');
     /* ★★ 今天一次都没抓成功时，**必须说出来**。

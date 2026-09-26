@@ -68,6 +68,7 @@ import { startupNotice } from '../shared/startup-notice.js';
 /* ⚠️ 别名（getStoredBrief）：本文件里已经有一个叫 getBrief 的**deps 回调**，
    两个同名会让"读的是库里那份还是渲染层那份"变成要读上下文才知道的事。 */
 import { getBrief as getStoredBrief } from '../store/db.js';
+import { countUnreadToday } from '../store/db.js';
 import { readKey, status as keyStatus, setKey, clearKey } from './keystore.js';
 import { generateBrief, readAiConfig, writeAiConfig, todayUsage } from './brief-service.js';
 import { createAiClient, testConnection } from '../shared/ai/client.js';
@@ -611,6 +612,9 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
    *   用户看到的现象是"点了之后按钮就消失了，收起一下它才回来"。
    *   ⇒ 按钮的存在性必须由**与"已显示多少"无关**的量决定。 */
   const todayTotal = countItems(d, { sinceIso });
+  /* ★ P1：今天还有几条没点开过。口径与 todayTotal **同源**（同一个 sinceIso），
+     否则会出现「显示 12 条、其中 15 条没读」这种自相矛盾的界面。 */
+  const unreadToday = countUnreadToday(d, sinceIso);
   const filteredTotal = categoryIds && categoryIds.length ? countItems(d, { sinceIso, categoryIds }) : todayTotal;
 
   /* ★★ 简报即默认视图（用户拍板）。
@@ -642,6 +646,7 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
     nextCursor: briefView ? null : nextCursor,
     briefView,
     todayTotal,
+    unreadToday,
     filteredTotal,
     totalShown: viewItems.length,
     health,
