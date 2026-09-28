@@ -1226,6 +1226,57 @@ ok('★ guid 不像 URL 时不许当链接（否则会产出一堆打不开的�
   assert.equal(r.items[0].url, null, '把 tag: 形式的 guid 当成链接了 —— 比"没有链接"更糟');
 });
 
+/* ---- 2026-09-28：两种"整类源被判死"的解析缺口（都是补源时实测撞出来的）---- */
+ok('★★ <link> 里套 CDATA 也要认（观点网 100 条就是这么被判成"没有链接"的）', () => {
+  /* ⚠️ `<link><![CDATA[https://…]]></link>` 是 WordPress 系与部分国产 CMS 的常见写法。
+     原来的判据是**直接在原文上**看有没有 `<` ⇒ 带 CDATA 的**合法链接**被整条挡掉，
+     表现是该源所有条目都变成"没有原文链接"（点开只有一句"这条没有链接"）。
+     真机实测：观点网（房产，100 条、最新当天）就是这么被否掉的。 */
+  const cdata =
+    '<rss version="2.0"><channel><title>观点网</title>' +
+    '<item><title>CDATA 链接</title><link><![CDATA[https://www.guandian.cn/article/20260928/1.html]]></link>' +
+    '<pubDate>Mon, 28 Sep 2026 06:00:00 +0800</pubDate></item></channel></rss>';
+  const r = parseFeed(cdata);
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.items[0].url,
+    'https://www.guandian.cn/article/20260928/1.html',
+    'CDATA 包着的 <link> 没被认出来 ⇒ 这类源的所有条目都会变成"没有链接"',
+  );
+  /* 普通写法不许被这次改动弄坏 */
+  const plain =
+    '<rss version="2.0"><channel><title>t</title>' +
+    '<item><title>普通链接</title><link>https://e.com/a</link><pubDate>Mon, 28 Sep 2026 06:00:00 +0800</pubDate></item></channel></rss>';
+  assert.equal(parseFeed(plain).items[0].url, 'https://e.com/a');
+});
+
+ok('★★ 没有 <link> 时用 <enclosure> 兜底（播客条目普遍只有这一种地址）', () => {
+  /* ⚠️ 播客 / 音频 feed 的条目**普遍没有 `<link>`**，唯一地址在 `<enclosure url="…mp3">`：
+     实测故事FM（993 条）、记者下班、科技乱炖、鹤洞每日新闻全是这个形态 ——
+     少了这条兜底，「形态·音频」整个类别一条都进不来。 */
+  const encOnly =
+    '<rss version="2.0"><channel><title>播客</title>' +
+    '<item><title>第一集</title><enclosure url="https://cdn.e.com/ep1.mp3" type="audio/mpeg" length="123"/>' +
+    '<pubDate>Mon, 28 Sep 2026 06:00:00 +0800</pubDate></item></channel></rss>';
+  const r = parseFeed(encOnly);
+  assert.equal(r.ok, true);
+  assert.equal(r.items[0].url, 'https://cdn.e.com/ep1.mp3', 'enclosure 兜底没生效 ⇒ 播客源全都"没有链接"');
+
+  /* ① 有正文页链接时**绝不覆盖**（音频地址是文件，不是文章页） */
+  const both =
+    '<rss version="2.0"><channel><title>播客</title>' +
+    '<item><title>两者都有</title><link>https://e.com/ep1</link><enclosure url="https://cdn.e.com/ep1.mp3"/>' +
+    '<pubDate>Mon, 28 Sep 2026 06:00:00 +0800</pubDate></item></channel></rss>';
+  assert.equal(parseFeed(both).items[0].url, 'https://e.com/ep1', 'enclosure 把正文页链接盖掉了');
+
+  /* ② 非 http 的 enclosure（magnet: / itunes: 之类）不许当链接 ——
+        点不开的地址比"没有链接"更糟 */
+  const bad =
+    '<rss version="2.0"><channel><title>x</title>' +
+    '<item><title>磁力链</title><enclosure url="magnet:?xt=urn:btih:abc"/></item></channel></rss>';
+  assert.equal(parseFeed(bad).items[0].url, null, '把 magnet: 的 enclosure 当成原文链接了');
+});
+
 ok('★ 条目顺序非单调时，库里按 published_at 排（36氪首条 16:33 后面还有 20:56）', () => {
   const unordered =
     '<rss version="2.0"><channel><title>36氪</title>' +
@@ -4337,8 +4388,11 @@ ok('★ 扩出来的每个类别**都要有源撑着**（没源的类别就是�
   for (const p of ['领域·', '性质·', '形态·', '时效·', '主体·']) {
     assert.ok(DEFAULT_CATEGORIES.some((c) => c.startsWith(p)), '少了维度：' + p);
   }
-  /* 反向：实测撑不住的**不许**建（建了就是永远空的） */
-  assert.ok(!DEFAULT_CATEGORIES.includes('领域·房产'), '领域·房产没有可用源（贝壳研究院 503），建了就是空类别');
+  /* 反向：实测撑不住的**不许**建（建了就是永远空的）。
+     ⚠️ 2026-09-28 更新：**领域·房产** 这一条已经翻案 —— 观点网（直连官方 feed，
+     100 条/当天，实测 2 轮）让它第一次有了源，所以类别建了、这条断言换了对象。
+     留这条注释是因为它是"建类别前先验源"这个纪律的实证。 */
+  assert.ok(DEFAULT_CATEGORIES.includes('领域·房产'), '领域·房产 现在有源（观点网）撑着，类别该建出来');
   /* 类别名不许重复 —— category.name 上有 UNIQUE，重名会在 upsert 时静默合并 */
   assert.equal(new Set(DEFAULT_CATEGORIES).size, DEFAULT_CATEGORIES.length, '预置类别里有重名');
 });
@@ -4371,7 +4425,20 @@ ok('★★ 全新用户不该看到「点进去永远空」的类别（本机专
      否则它们连「以后打开就有内容」都做不到 —— 那就不是「暂缓」，是「永远空」。 */
   const all = new Set();
   for (const s of DEFAULT_SOURCES) for (const c of s.categories || []) all.add(c);
-  assert.equal(LOCAL_ONLY_CATEGORIES.length, 6, '本机专属名单变了 —— 它是实测结论，改之前先看 sources.js');
+  /* ★★ 名单**不再是写死的数字**，而是**算出来的**（2026-09-28 改）：
+       本机专属 == 「没有任何**默认打开**的源撑着的类别」。
+       理由：写死 `6` 的年代，补上公网源之后**必须靠人记得**去改那个数字，
+       否则名单会一直留着已经能撑起来的类别（新用户白丢一个 chip）。
+       改成算出来的之后两个方向都会当场红：
+         · 补了公网源却忘了把它从名单里拿掉 → 这里不等；
+         · 把还有源的类别塞进名单 → 也不等。 */
+  const derivedLocalOnly = DEFAULT_CATEGORIES.filter((c) => !used.has(c));
+  assert.deepEqual(
+    [...LOCAL_ONLY_CATEGORIES].sort(),
+    derivedLocalOnly.sort(),
+    '本机专属名单与实测不符：名单=' + LOCAL_ONLY_CATEGORIES.join('/') +
+      ' 实际没有默认开启源的类别=' + derivedLocalOnly.join('/'),
+  );
   for (const name of LOCAL_ONLY_CATEGORIES) {
     assert.ok(all.has(name), name + ' 一个源都没绑 —— 那它不只是「新用户空」，是永远空');
     assert.ok(!used.has(name), name + ' 其实有默认打开的源撑着 ⇒ 它不该留在「本机专属」名单里');

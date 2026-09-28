@@ -652,6 +652,28 @@ const MUTANTS = [
     from: '      if (!interactive) return;   // 启动 8 秒后那次自动检查：只把菜单点亮，绝不自己装',
     to: '',
     expect: '自动检查那道"不许自己装"的闸没了',
+  },
+  /* ── 补源时修掉的两个**解析缺口**（各自判死了一整类源，比多加几个源值钱）── */
+  {
+    file: 'src/ingest/feed-parse.js',
+    why: 'CDATA 里的 <link> 又按原文判"含标签" ⇒ 这类源（观点网 100 条/当天）的所有条目都变成"没有原文链接"',
+    from: "  if (rssLink) {\n    const link = collapseWhitespace(cleanText(rssLink));\n    if (link && !link.includes('<')) url = link;\n  }",
+    to: "  if (rssLink && !rssLink.includes('<')) url = collapseWhitespace(cleanText(rssLink));",
+    expect: 'CDATA 包着的 <link> 没被认出来',
+  },
+  {
+    file: 'src/ingest/feed-parse.js',
+    why: '去掉 <enclosure> 兜底 ⇒ 播客条目（普遍没有 <link>）全都"没有链接"，「形态·音频」整个类别一条都进不来',
+    from: '    const enc = block.match(/<enclosure\\b[^>]*\\burl\\s*=\\s*["\']([^"\']+)["\']/i);',
+    to: '    const enc = null;',
+    expect: 'enclosure 兜底没生效',
+  },
+  {
+    file: 'src/ingest/sources.js',
+    why: '本机专属名单写回旧状态 ⇒ 补了公网源的类别仍不给新用户建（白丢 chip），或反过来给新用户建空 chip',
+    from: "  '领域·汽车',\n  '性质·核查',\n]);",
+    to: "  '领域·汽车',\n  '性质·核查',\n  '领域·旅游',\n]);",
+    expect: '本机专属名单与实测不符',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。

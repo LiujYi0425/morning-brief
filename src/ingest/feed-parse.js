@@ -401,8 +401,17 @@ function parseItem(block, format, ctx) {
      Atom   ：<link href="https://…"/>（可能多个，rel="alternate" 才是正文页） */
   let url = null;
   const rssLink = pick(block, 'link');
-  if (rssLink && rssLink.trim() && !rssLink.includes('<')) {
-    url = collapseWhitespace(cleanText(rssLink));
+  /* ★★ 先解 CDATA、再判"像不像链接"（2026-09-28 修）。
+     ⚠️ 原来的判据是**直接在原文上**看有没有 `<`：
+        `<link><![CDATA[https://…]]></link>` 是 RSS 里非常常见的一种写法
+        （WordPress 系、部分国产 CMS 都这么输出），它原文里带 `<` ⇒ 被整条挡掉
+        ⇒ **该源所有条目都变成"没有原文链接"**。
+        真机上就是这么判死「观点网」的：100 条、最新就是当天，却一个链接都没有
+        （探针实测：剥掉 CDATA 之后 `url` 立刻正常解析）。
+     ⇒ 判据改成"解出文本之后不像标签" —— 顺序换了，效果对 CDATA 与普通写法都对。 */
+  if (rssLink) {
+    const link = collapseWhitespace(cleanText(rssLink));
+    if (link && !link.includes('<')) url = link;
   }
   if (!url) {
     // Atom：优先 rel="alternate"，其次第一个带 href 的 link
@@ -426,6 +435,23 @@ function parseItem(block, format, ctx) {
     const guid = pick(block, 'guid');
     const g = guid ? collapseWhitespace(cleanText(guid)) : '';
     if (/^https?:\/\//i.test(g)) url = g;
+  }
+  /* ★★ `<enclosure>` 兜底：**播客 / 音频类 feed 的常见形态**（2026-09-28 加）。
+     ⚠️ 播客条目普遍**没有 `<link>`**，唯一地址在 `<enclosure url="…mp3">` 里 ——
+        少了这条兜底，「形态·音频」整个类别一条都进不来：
+        实测故事FM（993 条）、记者下班、科技乱炖、鹤洞每日新闻全是这个形态，
+        统统被判成"没有链接"。
+     ⚠️ 两条边界：
+        ① **只在完全没有链接时兜底**（link → atom href → rdf:about → guid → enclosure），
+           绝不覆盖已有的正文页链接；
+        ② 只认 `http(s)`：enclosure 是**音频文件**地址，点开就是播放 ——
+           对音频条目这是对的，对图文条目不是（那种情况它有 `<link>`）。
+        非 http 的（`magnet:`、`itunes:` 之类）一律不要：宁可没有链接，
+        也不要一个点不开的地址。 */
+  if (!url) {
+    const enc = block.match(/<enclosure\b[^>]*\burl\s*=\s*["']([^"']+)["']/i);
+    const e = enc ? collapseWhitespace(cleanText(enc[1])) : '';
+    if (/^https?:\/\//i.test(e)) url = e;
   }
 
   /* ---- 时间：按覆盖度排序尝试 ---- */

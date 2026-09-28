@@ -39,6 +39,7 @@ export const DEFAULT_CATEGORIES = [
   '领域·教育',
   '领域·医疗健康',
   '领域·汽车',
+  '领域·房产',
   '领域·美食',
   '领域·旅游',
   '性质·快讯',
@@ -64,28 +65,46 @@ export const DEFAULT_CATEGORIES = [
  * ---------------------------------------------------------------------
  * 为什么单独拎出来（这一段是「能不能发给别人用」逼出来的）
  * ---------------------------------------------------------------------
- * 撑这 6 个类别的源**全部**在本机 RSSHub 上（默认关闭，见下面 D / E 两组）。
+ * 撑这几个类别的源**全部**在本机 RSSHub 上（默认关闭，见下面 D / E 两组）。
  * 而「一个类别有没有内容，只取决于有没有源绑给它」（见 db.js 的 source_category 说明）
- * ⇒ 全新用户装完晨报机，会看到 6 个点进去**永远是空**的 chip，
+ * ⇒ 全新用户装完晨报机，会看到几个点进去**永远是空**的 chip，
  *   而那正是本项目最警戒的「看起来像 bug」。
  *
- * ⇒ 做法：**公网源撑得起来的类别照建；这 6 个等本机源真的被启用时再登记**
+ * ⇒ 做法：**公网源撑得起来的类别照建；这几个等本机源真的被启用时再登记**
  *   （ensureLocalCategories，由 --enable-local 触发）。
- *   老库里早就有的这 6 个类别一行都不动 —— 登记与迁移都是**只加不删**。
+ *   老库里早就有的这几个类别一行都不动 —— 登记与迁移都是**只加不删**。
  *
- * ⚠️ 这 6 个不是「懒得找」，是**实测结论**：试过约 90 个候选 ——
- *    新华网各频道 300 条但**零时间字段**、人民网整站 RSS 已馊（最新 2025-06）、
- *    汽车之家 / 懂球帝 / 马蜂窝 / 下厨房 / 中国军网 / 央广军事等垂直站都没有对外 RSS。
- *    逐个候选的结论见 HANDOFF-阶段B.md 的「阶段 D」一节。
- *    ⇒ **别再照着这个名单重试一遍**，除非你要动的是「换别的源」。
+ * ---------------------------------------------------------------------
+ * ⚠️ 2026-09-28 更新：名单从 **6 个压到 2 个**（当天四路并行补源实测的结果）
+ * ---------------------------------------------------------------------
+ * 本轮把「公网上到底有没有源」重新查了一遍（56+ 个候选、工具 `tools/probe-feeds.mjs`、
+ * 每个都真抓两轮）。结果：
+ *   · **领域·军事** —— 拿到了默认打开的公网源（韩联社·朝鲜 中文 27 条／
+ *     The War Zone／Defense News），⇒ 移出本名单；
+ *   · **领域·旅游** —— 品橙旅游、TTG China 两个**直连** feed 实测可用，⇒ 移出；
+ *   · **时效·专题** —— 中新网·东西问／理论／法治 三个官方 feed，⇒ 移出；
+ *   · **形态·音频** —— 7 个中文播客 feed（Fireside / 喜马拉雅 / wavpub 托管）实测可用
+ *     （**前提是解析器补上 `<enclosure>` 兜底**，见 feed-parse.js），⇒ 移出；
+ *   · **领域·房产** —— 观点网**直连** feed 可用（100 条/当天），⇒ 类别已建，不进名单。
+ *
+ * 仍然在名单里的两个，是**真的只剩第三方镜像**：
+ *   · **领域·汽车** —— 公网无任何直连官方 feed；只有 RSSHub 镜像的路由
+ *     （电动邦／乘联会／中汽协）。**用户 2026-09-28 拍板：镜像源一律默认关闭**
+ *     ⇒ 新用户看不到这个类别，想用的人在「编辑类型」里勾开镜像源即可。
+ *   · **性质·核查** —— 中文同样只有镜像（中国互联网联合辟谣平台／果壳·科学人）；
+ *     英文事实核查源（Snopes / PolitiFact / Full Fact…）本机可达但**不适合中文简报**
+ *     ⇒ 同样维持「新用户不建」。
+ *   ⚠️ 这两个类别的镜像源都**写进了库**（`enabled: false`，名字里带「镜像」），
+ *      用户随时可以自己打开 —— 但它们不该由我们默认替用户决定。
+ *
+ * ⚠️ 名单**不再依赖写死的数字**：测试里这条断言是**算出来的** ——
+ *    「名单 == 没有任何默认打开的公网源撑着的类别」。
+ *    所以以后补上（或失去）公网源时，忘了改这份名单会当场红，
+ *    而不是靠人记得去改那个 `6`。
  */
 export const LOCAL_ONLY_CATEGORIES = Object.freeze([
-  '领域·军事',
   '领域·汽车',
-  '领域·旅游',
   '性质·核查',
-  '形态·音频',
-  '时效·专题',
 ]);
 
 /** 这个类别是不是「只有本机源撑得起来」的那一类（见上面那段） */
@@ -174,13 +193,18 @@ export const DEFAULT_SOURCES = [
    * ================================================================== */
 
   /* ★ 澎湃新闻：官方**没有** RSS。能抓到的是 RSSHub 的公共镜像。
-     实测（同一地址连测 4 次）：rsshub.rssforever.com 3 次成功、19 条真新闻；
-     feedx.net 与 rsshub.app **4 次全部失败**（本机不可达）。
-     ⇒ 镜像可用，但要如实告诉用户："这是第三方代抓，不保证长期可用"。
-     放在 enabled:true：本机实测能抓到，而且它是用户要的来源之一。 */
+     ------------------------------------------------------------------
+     ⚠️ 2026-09-28 **换镜像**（不是新加源，是修一个已经坏掉的）：
+        原地址 `rsshub.rssforever.com/thepaper/featured` 在真机上**长期失败** ——
+        当天实测：它 **0/3 通过**（3 次全部 >20 秒超时），
+        而同一个路由在 `rsshub.liumingye.cn` 上 **3/3 通过**（1.0 / 1.5 / 4.5 秒，19 条）。
+        更早那次 26 路由的横向实测里，rssforever 只通了 3 个 ——
+        ⇒ 它就是那个"每个用户界面上永久挂着 1 个源异常"的来源（口径⑤要避免的东西）。
+     下面这条 `enabled: true` 保留原样：澎湃是用户要的来源之一、新镜像实测稳定。
+     ⚠️ 它仍然是**第三方代抓**、不是官网 —— 不保证长期可用，失败会如实记进 source_state。 */
   {
     name: '澎湃新闻',
-    feedUrl: 'https://rsshub.rssforever.com/thepaper/featured',
+    feedUrl: 'https://rsshub.liumingye.cn/thepaper/featured',
     kind: 'rss',
     categories: ['领域·时政', '领域·国际', '性质·深度', '时效·硬新闻', '主体·主流媒体'],
   },
@@ -411,6 +435,145 @@ export const DEFAULT_SOURCES = [
   { name: '果壳', feedUrl: 'https://www.guokr.com/rss/', kind: 'rss', categories: ['领域·科技', '性质·实用', '时效·软新闻', '主体·垂直媒体'], enabled: false },
   { name: '知乎日报', feedUrl: 'https://www.zhihu.com/rss', kind: 'rss', categories: ['领域·民生', '性质·实用', '时效·软新闻', '主体·UGC'], enabled: false },
   { name: 'V2EX 最热', feedUrl: 'https://www.v2ex.com/index.xml', kind: 'atom', categories: ['领域·科技', '性质·实用', '主体·UGC'], enabled: false },
+
+  /* ==================================================================
+   * G. 2026-09-28：一次**系统性**的补源（用户要「让别的使用者也拿到更多资讯」）
+   * ==================================================================
+   * 做法与判据（可复核）：
+   *   · 四路并行找候选（军事/国际/专题、汽车/旅游/房产/美食、核查/音频/数据、
+   *     科技/财经/体育/文娱/教育/健康 的广度），合计 **240+ 个候选**；
+   *   · 每个候选都用**项目自己的探针**真抓：`node tools/probe-feeds.mjs <候选.json>`
+   *     （fetchText + parseFeed，判据 = **有条目 + 有时间 + 有链接**，与口径⑤一致）；
+   *   · 进这份清单的**每一个**地址，都在收尾时**我自己再抓 2 轮**复核过
+   *     （报出的条数/延迟就是那两轮的真实数字）。
+   *
+   * ⚠️ 这一轮顺手修掉了两个**解析缺口**，它们各自判死了一整类源
+   *    （比多加几个源值钱，见 feed-parse.js 对应注释）：
+   *      ① `<link><![CDATA[url]]></link>` 被当成"含标签"整条丢掉
+   *         ⇒ 观点网 100 条/当天一个链接都没有；
+   *      ② 播客条目普遍没有 `<link>`，地址只在 `<enclosure url=…>` 里
+   *         ⇒ 「形态·音频」整个类别一条都进不来。
+   *
+   * ⚠️ 关于**第三方 RSSHub 公共镜像**（rsshub.liumingye.cn / woodland.cafe / injahow.cn）：
+   *    它们是这一轮把「汽车 / 核查」从"没有源"变成"有源"的唯一办法，
+   *    但**不是官网**、会 503/超时。用户 2026-09-28 拍板：**镜像源一律 `enabled: false`**，
+   *    写进库、让用户自己决定要不要开。⇒ 本组里名字带「镜像」的都属于这类。
+   *    （对照：`rssforever` 那个镜像本轮实测 26 个路由只通 3 个，已不推荐；
+   *      `liumingye` / `woodland` / `injahow` 三个可用，但都按镜像处理。）
+   * ================================================================== */
+
+  /* —— G1. 国际 / 时政：直连官方 feed（默认开）—— */
+  { name: '中新网·国际', feedUrl: 'https://www.chinanews.com.cn/rss/world.xml', kind: 'rss', categories: ['领域·国际', '性质·快讯', '时效·硬新闻', '主体·通讯社'] },
+  { name: '中新网·华人', feedUrl: 'https://www.chinanews.com.cn/rss/chinese.xml', kind: 'rss', categories: ['领域·国际', '性质·快讯', '时效·软新闻', '主体·通讯社'] },
+  { name: '中新网·要闻', feedUrl: 'https://www.chinanews.com.cn/rss/importnews.xml', kind: 'rss', categories: ['领域·时政', '领域·民生', '性质·快讯', '时效·硬新闻', '主体·通讯社'] },
+  { name: '中新网·大湾区', feedUrl: 'https://www.chinanews.com.cn/rss/dwq.xml', kind: 'rss', categories: ['领域·时政', '领域·民生', '性质·快讯', '主体·通讯社'] },
+  { name: '韩联社中文·滚动', feedUrl: 'https://cn.yna.co.kr/RSS/news.xml', kind: 'rss', categories: ['领域·国际', '性质·快讯', '时效·硬新闻', '主体·通讯社'] },
+  { name: '韩联社中文·政治', feedUrl: 'https://cn.yna.co.kr/RSS/politics.xml', kind: 'rss', categories: ['领域·国际', '领域·时政', '性质·快讯', '主体·通讯社'] },
+  /* ★ 韩联社·朝鲜：**军事类别唯一默认打开的中文源**（实测 27 条、最新当天）。
+     韩联社是韩国国家通讯社，中文版对朝鲜半岛军事动态的覆盖是持续且结构化的。 */
+  { name: '韩联社中文·朝鲜', feedUrl: 'https://cn.yna.co.kr/RSS/nk.xml', kind: 'rss', categories: ['领域·军事', '领域·国际', '性质·快讯', '时效·硬新闻', '主体·通讯社'] },
+  { name: '俄罗斯卫星通讯社·中文', feedUrl: 'https://sputniknews.cn/export/rss2/archive/index.xml', kind: 'rss', categories: ['领域·国际', '性质·快讯', '时效·硬新闻', '主体·通讯社'] },
+
+  /* —— G2. 时效·专题：三个**官方栏目型** feed（默认开）。
+         ⚠️ 这三个是「专题」这个类别**唯一**的公网来源；它们都是"围绕主题持续更新的栏目"，
+            与"时效·专题 = 围绕特定重大主题整合的系列内容"的定义一致。 —— */
+  { name: '中新网·东西问', feedUrl: 'https://www.chinanews.com.cn/rss/dxw.xml', kind: 'rss', categories: ['时效·专题', '性质·深度', '主体·通讯社'] },
+  { name: '中新网·理论', feedUrl: 'https://www.chinanews.com.cn/rss/theory.xml', kind: 'rss', categories: ['时效·专题', '性质·观点', '主体·通讯社'] },
+  { name: '中新网·法治', feedUrl: 'https://www.chinanews.com.cn/rss/fz.xml', kind: 'rss', categories: ['时效·专题', '领域·民生', '性质·实用', '主体·通讯社'] },
+
+  /* —— G3. 军事：两个**英文官方源**（用户 2026-09-28 拍板默认开这两个）。
+         ⚠️ 中文官方军事 feed 公网上确实不存在（本轮把国防部/中国军网/央视军事/光明网/
+            中国网/参考消息官网/Global Times 全试了一遍，404 或返回 HTML）。
+            想补中文军事，只能靠 G7 里那几个镜像源（默认关闭）。 —— */
+  { name: 'The War Zone', feedUrl: 'https://www.twz.com/feed', kind: 'rss', categories: ['领域·军事', '性质·深度', '主体·垂直媒体'] },
+  { name: 'Defense News·五角大楼', feedUrl: 'https://www.defensenews.com/arc/outboundfeeds/rss/category/pentagon/?outputType=xml', kind: 'rss', categories: ['领域·军事', '性质·快讯', '主体·垂直媒体'] },
+
+  /* —— G4. 科技 / 财经：五个**直连**中文科技源 + 两个财经源（默认开）—— */
+  { name: '极客公园', feedUrl: 'https://www.geekpark.net/rss', kind: 'rss', categories: ['领域·科技', '性质·深度', '主体·垂直媒体'] },
+  { name: '开源中国·资讯', feedUrl: 'https://www.oschina.net/news/rss', kind: 'rss', categories: ['领域·科技', '性质·快讯', '主体·垂直媒体'] },
+  { name: '雷峰网', feedUrl: 'https://www.leiphone.com/feed', kind: 'rss', categories: ['领域·科技', '性质·深度', '主体·垂直媒体'] },
+  { name: '爱范儿', feedUrl: 'https://www.ifanr.com/feed', kind: 'rss', categories: ['领域·科技', '性质·快讯', '时效·软新闻', '主体·垂直媒体'] },
+  { name: '小众软件', feedUrl: 'https://www.appinn.com/feed/', kind: 'rss', categories: ['领域·科技', '性质·实用', '主体·UGC'] },
+  { name: '中新网·财经', feedUrl: 'https://www.chinanews.com.cn/rss/finance.xml', kind: 'rss', categories: ['领域·财经', '性质·快讯', '时效·硬新闻', '主体·通讯社'] },
+  { name: '界面新闻', feedUrl: 'https://a.jiemian.com/index.php?m=article&a=rss', kind: 'rss', categories: ['领域·财经', '领域·民生', '性质·深度', '主体·主流媒体'] },
+
+  /* —— G5. 旅游 / 房产 / 美食：**直连**源（默认开）。
+         ★ 「领域·房产」这个类别就是靠观点网才第一次建出来的：
+           它在 G 组之前一直**不存在**（公网上找不到可用源，建了就是空 chip）。 —— */
+  { name: '品橙旅游', feedUrl: 'https://www.pinchain.com/rss', kind: 'rss', categories: ['领域·旅游', '性质·快讯', '主体·垂直媒体'] },
+  { name: 'TTG China', feedUrl: 'http://www.ttgchina.com/feed', kind: 'rss', categories: ['领域·旅游', '性质·快讯', '主体·垂直媒体'] },
+  { name: '观点网', feedUrl: 'https://www.guandian.cn/guandian.xml', kind: 'rss', categories: ['领域·房产', '领域·财经', '性质·快讯', '主体·垂直媒体'] },
+  { name: '食品伙伴网·质量管理', feedUrl: 'http://www.foodmate.net/feed/rss.php?mid=25', kind: 'rss', categories: ['领域·美食', '性质·实用', '主体·垂直媒体'] },
+
+  /* —— G6. 形态·音频：**中文播客**（默认开）。
+         ⚠️ 这些 feed 的条目**没有 `<link>`**，地址只存在于 `<enclosure url=…mp3>` ——
+            所以它们是**跟着 feed-parse.js 的 enclosure 兜底一起**才能用的：
+            少了那条兜底，这一整组都会被判成"没有链接"。
+         ⚠️ 上一轮的结论「播客源取不到」有两个原因，都已解决：
+            ① 解析器没有 enclosure 兜底（本轮补上）；
+            ② 部分播客 feed 超过 fetchText 的 5MB 上限（声东击西 6MB、科技早知道 7MB、
+               声动早咖啡 10MB）—— 这几档**仍然取不到**，属于已知取舍，没有放宽体积阀。 —— */
+  { name: '硅谷101', feedUrl: 'https://feeds.fireside.fm/sv101/rss', kind: 'rss', categories: ['形态·音频', '领域·科技', '性质·深度', '主体·垂直媒体'] },
+  { name: '晚点聊 LateTalk', feedUrl: 'https://feeds.fireside.fm/latetalk/rss', kind: 'rss', categories: ['形态·音频', '领域·科技', '领域·财经', '性质·深度', '主体·垂直媒体'] },
+  { name: '商业就是这样', feedUrl: 'https://www.ximalaya.com/album/46587439.xml', kind: 'rss', categories: ['形态·音频', '领域·财经', '性质·深度', '主体·垂直媒体'] },
+  { name: '厚雪长波', feedUrl: 'https://proxy.wavpub.com/snowball.xml', kind: 'rss', categories: ['形态·音频', '领域·财经', '性质·深度', '主体·垂直媒体'] },
+  { name: '钱粮胡同FM', feedUrl: 'https://s1.proxy.wavpub.com/qianlianghutong.xml', kind: 'rss', categories: ['形态·音频', '领域·财经', '性质·观点', '主体·UGC'] },
+  { name: '看理想圆桌', feedUrl: 'https://api.vistopia.com.cn/rss/program/13.xml', kind: 'rss', categories: ['形态·音频', '领域·文娱', '性质·观点', '时效·软新闻', '主体·垂直媒体'] },
+  { name: '博物志', feedUrl: 'https://bowuzhi.typlog.io/feed/audio.xml', kind: 'rss', categories: ['形态·音频', '领域·文娱', '性质·实用', '时效·软新闻', '主体·UGC'] },
+
+  /* —— G7. 第三方 RSSHub 镜像源（**全部 `enabled: false`**，用户自己勾）——
+     ⚠️ 为什么默认关闭：它们是第三方代抓、不是官网，会话内实测约 1/3 次 503/超时。
+        按口径⑤（"实测通不过的源不许默认打开"）与用户 2026-09-28 的拍板，
+        一律写进库但不默认抓 —— 用户能在「编辑类型」里看到并打开它们。
+     ⚠️ 唯一用途是**填公网上确实没有直连 feed 的缺口**：汽车（完全没有）、
+        核查（中文只有镜像）、数据、体育、文娱、教育、健康的补充。 */
+  { name: '电动邦（镜像）', feedUrl: 'https://rss.injahow.cn/diandong/news', kind: 'rss', categories: ['领域·汽车', '性质·快讯', '主体·垂直媒体'], enabled: false },
+  { name: '乘联会·文章（镜像）', feedUrl: 'https://rsshub.liumingye.cn/cpcaauto/news/news', kind: 'rss', categories: ['领域·汽车', '性质·数据', '主体·官方'], enabled: false },
+  { name: '中国汽车工业协会·统计（镜像）', feedUrl: 'https://rsshub.woodland.cafe/auto-stats', kind: 'rss', categories: ['领域·汽车', '性质·数据', '主体·官方'], enabled: false },
+  { name: '中国互联网联合辟谣平台·今日辟谣（镜像）', feedUrl: 'https://rsshub.liumingye.cn/piyao/jrpy', kind: 'rss', categories: ['性质·核查', '领域·民生', '时效·硬新闻', '主体·官方'], enabled: false },
+  { name: '果壳·科学人（镜像）', feedUrl: 'https://rsshub.liumingye.cn/guokr/scientific', kind: 'rss', categories: ['性质·核查', '领域·科技', '性质·实用', '主体·垂直媒体'], enabled: false },
+  { name: '中华网军事（镜像）', feedUrl: 'https://rsshub.liumingye.cn/china/news/military', kind: 'rss', categories: ['领域·军事', '领域·国际', '性质·快讯', '主体·主流媒体'], enabled: false },
+  { name: '参考消息·军事（镜像）', feedUrl: 'https://rsshub.liumingye.cn/cankaoxiaoxi/column/junshi', kind: 'rss', categories: ['领域·军事', '性质·快讯', '主体·主流媒体'], enabled: false },
+  { name: '环球网军事（镜像）', feedUrl: 'https://rsshub.liumingye.cn/huanqiu/news/mil', kind: 'rss', categories: ['领域·军事', '性质·快讯', '主体·主流媒体'], enabled: false },
+  { name: '澎湃防务（镜像）', feedUrl: 'https://rsshub.liumingye.cn/thepaper/list/25430', kind: 'rss', categories: ['领域·军事', '性质·深度', '主体·主流媒体'], enabled: false },
+  { name: '中房网·数据（镜像）', feedUrl: 'https://rsshub.woodland.cafe/fangchan/list/datalist', kind: 'rss', categories: ['领域·房产', '性质·数据', '主体·垂直媒体'], enabled: false },
+  { name: '深圳市住建局·通知公告（镜像）', feedUrl: 'https://rsshub.woodland.cafe/gov/shenzhen/zjj/xxgk/tzgg', kind: 'rss', categories: ['领域·房产', '性质·实用', '主体·官方'], enabled: false },
+  { name: '国家统计局·最新发布（镜像）', feedUrl: 'https://rsshub.liumingye.cn/gov/stats', kind: 'rss', categories: ['性质·数据', '领域·财经', '领域·民生', '主体·官方'], enabled: false },
+  { name: '财联社·深度（镜像）', feedUrl: 'https://rsshub.liumingye.cn/cls/depth', kind: 'rss', categories: ['性质·数据', '领域·财经', '性质·深度', '主体·垂直媒体'], enabled: false },
+  { name: '直播吧·NBA（镜像）', feedUrl: 'https://rsshub.rssforever.com/zhibo8/more/nba', kind: 'rss', categories: ['领域·体育', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'], enabled: false },
+  { name: '哔哩哔哩·热门（镜像）', feedUrl: 'https://rsshub.rssforever.com/bilibili/popular/all', kind: 'rss', categories: ['领域·文娱', '时效·软新闻', '主体·UGC'], enabled: false },
+  { name: '健康界（镜像）', feedUrl: 'https://rsshub.rssforever.com/cn-healthcare/index', kind: 'rss', categories: ['领域·医疗健康', '性质·深度', '主体·垂直媒体'], enabled: false },
+  { name: '北京市教委·通知公告（镜像）', feedUrl: 'https://rsshub.rssforever.com/gov/beijing/jw/tzgg', kind: 'rss', categories: ['领域·教育', '性质·实用', '主体·官方'], enabled: false },
+  { name: '虎嗅·文章（镜像）', feedUrl: 'https://rsshub.liumingye.cn/huxiu/article', kind: 'rss', categories: ['领域·财经', '领域·科技', '性质·深度', '主体·垂直媒体'], enabled: false },
+
+  /* ------------------------------------------------------------------
+   * 本轮**试过但确认不可用**的（一句话结论，写给下一个人省时间）
+   * ------------------------------------------------------------------
+   * 站点无对外 RSS（404 / 返回 HTML 网页）：
+   *   国防部网、中国军网、央视网军事、光明网、中国网、中国日报、Global Times、
+   *   铁血网、求是网、央广网、中国经济网、科技日报、工人日报、法治日报、中青网、
+   *   教育部官网、文旅部、住建部、中国旅游报、环球旅讯、执惠、迈点网、穷游、
+   *   汽车之家、盖世汽车、汽车纵横、卡车之家、中国汽车报、第一电动、车云网、
+   *   中国客车网、中国食品安全网、中国食品报、红餐网、中国房地产报、乐居财经、
+   *   贝壳研究院、克而瑞、房天下、链家、我爱我家、马蜂窝、下厨房、豆瓣、知乎日报。
+   * RSS 已停更（"能解析但最新一条是几个月/几年前" —— 这类最容易被误当可用）：
+   *   人民网整站（2016~2025 各频道不同）、新浪全套（2008~2018，博客类 2013~2018）、
+   *   搜狐全套（2006~，且多数**零时间字段**）、新华网各频道（**零时间字段**）、
+   *   中新网·汽车（停在 2026-08-24）、中新网·台湾/东盟（2026-03）、
+   *   求是网（2024-12）、环球时报英文版（2026-08）、中国天气网（2020-07）、
+   *   澎湃明查（2026-09-16）、贝壳研究院（2023-10）、有据（2026-05）、
+   *   兰姆酒吐司（2021-10）、蜻蜓FM 播客（2019）。
+   * 其它拒收原因：
+   *   · 必应新闻 `format=rss`、百度新闻 `tn=newsrss` —— 返回的是搜索页/跳转页，不是 feed；
+   *   · 豆瓣/B站每周必看/研招网/国家税务总局等 —— **零时间字段**（不能默认打开）；
+   *   · arXiv JSON API —— 本机可达但**常超 15 秒**，且是英文源；
+   *   · 联合国新闻中文 —— 正文页 9~19 秒（会撞抓取超时），音频订阅更慢 ⇒ 本轮未收；
+   *   · 境外中文站（德国之声/法广/美国之音/半岛中文/纽时中文/BBC 中文/星洲网/SCMP）——
+   *     本机 `fetch failed`（与 2026-09-22 的结论一致：网络可达性，不是地址错）；
+   *   · 播客「声东击西 / 科技早知道 / 半拿铁 / 日谈公园 / 声动早咖啡」——
+   *     feed 本身没问题，是**超过 fetchText 的 5MB 上限**被拒（没有放宽体积阀）。
+   *   · 财新：付费墙，不做（绕过它是违规的）。
+   * ------------------------------------------------------------------ */
 ];
 
 
