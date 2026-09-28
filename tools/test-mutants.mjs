@@ -674,6 +674,44 @@ const MUTANTS = [
     from: "  '领域·汽车',\n  '性质·核查',\n]);",
     to: "  '领域·汽车',\n  '性质·核查',\n  '领域·旅游',\n]);",
     expect: '本机专属名单与实测不符',
+  },
+  /* ── Feed 自动发现（2026-09-28）：用户粘网站首页也能加源 ──
+   * ⚠️ 三条纯函数靶子 + 两条接线靶子。接线那两条只能钉源码
+   *    （index.js 顶层 import electron，离线考裁判加载不了）。 */
+  {
+    file: 'src/ingest/feed-discover.js',
+    why: '不再要求 rel=alternate ⇒ 页面里任何带 feed 类型的 <link>（preload / 预取）都会被当成 feed 地址',
+    from: '    if (!attrs.rel || !/(^|\\s)alternate(\\s|$)/i.test(attrs.rel)) continue;',
+    to: '    if (false) continue;',
+    expect: '把非 alternate',
+  },
+  {
+    file: 'src/ingest/feed-discover.js',
+    why: '不再限制 http(s) ⇒ 页面里声明的 javascript:/data:/file: 地址被当成 feed，自动发现成了绕开协议白名单的后门',
+    from: "      if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;",
+    to: '      if (false) continue;',
+    expect: '协议白名单会被绕过',
+  },
+  {
+    file: 'src/ingest/feed-discover.js',
+    why: '相对地址不按 baseUrl 解析 ⇒ `href="/feed"`（最常见的一种写法）整类发现不了',
+    from: '      const u = new URL(decoded, baseUrl);',
+    to: '      const u = new URL(decoded);',
+    expect: '相对地址没被解析成绝对地址',
+  },
+  {
+    file: MAIN,
+    why: '自动发现的地址不过协议白名单 ⇒ 页面里一句 <link rel="alternate" type="application/rss+xml" href="javascript:…"> 就能把安全边界绕过去',
+    from: '          const ug2 = validateExternalUrl(cand);',
+    to: '          const ug2 = { ok: true };',
+    expect: '自动发现的地址没走协议白名单',
+  },
+  {
+    file: MAIN,
+    why: '存进库的还是用户粘的那个网页地址 ⇒ 源加进去了、每轮抓取都失败，而用户不知道该改什么',
+    from: '      const add = addCustomSource(d, { name, feedUrl: usedUrl, kind: parsed.format }, new Date().toISOString());',
+    to: '      const add = addCustomSource(d, { name, feedUrl: url, kind: parsed.format }, new Date().toISOString());',
+    expect: '存进库的不是自动发现出来的地址',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。

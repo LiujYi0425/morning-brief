@@ -1314,7 +1314,7 @@
     if (!ed.visible || ed.saving || ed.addSource.busy) return;
     var url = String(feedUrl || '').trim();
     var nm = String(name || '').trim();
-    if (!url) { toast('先粘贴一个 feed 地址'); return; }
+    if (!url) { toast('先粘贴一个 feed 地址（或网站首页地址）'); return; }
     if (!nm) { toast('给它起个名字吧'); return; }
 
     dispatch({ type: 'addSourceBusy', on: true });
@@ -1330,8 +1330,13 @@
       /* 成功：收起输入行、把源清单重新读一遍（新源已经绑到当前类型） */
       dispatch({ type: 'addSourceToggle', on: false });
       dispatch({ type: 'categories', list: r.categories || VM.derive(view).categories });
-      toast('已添加「' + r.name + '」（' + (r.itemCount || 0) + ' 条）');
-      api.log('[card] ✓ 添加源成功：' + r.name + ' ' + r.feedUrl + ' ' + r.format);
+      /* ★ 自动发现的要**说清楚**：用户粘的是网页，存下来的是网页里声明的 feed ——
+         不说的话他会以为自己粘错了地址（下次就不敢再用这个入口了）。 */
+      toast(r.discoveredFrom
+        ? '已从网页自动找到它的 feed：「' + r.name + '」（' + (r.itemCount || 0) + ' 条）'
+        : '已添加「' + r.name + '」（' + (r.itemCount || 0) + ' 条）');
+      api.log('[card] ✓ 添加源成功：' + r.name + ' ' + r.feedUrl + ' ' + r.format +
+        (r.discoveredFrom ? '（从 ' + r.discoveredFrom + ' 自动发现）' : ''));
       loadEditorData(ed.categoryId);
     } catch (err) {
       dispatch({ type: 'addSourceBusy', on: false });

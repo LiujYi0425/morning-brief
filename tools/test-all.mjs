@@ -61,6 +61,9 @@ const VM = (() => {
 import { decodeEntities, unwrapCdata, cleanText, collapseWhitespace, stripHtml } from '../src/ingest/entities.js';
 import { canonicalizeUrl, fnv1a, titleFingerprint, dedupeKey } from '../src/ingest/urls.js';
 import { parseFeed, parseDate, sniffContentKind } from '../src/ingest/feed-parse.js';
+/* ★ Feed 自动发现（2026-09-28）：纯函数，所以能在这里穷举 ——
+   而它守的是"用户粘一个网站首页也能加源"这件事的全部判据。 */
+import { discoverFeedLinks, DEFAULT_LIMIT } from '../src/ingest/feed-discover.js';
 import {
   openDb,
   upsertSources,
@@ -1275,6 +1278,104 @@ ok('★★ 没有 <link> 时用 <enclosure> 兜底（播客条目普遍只有这
     '<rss version="2.0"><channel><title>x</title>' +
     '<item><title>磁力链</title><enclosure url="magnet:?xt=urn:btih:abc"/></item></channel></rss>';
   assert.equal(parseFeed(bad).items[0].url, null, '把 magnet: 的 enclosure 当成原文链接了');
+});
+
+/* ==================================================================
+ * Feed 自动发现（2026-09-28）
+ * ------------------------------------------------------------------
+ * 用户手上通常只有**网站首页**，而「添加源」原来只收 feed 地址 ⇒
+ * 最常见的结局是"粘进去 → 一句『不是可解析的 feed』 → 放弃"。
+ * 而站点自己在 `<link rel="alternate">` 里声明了 feed（Web 标准做法）。
+ * 下面这些断言守的就是"**能不能从网页里正确地把那个地址捞出来**"，
+ * 以及三条安全/正确性边界：只认 feed 类型、只认 http(s)、相对地址要解成绝对地址。
+ * ================================================================== */
+say();
+say('--- Feed 自动发现：粘网站首页也能加源 ---');
+
+ok('★ 从网页里发现 feed：相对地址、实体转义、属性顺序都要认', () => {
+  const base = 'https://www.example.com/';
+  /* ① 最常见的标准写法 */
+  const rss = '<html><head><link rel="alternate" type="application/rss+xml" title="RSS" href="/feed"></head></html>';
+  assert.deepEqual(discoverFeedLinks(rss, base), ['https://www.example.com/feed'], '相对地址没被解析成绝对地址');
+
+  /* ② 属性顺序反过来 + 单引号 */
+  const rev = "<head><link href='https://cdn.example.com/atom.xml' type='application/atom+xml' rel='alternate'></head>";
+  assert.deepEqual(discoverFeedLinks(rev, base), ['https://cdn.example.com/atom.xml']);
+
+  /* ③ HTML 实体：`&amp;` 必须解回来，否则存下来的是个打不开的地址 */
+  const amp = '<link rel="alternate" type="application/rss+xml" href="/feed?a=1&amp;b=2">';
+  assert.deepEqual(discoverFeedLinks(amp, base), ['https://www.example.com/feed?a=1&b=2'], '&amp; 没被解回 &');
+
+  /* ④ 协议相对地址（`//host/feed`）也要能解 */
+  const pr = '<link rel="alternate" type="application/rss+xml" href="//cdn.example.com/f.xml">';
+  assert.deepEqual(discoverFeedLinks(pr, base), ['https://cdn.example.com/f.xml']);
+
+  /* ⑤ 片段要去掉：`/feed#x` 与 `/feed` 是同一个源（留着重则变成两个源） */
+  const frag = '<link rel="alternate" type="application/rss+xml" href="/feed#top">';
+  assert.deepEqual(discoverFeedLinks(frag, base), ['https://www.example.com/feed']);
+});
+
+ok('★★ 只认 feed 类型、只认 http(s)（否则会把语言版本 / js 伪协议也收进来）', () => {
+  const base = 'https://www.example.com/';
+  /* ⚠️ `<link rel="alternate" hreflang="en">` 是**语言版本**，不是 feed ——
+     它没有 feed 的 type。只按 rel=alternate 收，会把整站的各种版本都当成 feed。 */
+  const lang = '<head><link rel="alternate" hreflang="en" href="https://www.example.com/en/"></head>';
+  assert.deepEqual(discoverFeedLinks(lang, base), [], '把 rel=alternate 的语言版本当成 feed 了');
+
+  /* rel 是多值时仍要认（`rel="alternate feed"`） */
+  const multi = '<link rel="alternate feed" type="application/atom+xml" href="/atom.xml">';
+  assert.deepEqual(discoverFeedLinks(multi, base), ['https://www.example.com/atom.xml']);
+
+  /* 样式表 / 图标 / preload 一律不许当 feed */
+  const junk =
+    '<head><link rel="stylesheet" type="text/css" href="/a.css">' +
+    '<link rel="icon" type="image/png" href="/favicon.png">' +
+    '<link rel="preload" type="application/rss+xml" href="/x"></head>';
+  assert.deepEqual(discoverFeedLinks(junk, base), [], '把非 alternate 的 <link> 当成 feed 了');
+
+  /* ★ 安全边界：页面里声明的 `javascript:` / `data:` 地址**不许**被返回 ——
+     否则「自动发现」会变成绕开协议白名单的一条路。 */
+  const evil =
+    '<head><link rel="alternate" type="application/rss+xml" href="javascript:alert(1)">' +
+    '<link rel="alternate" type="application/rss+xml" href="data:text/xml,<rss/>">' +
+    '<link rel="alternate" type="application/rss+xml" href="file:///C:/x.xml"></head>';
+  assert.deepEqual(discoverFeedLinks(evil, base), [], '非 http(s) 的 feed 声明被放行了（协议白名单会被绕过）');
+});
+
+ok('★ 发现结果：去重、按声明顺序、有上限；畸形输入不抛异常', () => {
+  const base = 'https://e.com/';
+  const many =
+    '<head>' +
+    '<link rel="alternate" type="application/rss+xml" href="/a">' +
+    '<link rel="alternate" type="application/rss+xml" href="/a">' +          /* 重复 */
+    '<link rel="alternate" type="application/feed+json" href="/b.json">' +   /* JSON Feed */
+    '<link rel="alternate" type="application/rss+xml" href="/c">' +
+    '<link rel="alternate" type="application/rss+xml" href="/d">' +
+    '<link rel="alternate" type="application/rss+xml" href="/e">' +
+    '<link rel="alternate" type="application/rss+xml" href="/f">' +
+    '</head>';
+  const got = discoverFeedLinks(many, base);
+  assert.equal(got[0], 'https://e.com/a', '第一个候选该是页面里第一个声明的');
+  assert.equal(got[1], 'https://e.com/b.json');
+  assert.equal(got.length, DEFAULT_LIMIT, '没有按上限截断：' + got.length);
+  assert.equal(new Set(got).size, got.length, '结果里有重复地址');
+
+  /* 畸形 / 空输入不许抛（考裁判里抛异常＝整份测试起不来） */
+  for (const badInput of ['', null, undefined, '<html', '<link rel=', '<link rel="alternate">']) {
+    assert.deepEqual(discoverFeedLinks(badInput, base), [], '畸形输入应当返回空数组：' + String(badInput));
+  }
+  /* baseUrl 自己都解析不了时（调用方保证不会发生 —— 它传的是刚校验过的地址）：
+     **一律丢弃**，连绝对地址也不返回。理由：Node 的 URL 构造器在 base 不合法时
+     对绝对地址同样抛错 ⇒ 要么吞掉这个事实、要么在这里分两路解析。
+     选前者：纯函数**宁可返回空，也不返回一个猜出来的地址**。 */
+  const mixed = '<link rel="alternate" type="application/rss+xml" href="https://ok.com/f">' +
+    '<link rel="alternate" type="application/rss+xml" href="/rel">';
+  assert.deepEqual(discoverFeedLinks(mixed, 'not-a-url'), [], '基准地址不合法时不该返回任何地址');
+  /* 正常基准下：绝对地址原样、相对地址解成绝对 */
+  assert.deepEqual(
+    discoverFeedLinks(mixed, 'https://ok.com/'),
+    ['https://ok.com/f', 'https://ok.com/rel'],
+  );
 });
 
 ok('★ 条目顺序非单调时，库里按 published_at 排（36氪首条 16:33 后面还有 20:56）', () => {
@@ -3603,8 +3704,24 @@ ok('★★ 添加源必须**真的**调用那两个校验、并且**先验再存
   assert.ok(/validateNewSource\(p\)/.test(b), 'addSource 没有调用 validateNewSource —— 地址判定等于没做');
   assert.ok(/validateExternalUrl\(v\.feedUrl\)/.test(b), 'addSource 没有复用协议白名单（url-guard）');
   assert.ok(/fetchText\(url\)/.test(b), 'addSource 没有真的抓一次 —— 那"先验再存"就是空话');
-  assert.ok(/parseFeed\(res\.text/.test(b), 'addSource 没有真的解析一次');
+  assert.ok(/parseFeed\(/.test(b), 'addSource 没有真的解析一次');
   assert.ok(/if \(!parsed \|\| !parsed\.ok\) \{/.test(b), '解析失败的分支没了 ⇒ 不是 feed 的地址也会被存成源');
+  /* ★★ Feed 自动发现（2026-09-28）的三条接线，缺一条都会静默退化：
+     ① 用户粘的**网页**要拿去发现（`discoverFeedLinks(pageText, url)`）；
+     ② 发现出来的地址**必须照样过协议白名单** —— 否则页面里一句
+        `<link rel="alternate" type="application/rss+xml" href="javascript:…">`
+        就能把白名单绕过去（这是安全边界，不是风格问题）；
+     ③ 存进库的必须是**发现出来的那个地址**（`usedUrl`），
+        不然用户加完源、抓的却还是那个网页 —— 每轮都失败，而他不知道为什么。 */
+  assert.ok(/discoverFeedLinks\(/.test(b), 'addSource 没有接入 feed 自动发现');
+  assert.ok(
+    /for \(const cand of cands\)[\s\S]{0,400}?validateExternalUrl\(cand\)/.test(b),
+    '自动发现的地址没走协议白名单 —— 页面里声明的 javascript: 地址能绕过去',
+  );
+  assert.ok(
+    /addCustomSource\(d, \{ name, feedUrl: usedUrl/.test(b),
+    '存进库的不是自动发现出来的地址（抓的还是那个网页 ⇒ 每轮都失败，而用户不知道为什么）',
+  );
   /* ★ 两条**契约**断言（比"某个 if 还在不在"更结实）：
      ① 这个 handler 里**每一条失败返回都必须带 reason** ——
         原因是要给用户看的正文，静默失败在这里的表现是"点了没反应"；

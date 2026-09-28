@@ -83,6 +83,10 @@ import { parseFeed } from '../ingest/feed-parse.js';
       这个管"程序能不能定期去抓"（程序自己出网的路径，边界更严：
       本机/内网地址一律拒绝）。 */
 import { validateNewSource } from './feed-url.js';
+/* ★ Feed 自动发现（2026-09-28）：用户粘的往往不是 feed、而是网站首页，
+   而站点自己在 `<link rel="alternate">` 里声明了 feed 地址。
+   判定逻辑是纯函数（可离线穷举），这里只负责"取一次页面 + 试几个候选"。 */
+import { discoverFeedLinks } from '../ingest/feed-discover.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -1347,10 +1351,16 @@ async function bootstrap() {
             是两件能被分开的事。 */
       let parsed = null;
       let fetchErr = null;
+      let pageText = '';
+      let usedUrl = url;      // 真正会被存下来的地址（可能来自"自动发现"）
+      let discoveredFrom = ''; // 从哪个页面发现的（回话给用户看）
       try {
         const res = await fetchText(url);
         if (!res.ok) fetchErr = res.error || `HTTP ${res.status}`;
-        else parsed = parseFeed(res.text, { sourceName: name });
+        else {
+          pageText = res.text || '';
+          parsed = parseFeed(pageText, { sourceName: name });
+        }
       } catch (err) {
         fetchErr = (err && err.message) || String(err);
       }
@@ -1360,11 +1370,51 @@ async function bootstrap() {
       }
       if (!parsed || !parsed.ok) {
         const kind = (parsed && parsed.contentKind) || '认不出';
-        console.log(`[source] ✗ 不是可解析的 feed（不存入）：${url} —— ${kind}`);
-        return {
-          ok: false,
-          reason: `这个地址不是可解析的 feed（实际拿到的是「${kind}」）。只支持 RSS / Atom。`,
-        };
+        /* ★★ Feed 自动发现（2026-09-28）：
+           用户手上通常只有**网站首页**，而很多站点在 HTML 里自己声明了 feed
+           （`<link rel="alternate" type="application/rss+xml" href="…">`）——
+           这是 Web 标准做法，浏览器地址栏那个 RSS 图标就是靠它。
+           ⇒ 在放弃之前，按声明试几个候选。**只读声明、不解析正文**，
+             所以与口径①「不抓 HTML 页面」不冲突（那条禁的是把网页当内容源）。
+           ⚠️ 发现出来的地址**照样要过协议白名单**：不然页面里一句
+              `<link rel="alternate" type="application/rss+xml" href="javascript:…">`
+              就能把白名单绕过去。 */
+        const cands = discoverFeedLinks(pageText, url);
+        for (const cand of cands) {
+          if (cand === url) continue;
+          const ug2 = validateExternalUrl(cand);
+          if (!ug2.ok) {
+            console.log(`[source] 自动发现的地址被协议白名单拒绝：${cand} —— ${ug2.reason}`);
+            continue;
+          }
+          let p2 = null;
+          try {
+            const r2 = await fetchText(cand);
+            if (r2.ok) p2 = parseFeed(r2.text || '', { sourceName: name });
+          } catch {
+            p2 = null;   // 试下一个候选
+          }
+          if (p2 && p2.ok && p2.format) {
+            parsed = p2;
+            usedUrl = cand;
+            discoveredFrom = url;
+            console.log(`[source] ★ 自动发现：${url} 声明了 feed → ${cand}（${p2.items.length} 条）`);
+            break;
+          }
+        }
+        if (!parsed || !parsed.ok) {
+          const hint = cands.length
+            ? `页面上声明的 ${cands.length} 个 feed 地址也都试过了，没有一个能解析。`
+            : '页面上也没有声明 feed 地址（<link rel="alternate">）。';
+          console.log(`[source] ✗ 不是可解析的 feed（不存入）：${url} —— ${kind}；${hint}`);
+          return {
+            ok: false,
+            reason:
+              `这个地址不是可解析的 feed（实际拿到的是「${kind}」）。` +
+              hint +
+              '只支持 RSS / Atom / JSON Feed。',
+          };
+        }
       }
 
       /* 到这里 parsed 一定是 ok 的 ⇒ format 一定有值。
@@ -1375,7 +1425,13 @@ async function bootstrap() {
               那里缺省值是"给用户看的"，这里缺省值是"掩盖逻辑错误"。） */
       if (!parsed.format) throw new Error('解析成功却没有 format —— parseFeed 的契约变了');
 
-      const add = addCustomSource(d, { name, feedUrl: url, kind: parsed.format }, new Date().toISOString());
+      /* ⚠️ 自动发现出来的地址也要查重（上面那次查的是用户粘的原文）：
+         用户可能粘 A 站首页、而 A 声明的是 B 的 feed；B 也许早就被加过了。 */
+      if (usedUrl !== url && listSources(d).some((s) => s.feed_url === usedUrl)) {
+        return { ok: false, reason: '这个页面声明的 feed 已经在库里了：' + usedUrl, feedUrl: usedUrl };
+      }
+
+      const add = addCustomSource(d, { name, feedUrl: usedUrl, kind: parsed.format }, new Date().toISOString());
       if (!add.ok) return { ok: false, reason: add.reason, existed: add.existed };
 
       /* ⚠️ 顺手绑到**当前类型**：用户是在某个类型的编辑面板里加的源，
@@ -1388,14 +1444,18 @@ async function bootstrap() {
       }
 
       console.log(
-        `[source] ✓ 已添加自定义源「${name}」${url}（${parsed.format}，试抓拿到 ${parsed.items.length} 条）` +
+        `[source] ✓ 已添加自定义源「${name}」${usedUrl}（${parsed.format}，试抓拿到 ${parsed.items.length} 条）` +
+          (discoveredFrom ? `—— 从 ${discoveredFrom} 自动发现` : '') +
           (Number.isFinite(catId) ? `，并绑到类型 ${catId}` : ''),
       );
       return {
         ok: true,
         id: add.id,
         name,
-        feedUrl: url,
+        feedUrl: usedUrl,
+        /* ★ 让界面能说清"你给的是网页，我接的是它的 feed" ——
+           不告诉用户，他会以为自己粘错了地址（下次就不敢再用这个入口）。 */
+        discoveredFrom,
         format: parsed.format,
         itemCount: parsed.items.length,
         categories: listCategories(d),

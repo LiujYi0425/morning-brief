@@ -994,10 +994,13 @@
         open: !!v.addSourceOpen,
         busy: !!v.addSourceBusy,
         toggleLabel: v.addSourceOpen ? '收起' : '＋ 添加源',
-        placeholder: '粘贴 feed 地址（RSS/Atom）',
+        /* ★ 2026-09-28：现在**网站地址也行**了（主进程会读页面里的
+           `<link rel="alternate">` 声明，自动找到它的 feed）。
+           文案必须说出来 —— 不然用户看到"粘贴 feed 地址"就以为自己手上没有 feed 可粘。 */
+        placeholder: '粘贴 feed 地址，或网站首页地址',
         hint: v.addSourceBusy
           ? '正在验证这个地址…（会真的抓一次，可能要几秒）'
-          : '只支持 RSS / Atom。加进来的源只属于当前这个类型。',
+          : '支持 RSS / Atom / JSON Feed；粘网站首页也行，程序会自己找它的 feed。加进来的源只属于当前这个类型。',
       },
     };
     /* 面板的入口按钮：只为**一个真实的类型**出现（「全部」不是类型，没有可编辑的东西） */
