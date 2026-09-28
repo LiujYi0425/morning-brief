@@ -280,14 +280,24 @@ ok('★★ 托盘里常驻版本号标签，且在「检查更新」正上方（
     '线上版本没有从状态文件里读 ⇒ 重启之后菜单只剩本机那半截（"常驻"名不副实）',
   );
   const atLabel = js.indexOf('versionMenuLabel()');
-  const atCheck = js.indexOf('label: updateMenuLabel()');
+  const atCheck = js.indexOf('label: updateMenuLabelText()');
   assert.ok(atLabel > 0 && atCheck > 0, '找不到托盘里那两行菜单项');
   assert.ok(atLabel < atCheck, '版本号标签跑到「检查更新」下面去了（用户要的是正上方）');
 
   /* 检查完必须**立刻**重建菜单：托盘菜单只建一次、之后每次右键弹出的是同一份，
-     不重建的话文案会停在「正在处理更新…」或上一次的结论上。 */
+     不重建的话文案会停在「正在处理更新…」或上一次的结论上。
+     ⚠️⚠️ 判据必须**限定在 finally 块里**（踩过一次）：原来写的是
+        「`updateBusy = false;` 之后 600 字符内出现 `refreshMenu()`」，
+        而后面还有别的 `refreshMenu()`（下载开始那一次）恰好落进那个窗口
+        ⇒ 把 finally 里那一句删掉的变异体**漏网了**（实测）。窗口式判据会被
+        同一个文件里"碰巧在附近"的另一处代码满足。 */
+  const atCall = js.indexOf('await checkForUpdate');
+  const atFinally = js.indexOf('} finally {', atCall);
+  assert.ok(atCall > 0 && atFinally > atCall, '定位不到检查流程的 finally 块（index.js 结构变了？）');
+  const finallyBlock = js.slice(atFinally, js.indexOf('}', atFinally + 11) + 1);
+  assert.ok(/updateBusy = false;/.test(finallyBlock), 'finally 块里没有把 updateBusy 放回去（按钮会永久禁用）');
   assert.ok(
-    /\} finally \{\s*updateBusy = false;[\s\S]{0,600}?refreshMenu\(\);/.test(js),
+    /refreshMenu\(\);/.test(finallyBlock),
     '检查完之后（含失败路径）没有重建菜单 ⇒ 菜单停在旧文案上',
   );
   assert.ok(js.includes('refreshMenu = rebuildMenu'), 'refreshMenu 没接到真正的重建函数上（空实现 = 菜单永不刷新）');
@@ -295,6 +305,55 @@ ok('★★ 托盘里常驻版本号标签，且在「检查更新」正上方（
   const up = readSrc('src/shared/update.js');
   assert.ok(up.includes('export function versionLabel'), '文案没做成纯函数 —— 拼在主进程里就没法离线穷举');
   assert.ok(up.includes('lastRemote'), '状态里没有 lastRemote ⇒ 线上版本活不过重启');
+});
+
+/* ---- 17. 一次点击就更新（用户 2026-09-28）----
+ *
+ * 用户原话：「右键托盘点击检查更新点击一次就可以更新，而不是点击两次」。
+ * ⚠️ 代码路径本来就已经是"点一次就装"，真机上得到两次的**根因是看不见**：
+ *    点完之后托盘菜单文字不会自己刷新、下载进度只写在日志里 ——
+ *    那几分钟里界面上没有任何变化，于是被读成"点了没反应、得再点一次"。
+ * ⇒ 这三条断言守的是"点一次之后**看得见**它在动"：
+ *    菜单文字带进度、菜单外面有气泡、下载一结束就提示即将重启。 */
+ok('★★ 点一次就更新完：进度要写进菜单、菜单外面要有反馈，且自动检查绝不自己装', () => {
+  const js = readSrc('src/main/index.js');
+
+  /* ① 口径本身：不许再有"再点一次才装"。
+     ⚠️ 必须先剥注释：那段解释里正举着"再点一次才装"这个反面例子 ——
+        不剥的话断言会咬到自己的注释（本项目在别处踩过两次）。 */
+  const code = js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!code.includes('再点一次'), '还留着"再点一次即安装"的口径 —— 用户要的是一次点击');
+
+  /* ② 查到新版之后**不许 return** —— 同一次点击要继续往下走（下载 + 安装）。
+     切出"检查结果分支"这一段单独看（把注释剥掉，免得咬到注释里的例子）。 */
+  const from = js.indexOf("if (r.action === 'available')");
+  const to = js.indexOf('if (!updateReady) return;', from);
+  assert.ok(from > 0 && to > from, '定位不到检查结果分支（index.js 结构变了？）');
+  const branch = js.slice(from, to).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!/return;/.test(branch), '查到新版之后直接 return 了 ⇒ 又得点第二次');
+
+  /* ③ 进度必须写进菜单并重建菜单（这是"看得见"的关键） */
+  const atProgress = js.indexOf('onProgress:');
+  assert.ok(atProgress > 0, '找不到下载进度回调');
+  const progress = js.slice(atProgress, atProgress + 1200);
+  assert.ok(
+    /updatePct = pct;[\s\S]{0,80}?refreshMenu\(\);/.test(progress),
+    '进度没有写进菜单文案 ⇒ 点完之后界面上纹丝不动（"点了没反应"的成因）',
+  );
+
+  /* ④ 菜单只有右键才看得见 ⇒ 菜单外面也必须有反馈 */
+  assert.ok(/const notifyUpdate = /.test(js), '没有 notifyUpdate 这个统一入口');
+  assert.ok(js.includes('displayBalloon'), '点完之后没有任何菜单之外的反馈（106MB 要下好几分钟）');
+  assert.ok(js.includes('下载完成，正在安装'), '下载完没有告诉用户接下来会自动重启');
+
+  /* ⑤ 唯一保留的例外：启动 8 秒后那次自动检查**只点亮菜单，绝不自己装** */
+  assert.ok(
+    js.includes('if (!interactive) return;'),
+    '自动检查那道"不许自己装"的闸没了 —— 会在用户正看简报时静默下载安装并重启',
+  );
+
+  const up = readSrc('src/shared/update.js');
+  assert.ok(up.includes('export function updateMenuLabel'), '菜单文案没做成纯函数（拼在主进程里就没法离线穷举）');
 });
 
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');

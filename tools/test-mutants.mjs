@@ -580,6 +580,12 @@ const MUTANTS = [
     test: 'tools/test-ai-brief.mjs',
     file: MAIN,
     why: '检查完不重建托盘菜单 ⇒ 查到了新版本、菜单上却还写着上一次的字（托盘菜单只建一次、之后每次弹的都是同一份）',
+    /* ⚠️ 这条抓到过一个**断言侧**的缺陷（2026-09-28）：判据原写成
+       「`updateBusy = false;` 之后 600 字符内出现 `refreshMenu()`」，
+       而 0.1.9 在"开始下载"那里也加了一次 `refreshMenu()`，恰好落进那个窗口
+       ⇒ 把 finally 里那一句删掉，断言**照样通过**，变异体漏网。
+       ⇒ 判据改成"看它**在不在 finally 块里**"（见 test-ai-brief 那段注释）。
+       教训：**窗口式判据会被同一文件里碰巧在附近的另一处代码满足** —— 要限定在结构里。 */
     from: '        refreshMenu();\n      }',
     to: '      }',
     expect: '没有重建菜单',
@@ -615,6 +621,37 @@ const MUTANTS = [
     from: '    if (!Number.isFinite(ageMs) || ageMs > SENTINEL_MAX_AGE_MS) {',
     to: '    if (false) {',
     expect: '过期判据定义了却没被调用',
+  },
+  /* ── 一次点击就更新（用户 2026-09-28：「点击一次就可以更新，而不是点击两次」）──
+   * ⚠️ 真机上的根因**不是"非要两次"**（代码本来就一次到底），而是点完之后**看不见**：
+   *    菜单文字不刷新、进度只写在日志里 ⇒ 用户以为没反应、又点了一次。
+   *    所以这三条守的是"看得见"和"自动检查不许自己装"这条边界。 */
+  {
+    file: UPDATE,
+    why: '菜单文案丢掉下载进度（退化成一句「正在处理更新…」）⇒ 点一次之后界面上几分钟没有任何变化，被读成"点了没反应、要点两次"',
+    from: [
+      '    return Number.isFinite(p) && p >= 0',
+      '      ? `正在下载更新 ${Math.min(99, p)}%（装完自动重启）`',
+      "      : '正在处理更新…';",
+    ].join('\n'),
+    to: "    return '正在处理更新…';",
+    expect: '进度没有写进菜单文案',
+  },
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: MAIN,
+    why: '下载进度不重建菜单 ⇒ 用户点一次之后的几分钟里界面上纹丝不动（"点了没反应"的成因）',
+    from: '            updatePct = pct;\n            refreshMenu();',
+    to: '            updatePct = pct;',
+    expect: '进度没有写进菜单文案',
+  },
+  {
+    test: 'tools/test-ai-brief.mjs',
+    file: MAIN,
+    why: '拆掉自动检查那道"不许自己装"的闸 ⇒ 启动 8 秒后静默下载安装并重启，把用户正看的卡片抽走',
+    from: '      if (!interactive) return;   // 启动 8 秒后那次自动检查：只把菜单点亮，绝不自己装',
+    to: '',
+    expect: '自动检查那道"不许自己装"的闸没了',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。

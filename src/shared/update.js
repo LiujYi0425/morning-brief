@@ -340,3 +340,31 @@ export function versionLabel({ current, remote } = {}) {
   const r = canonicalVersion(remote);
   return r ? `${line} · 线上 v${r}` : line;
 }
+
+/**
+ * 托盘菜单里「检查并更新」那一行的文案。纯函数，可离线穷举。
+ *
+ * 口径（用户 2026-09-28 定的）：**一次点击就把更新做完** ——
+ *   点一下 = 查 → 有新版就下载 → 装 → 重启，不必点第二次。
+ *   原来分成"第一次查、第二次装"，本意是别让人误触发一次 100MB 下载 + 重启；
+ *   但真机上的结果是：点一次**看不见任何动静**（菜单文字不刷新、进度只写在日志里），
+ *   于是看起来像"点了没反应"、以为得点两次 —— 防误触变成了"像坏了"。
+ *   ⇒ 改成一次点击，并且把**每一步状态都摆到台面上**：
+ *     `正在下载更新 42%（装完自动重启）` / `✅ 更新到 x.y.z（点击安装并重启）`。
+ *
+ * ⚠️ `pct < 0` 表示"还没有进度"（正在检查 / 正在准备）——
+ *    这时不许写成 0%：那会让一个正在联网检查的过程看起来像卡在下载上。
+ *
+ * @param {{busy?:boolean, readyVersion?:string, note?:string, pct?:number}} [o]
+ * @returns {string}
+ */
+export function updateMenuLabel({ busy = false, readyVersion = '', note = '', pct = -1 } = {}) {
+  if (busy) {
+    const p = Math.round(Number(pct));
+    return Number.isFinite(p) && p >= 0
+      ? `正在下载更新 ${Math.min(99, p)}%（装完自动重启）`
+      : '正在处理更新…';
+  }
+  if (readyVersion) return `✅ 更新到 ${readyVersion}（点击安装并重启）`;
+  return note ? `检查并更新（${note}）` : '检查并更新（有新版本会直接装并重启）';
+}

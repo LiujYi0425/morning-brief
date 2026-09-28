@@ -132,6 +132,7 @@ import {
   DEFAULT_MAX_ATTEMPTS,
   canonicalVersion,
   versionLabel,
+  updateMenuLabel,
 } from '../src/shared/update.js';
 /* ★ 更新的 **I/O 外壳**（updater.js）在纯 Node 里**加载得动** ——
    它对 electron 是懒加载（`await import('electron')` 写在函数体里），
@@ -2553,6 +2554,30 @@ ok('★★ 版本号标签：两版并排；不知道线上时不编一个出来
   assert.equal(canonicalVersion('v0.1.8 '), '0.1.8');
   assert.equal(canonicalVersion('1.2.3-rc1'), '1.2.3-rc1');
   assert.equal(canonicalVersion('1.2'), null);
+});
+
+ok('★★ 点一次就更新：菜单文案必须把「正在下载更新 x%」摆出来', () => {
+  /* 用户 2026-09-28 的原话：「点击一次就可以更新，而不是点击两次」。
+     真机上的根因不是"非要两次"，而是点一次之后的几分钟里**界面上没有任何变化**
+     （托盘菜单文字不会自己刷新、下载进度只写在日志里）⇒ 看起来像没反应。
+     ⇒ 文案得把"每一步"说出来，而且**还没进度时不许写 0%**。 */
+  assert.equal(updateMenuLabel({}), '检查并更新（有新版本会直接装并重启）');
+  assert.equal(updateMenuLabel({ busy: true }), '正在处理更新…', '还没有进度时不许写成 0%');
+  assert.equal(
+    updateMenuLabel({ busy: true, pct: 42 }),
+    '正在下载更新 42%（装完自动重启）',
+    '进度没有写进菜单文案 ⇒ 点完之后界面上纹丝不动，看起来像"点了没反应"',
+  );
+  assert.equal(updateMenuLabel({ busy: true, pct: 0 }), '正在下载更新 0%（装完自动重启）');
+  assert.equal(
+    updateMenuLabel({ busy: true, pct: 150 }),
+    '正在下载更新 99%（装完自动重启）',
+    '进度不许到 100% —— 那会让人以为已经装完了，而实际上还在写盘/等重启',
+  );
+  assert.equal(updateMenuLabel({ busy: true, pct: NaN }), '正在处理更新…', 'NaN 进度不许写成「NaN%」');
+  assert.equal(updateMenuLabel({ readyVersion: '0.1.9' }), '✅ 更新到 0.1.9（点击安装并重启）');
+  assert.equal(updateMenuLabel({ note: '已是最新' }), '检查并更新（已是最新）');
+  assert.equal(updateMenuLabel({ note: '检查失败：清单不合格' }), '检查并更新（检查失败：清单不合格）');
 });
 
 ok('★★ 线上版本要能活过重启：合法值留住、畸形值丢掉、落盘再读回来不丢', () => {

@@ -36,7 +36,7 @@ import {
 } from '../shared/runtime-state.js';
 import { createBootMark, teeConsole, createLogSink } from '../shared/run-log.js';
 import { bootWatchdog, markHealthy, rollbackNow, checkForUpdate, downloadUpdate, applyUpdate, loadState } from './updater.js';
-import { formatBytes, versionLabel } from '../shared/update.js';
+import { formatBytes, versionLabel, updateMenuLabel } from '../shared/update.js';
 import { runIngest } from '../ingest/fetch-feeds.js';
 import {
   openDb,
@@ -990,17 +990,26 @@ async function bootstrap() {
 
   /* ---------------- 更新：检查与安装 ----------------
    *
-   * 口径（用户定的）：**只提示，用户点了才装**，不静默更新。
+   * 口径（用户定的）：**只提示、用户点了才装**，不静默更新。
    *   理由：这是个常驻桌面的挂件 —— 静默装完重启，等于在用户正看简报时
    *   把卡片抽走再放回来，而且他不会知道发生过什么。
    *
-   * 两段式：第一次点 = 查；查到之后菜单变成"更新到 x.y.z"，第二次点 = 装。
-   *   把"查"和"装"分开，是为了让"我点了它却什么都没发生"这种情况不存在 ——
-   *   每一次点击都会让菜单文字或日志发生变化。
+   * ★ 一次点击就把更新做完（用户 2026-09-28 改的口径）：
+   *   点「检查并更新」= 查 → 有新版就下载 → 装 → 重启。
+   *   ⚠️ 原来分成"第一次点=查、第二次点=装"，本意是别让人误触发一次
+   *      100MB 下载 + 重启；但真机上得到的是相反的结果 ——
+   *      点一次**看不见任何动静**（托盘菜单文字不会自己刷新、下载进度只写在日志里），
+   *      于是用户以为"点了没反应"、得再点一次，"防误触"变成了"像坏了"。
+   *   ⇒ 改成一次点击，并把每一步状态摆到台面上：
+   *      菜单文字（正在下载更新 x%）＋ 托盘气泡（发现新版本 / 下载完成 / 检查失败）。
+   *
+   * ⚠️ 唯一保留的例外：**启动 8 秒后的那次自动检查**查到新版也不装，只把菜单点亮
+   *    （`interactive=false` 只走到"记下结论"为止）—— 那一次点击不是用户按的。
    */
   let updateBusy = false;
-  let updateReady = null;   // 已确认可用、等用户点第二次的清单
+  let updateReady = null;   // 已确认可用、等用户点一下的清单（自动检查也会把它点亮）
   let updateNote = '';      // 上一次检查的结论（显示在菜单里）
+  let updatePct = -1;       // 下载进度（-1 = 还没有进度：正在检查 / 正在准备）
 
   /* ★ 版本号标签（用户 2026-09-26 要的）：菜单里常驻一行「当前版本 vX · 线上 vY」。
    *
@@ -1035,10 +1044,26 @@ async function bootstrap() {
     }
   };
 
-  const updateMenuLabel = () => {
-    if (updateBusy) return '正在处理更新…';
-    if (updateReady) return `✅ 更新到 ${updateReady.version}（点击安装并重启）`;
-    return updateNote ? `检查更新（${updateNote}）` : '检查更新';
+  /* 「检查并更新」那一行的文案：纯函数在 `shared/update.js` 里（能离线穷举），
+     这里只把四个状态喂进去 —— 状态一变（查到了 / 在下载 / 失败）菜单就跟着变。 */
+  const updateMenuLabelText = () => updateMenuLabel({
+    busy: updateBusy,
+    readyVersion: updateReady ? updateReady.version : '',
+    note: updateNote,
+    pct: updatePct,
+  });
+
+  /* 托盘气泡：点一下之后**在菜单外面也给一次反馈** ——
+     菜单只有右键才看得见，而"下载 106MB"要好几分钟，
+     没有气泡的话那几分钟里界面上什么都不会变（真机上就是这么被误读成"点了没反应"的）。
+     ⚠️ 只在用户**点了**的时候弹（`interactive`）：自动检查失败不许打扰用户。 */
+  const notifyUpdate = (content) => {
+    if (!tray || tray.isDestroyed()) return;
+    try {
+      tray.displayBalloon({ title: '晨报机更新', content });
+    } catch {
+      /* 有的系统策略不允许气泡，忽略 —— 它只是提示，不影响更新本身 */
+    }
   };
 
   /* 「当前版本 vX · 线上 vY」—— 常驻在「检查更新」的**正上方**（用户要的位置）。
@@ -1069,7 +1094,10 @@ async function bootstrap() {
         if (r.action === 'available') {
           updateReady = r.manifest;
           updateNote = '';
-          if (interactive) console.log(`[update] 发现新版本 ${r.manifest.version}，再点一次即安装`);
+          if (interactive) {
+            console.log(`[update] 发现新版本 ${r.manifest.version}，开始下载安装（一次点击走完全程）`);
+            notifyUpdate(`发现 v${r.manifest.version}，正在下载（装完会自动重启）`);
+          }
         } else if (r.action === 'none') {
           /* ★ 两个版本在正上方那行已经是常驻的了，这里只说结论本身。
              但**两者不一致时仍然写出来** —— 那正是"更新功能看起来坏了"的真实成因：
@@ -1083,15 +1111,23 @@ async function bootstrap() {
           if (interactive) {
             console.log('[update] 线上 ' + remote + '，本机 ' + mine +
               (r.remoteVersion && r.remoteVersion !== app.getVersion() ? ' —— ⚠️ 两者不同：线上那个不是最新发布的版本（很可能这几版从没发布过）' : ' —— 一致'));
+            notifyUpdate(`已经是最新（线上 ${remote} · 本机 ${mine}）`);
           }
         } else {
           /* 检查失败也要说清为什么（原来只有「检查失败」三个字） */
           updateNote = '检查失败' + (r.why ? '：' + String(r.why).slice(0, 30) : '');
-          if (interactive) console.log('[update] ' + (r.why || '未知原因'));
+          if (interactive) {
+            console.log('[update] ' + (r.why || '未知原因'));
+            /* ⚠️ 失败也必须让用户看见 —— 而且要说人话：
+               真机上撞到过"取回来的是个网页"（DNS 被污染/代理没生效），
+               那时只写「清单不合格」用户完全不知道该怎么办。 */
+            notifyUpdate('检查更新失败：' + String(updateNote).replace(/^检查失败：?/, ''));
+          }
         }
       } catch (err) {
         updateNote = '检查失败';
         console.log('[update] 检查异常：' + (err && err.message));
+        if (interactive) notifyUpdate('检查更新失败：' + (err && err.message));
       } finally {
         updateBusy = false;
         /* ★ 重建菜单必须放在这里：结论（updateNote / updateReady / lastRemote）都已经写好了，
@@ -1100,11 +1136,13 @@ async function bootstrap() {
         refreshMenu();
       }
       if (!updateReady) return;
-      if (!interactive) return;   // 自动检查只负责把菜单点亮
+      if (!interactive) return;   // 启动 8 秒后那次自动检查：只把菜单点亮，绝不自己装
     }
 
-    /* 第二次点击（或用户在已知有新版时点击）⇒ 下载 + 装 */
+    /* ★ 用户点了一下 ⇒ 一路走到装完（2026-09-28 改的口径；原来是"再点一次才装"）。 */
     updateBusy = true;
+    updatePct = -1;
+    refreshMenu();
     try {
       console.log(`[update] 开始下载 ${updateReady.version} …`);
       const dl = await downloadUpdate({
@@ -1115,8 +1153,19 @@ async function bootstrap() {
           if (total && got % (8 * 1024 * 1024) < 65536) {
             console.log(`[update] 下载中 ${formatBytes(got)} / ${formatBytes(total)}`);
           }
+          /* ★ 进度要**看得见**：菜单那一行写着「正在下载更新 x%」。
+             没有它，用户点完之后的几分钟里界面上什么都不会变 ——
+             真机上就是被这么误读成"点了没反应、得点第二次"的。
+             ⚠️ 每 2% 重建一次菜单就够了：106MB 有 100 个点，
+                每次都重建既没必要，也让托盘菜单闪烁。 */
+          const pct = total ? Math.floor((got / total) * 100) : -1;
+          if (pct >= 0 && pct >= updatePct + 2) {
+            updatePct = pct;
+            refreshMenu();
+          }
         },
       });
+      notifyUpdate(`v${updateReady.version} 下载完成，正在安装，装完会自动重启`);
       const res = applyUpdate({
         dataDir: DATA_DIR,
         currentVersion: app.getVersion(),
@@ -1131,6 +1180,8 @@ async function bootstrap() {
       if (!res.ok) {
         updateNote = '安装准备失败';
         updateBusy = false;
+        refreshMenu();
+        if (interactive) notifyUpdate('安装准备失败：' + String(res.reason || '未知原因'));
         return;
       }
       console.log('[update] 已交给助手安装，本进程即将退出以便替换文件');
@@ -1138,8 +1189,11 @@ async function bootstrap() {
       app.quit();
     } catch (err) {
       console.log('[update] 下载/安装失败：' + (err && err.message));
-      updateNote = '下载失败';
+      updateNote = '下载失败' + (err && err.message ? '：' + String(err.message).slice(0, 30) : '');
       updateBusy = false;
+      updatePct = -1;
+      refreshMenu();
+      if (interactive) notifyUpdate('下载/安装失败：' + (err && err.message));
     }
   };
 
@@ -1479,7 +1533,7 @@ async function bootstrap() {
               { label: versionMenuLabel(), enabled: false },
               { type: 'separator' },
               {
-                label: updateMenuLabel(),
+                label: updateMenuLabelText(),
                 enabled: !updateBusy,
                 click: () => { void runUpdateCheck({ interactive: true }); },
               },
