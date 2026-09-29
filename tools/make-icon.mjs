@@ -10,7 +10,19 @@
  *
  * 产出：
  *   build/icon.ico                     打包用（256/128/64/48/32/16，PNG-in-ICO）
- *   src/renderer/assets/tray.png       托盘用（32×32，Electron 自己缩放到 16）
+ *   src/renderer/assets/tray.png       托盘用（32×32 —— 见下面"为什么托盘给 32"）
+ *   src/renderer/assets/tray-16.png    兼容保留（16×16）
+ *   src/renderer/assets/tray-256.png   **通知弹窗用**（256×256 —— 见下面"为什么要 256"）
+ *
+ * ⚠️ 为什么托盘给 32 而不是 16：
+ *   Windows 通知区域在 125% / 150% 缩放下要的是 20 / 24 像素，只给 16 会被**放大** ⇒ 糊。
+ *   给 32 让它按需要缩小，各档 DPI 都清楚。
+ *
+ * ⚠️ 为什么要单独出一张 256：
+ *   更新提示、首次启动提示走的是 `tray.displayBalloon()` —— Windows 会把它渲染成一个
+ *   **吐司（toast）**，里面的图标要 48 像素以上。原来没给 icon，系统就拿 16×16 的托盘图
+ *   去撑那个位置 ⇒ 就是用户截图里那张"糊得看不清"的图（2026-09-29 的真机反馈）。
+ *   ⇒ 256 是从 4× 超采样渲染出来的，缩到 48/64 都锐利。
  *
  * 画的是什么：一张"玻璃卡片"上排着三行条目，第一行左边有一道蓝色标记。
  *   16px 下要能认出来，所以**小尺寸换一套更粗更少的笔画**（见 strokesFor），
@@ -253,6 +265,9 @@ const tray32 = path.join(assetsDir, 'tray.png');
 fs.writeFileSync(tray32, encodePng(render(32), 32, 32));
 const tray16 = path.join(assetsDir, 'tray-16.png');
 fs.writeFileSync(tray16, encodePng(render(16), 16, 16));
+/* ★ 通知弹窗（displayBalloon）用的大图 —— 见文件头「为什么要单独出一张 256」 */
+const tray256 = path.join(assetsDir, 'tray-256.png');
+fs.writeFileSync(tray256, encodePng(render(256), 256, 256));
 
 /* `--preview` 额外导出一张 256 的大图。
    ⚠️ 存在的理由：图标这种东西**必须用眼睛看**。
@@ -275,7 +290,7 @@ function checkPng(file) {
   return { file: path.relative(ROOT, file), bytes: b.length, sigOk, w, h, iendOk };
 }
 
-const reports = [checkPng(tray32), checkPng(tray16)];
+const reports = [checkPng(tray32), checkPng(tray16), checkPng(tray256)];
 const ico = fs.readFileSync(icoFile);
 const icoOk = ico.readUInt16LE(0) === 0 && ico.readUInt16LE(2) === 1 && ico.readUInt16LE(4) === icoSizes.length;
 

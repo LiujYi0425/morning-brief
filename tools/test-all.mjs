@@ -5112,6 +5112,65 @@ ok('★★ 开发态也必须找得到托盘图标（托盘菜单是唯一的退
   assert.ok(/app\.isPackaged && process\.resourcesPath/.test(src), '打包态那条分支被弄丢了');
 });
 
+ok('★★ 通知弹窗的图标必须够大（用户 2026-09-29 反馈：弹窗里的图标"太糊了"）', () => {
+  /* ⚠️ 真机现象：更新提示（托盘吐司）里那个图标糊得看不清。
+     根因：`displayBalloon()` 不传 `icon` ⇒ Windows 拿托盘那张 **16×16** 去撑
+     吐司里 48+ 像素的图标位 ⇒ 放大 = 糊。
+     ⇒ 修法三条，下面逐条钉住（图标是**二进制资源**，所以尺寸断言是真的读文件头，
+       不是看源码里写没写）。 */
+  const assets = path.resolve(HERE, '..', 'src', 'renderer', 'assets');
+  const pngSize = (f) => {
+    const b = fs.readFileSync(f);
+    const sigOk = b.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    return { ok: sigOk, w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  };
+
+  /* ① 三张图都在，而且**尺寸真的是** 16 / 32 / 256（生成器改坏了会当场红） */
+  const t16 = pngSize(path.join(assets, 'tray-16.png'));
+  const t32 = pngSize(path.join(assets, 'tray.png'));
+  const t256 = pngSize(path.join(assets, 'tray-256.png'));
+  assert.ok(t16.ok && t16.w === 16 && t16.h === 16, 'tray-16.png 不是 16×16：' + JSON.stringify(t16));
+  assert.ok(t32.ok && t32.w === 32 && t32.h === 32, 'tray.png 不是 32×32：' + JSON.stringify(t32));
+  assert.ok(
+    t256.ok && t256.w === 256 && t256.h === 256,
+    'tray-256.png 不是 256×256 —— 弹窗那一张就是它，小了就又糊：' + JSON.stringify(t256),
+  );
+  /* 生成器必须真的产出它（否则下次 `npm run icon` 会把它删掉/漏掉） */
+  const mk = fs.readFileSync(path.resolve(HERE, '..', 'tools', 'make-icon.mjs'), 'utf8');
+  assert.ok(/'tray-256\.png'/.test(mk), 'make-icon.mjs 不再产出 tray-256.png ⇒ 重新生成图标之后弹窗又会糊');
+
+  /* ② 托盘的图标要用 32 那张（125%/150% 缩放要 20/24 像素，给 16 会被放大） */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  assert.ok(/'tray\.png'/.test(src), '托盘图标没有优先用 32×32 那张（高 DPI 下会糊）');
+  assert.ok(/'tray-16\.png'/.test(src), '16 那张的兜底被删了（老资源目录里可能只有它）');
+
+  /* ③ 两条弹窗都必须走 balloonOptions（它负责带上 256 的 icon + iconType）
+     ⚠️ 扫描前**先剥注释**：说明里正举着 `tray.displayBalloon()` 这个反例，
+        不剥的话断言会咬到自己的注释（本项目在别处踩过两次）。 */
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(/function balloonOptions\(/.test(code), '没有 balloonOptions —— 弹窗又回到了"不带图标"');
+  const calls = code.match(/displayBalloon\([^)]*\)/g) || [];
+  assert.ok(calls.length >= 2, '弹窗调用点变少了（首启提示 + 更新提示都该带上图标）：' + calls.length);
+  for (const c of calls) {
+    assert.ok(
+      /balloonOptions\(/.test(c),
+      '有一处 displayBalloon 没走 balloonOptions（图标会退回 16×16 那张糊图）：' + c,
+    );
+  }
+  const opts = code.slice(code.indexOf('function balloonOptions('), code.indexOf('function balloonOptions(') + 700);
+  assert.ok(/'tray-256\.png'/.test(opts), 'balloonOptions 里没有指定 256 那张图');
+  assert.ok(/iconType\s*[:=]\s*'custom'/.test(opts), '没有声明 iconType=custom（Windows 可能忽略自定义图标）');
+
+  /* ④ 弹窗标题：设了 AppUserModelID，Windows 才认得出「晨报机」而不是
+        `electron.app.MorningBrief`（安装包的快捷方式里带的正是这个 id，已核实）。 */
+  const pkg = JSON.parse(fs.readFileSync(path.resolve(HERE, '..', 'package.json'), 'utf8'));
+  assert.ok(/app\.setAppUserModelId\(/.test(src), '没有设 AppUserModelID ⇒ 弹窗标题会一直写着 electron.app.MorningBrief');
+  assert.ok(
+    src.includes(`'${pkg.build.appId}'`),
+    'setAppUserModelId 用的 id 与 package.json 的 build.appId 不一致（那样 Windows 解析不到应用名）',
+  );
+});
+
 ok('★ 健康度必须把「从未抓过」和「异常」分开说（否则读成只有 21 个源有用）', () => {
   /* ⚠️ 真机上用户就是这么读的：显示 21/47 正常，他以为另外 26 个坏了，
      而真相是一条都没坏、只是还没被跑过（刷新是按当前类型范围的）。 */

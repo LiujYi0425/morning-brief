@@ -795,6 +795,37 @@ const MUTANTS = [
     from: '      return /^\\/tapp\\/news\\/push\\//.test(u.pathname);',
     to: '      return true;',
     expect: '判定太宽',
+  },
+  /* ── 通知弹窗的图标清晰度（2026-09-29 真机反馈：「太糊了」）──
+   * ⚠️ 三个靶子对应三条修法：弹窗没带大图 / 托盘又用回 16 / 弹窗标题没设 AUMID。
+   *    它们的失败方式都是"功能正常、只是难看"，所以只能靠这些断言咬住。 */
+  {
+    file: MAIN,
+    why: '弹窗不再带 256 那张大图 ⇒ Windows 拿 16×16 去撑吐司里 48+ 像素的图标位，放大就糊',
+    from: "  const icon = runtimeAsset(path.join('assets', 'tray-256.png'));",
+    to: "  const icon = '';",
+    expect: 'balloonOptions 里没有指定 256 那张图',
+  },
+  {
+    file: MAIN,
+    why: '托盘图标又用回 16×16 ⇒ 125%/150% 缩放的通知区域会把它放大，托盘里也糊',
+    from: "    const iconFile32 = runtimeAsset(path.join('assets', 'tray.png'));",
+    to: "    const iconFile32 = runtimeAsset(path.join('assets', 'tray-16.png'));",
+    expect: '没有优先用 32×32',
+  },
+  {
+    file: MAIN,
+    why: '不设 AppUserModelID ⇒ 弹窗顶上一直写着 electron.app.MorningBrief，而不是「晨报机」',
+    from: 'app.setAppUserModelId(APP_USER_MODEL_ID);',
+    to: '/* 变异体：不设 AUMID */',
+    expect: '没有设 AppUserModelID',
+  },
+  {
+    file: 'tools/make-icon.mjs',
+    why: '图标生成器不再产出 tray-256.png ⇒ 下次 npm run icon 之后弹窗又会退回糊图（而这次改动看起来还在）',
+    from: "const tray256 = path.join(assetsDir, 'tray-256.png');",
+    to: "const tray256 = path.join(assetsDir, 'tray-256-unused.png');",
+    expect: '不再产出 tray-256.png',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。

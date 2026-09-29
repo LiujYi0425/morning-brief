@@ -141,6 +141,39 @@ function runtimeAsset(rel) {
   return dev;
 }
 
+/**
+ * 通知弹窗（吐司）里那张图标。
+ *
+ * ★ 为什么必须显式给一张**大**图（2026-09-29 真机反馈：弹窗里的图标"太糊了"）：
+ *   `tray.displayBalloon()` 在 Windows 上渲染成一个吐司，里面那个图标要 **48 像素以上**。
+ *   原来不传 `icon` ⇒ 系统拿托盘那张 **16×16** 去撑那个位置 ⇒ 放大 = 糊成一团。
+ *   ⇒ 现在传 `tray-256.png`（同样从 4× 超采样渲染出来的，缩到 48/64 都锐利）。
+ *   ⚠️ 找不到就**不传** `icon`（退回系统默认），而不是传一个空字符串去试运气。
+ *
+ * ⚠️ 顺带把弹窗的**标题**也修了：Windows 用 AppUserModelID 去解析"这是哪个应用"，
+ *   而我们从来没设过它 ⇒ 弹窗顶上写的是 Electron 的默认值 `electron.app.MorningBrief`。
+ *   安装包生成的开始菜单快捷方式里带着 `com.liujyi0425.morningbrief`（已核实），
+ *   所以设成同一个值之后，系统就能认出「晨报机」这个名字。
+ */
+const APP_USER_MODEL_ID = 'com.liujyi0425.morningbrief';
+try {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+} catch (err) {
+  /* 设不上不影响任何功能 —— 只是弹窗标题会退回 Electron 的默认值 */
+  console.log('[main] setAppUserModelId 失败（不影响功能）：' + String((err && err.message) || err));
+}
+
+/** 弹窗参数：图标存在才带上（见上面那段说明） */
+function balloonOptions(title, content) {
+  const o = { title: String(title == null ? '' : title), content: String(content == null ? '' : content) };
+  const icon = runtimeAsset(path.join('assets', 'tray-256.png'));
+  if (fs.existsSync(icon)) {
+    o.icon = icon;
+    o.iconType = 'custom';
+  }
+  return o;
+}
+
 /* 数据目录：开发态在项目内 `data/`，**打包态在 Electron 的 userData 下**，
  * 可用 `MB_DATA_DIR` 覆盖。
  * ⚠️ 口径来自 `runtime-state.js` 的 `dataDirOf`，**不在这里另写一份** ——
@@ -812,7 +845,7 @@ async function announceWhereItIs(win) {
   setTimeout(() => { void applyBottomLevel(win); }, plan.frontMs);
   if (plan.balloon && tray && !tray.isDestroyed()) {
     try {
-      tray.displayBalloon({ title: plan.balloonTitle, content: plan.balloonText });
+      tray.displayBalloon(balloonOptions(plan.balloonTitle, plan.balloonText));
     } catch {
       /* 有的系统策略不允许气泡，忽略 */
     }
@@ -1076,7 +1109,9 @@ async function bootstrap() {
   const notifyUpdate = (content) => {
     if (!tray || tray.isDestroyed()) return;
     try {
-      tray.displayBalloon({ title: '晨报机更新', content });
+      /* ★ 弹窗带上 256 的图标（`balloonOptions` 里那套）—— 不带的话 Windows 会拿
+         托盘那张 16×16 去撑吐司里的图标位，放大了就是糊的（真机反馈过）。 */
+      tray.displayBalloon(balloonOptions('晨报机更新', content));
     } catch {
       /* 有的系统策略不允许气泡，忽略 —— 它只是提示，不影响更新本身 */
     }
@@ -1648,7 +1683,13 @@ async function bootstrap() {
    *   （它在 asar 里，Electron 的 fs 补丁能读到）。
    */
   try {
-    const iconFile = runtimeAsset(path.join('assets', 'tray-16.png'));
+    /* ★ 托盘图标**优先用 32×32**（2026-09-29）：通知区域在 125% / 150% 缩放下
+       要的是 20 / 24 像素，只给 16×16 会被系统**放大** ⇒ 糊。给 32 让它按需缩小。
+       （16 那张继续留着当兜底：老版本生成的资源里可能只有它。）
+       ⚠️ 弹窗（吐司）里那张是另一回事 —— 见 balloonOptions：那边要 256。 */
+    const iconFile32 = runtimeAsset(path.join('assets', 'tray.png'));
+    const iconFile16 = runtimeAsset(path.join('assets', 'tray-16.png'));
+    const iconFile = fs.existsSync(iconFile32) ? iconFile32 : iconFile16;
     if (!fs.existsSync(iconFile)) {
       mark('tray-SKIPPED', `找不到托盘图标：${iconFile}（跑 node tools/make-icon.mjs 生成）`);
       console.log(`[tray] ✗ 找不到托盘图标，跳过：${iconFile}`);
