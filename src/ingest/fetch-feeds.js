@@ -99,7 +99,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *   ⚠️ 凭据**只发给用户填的那个地址**，而且绝不出现在日志里（调用方只允许打名字）。
  * @returns {Promise<{ok:boolean, status?:number, text?:string, error?:string}>}
  */
-export async function fetchText(url, { timeoutMs = FETCH_TIMEOUT_MS, headers } = {}) {
+export async function fetchText(url, opts) {
+  /* ⚠️⚠️ 第二个参数必须能接住 **null**（2026-09-28 真机事故，代价是"所有源全挂"）：
+     加了「源凭据」之后，抓取层以 `fetcher(url, creds)` 调用它，而**没有配凭据的源
+     creds 恰好是 null** ⇒ 原来写成 `{ timeoutMs = … } = {}`，解构 null 直接抛
+     `Cannot read properties of null (reading 'timeoutMs')`，
+     于是**每一个源都失败**（端到端实测：67 个源全挂，状态报的是 `parse_error`）。
+     教训两层：① "可选参数"要接住 null，不只是 undefined；
+              ② 离线考裁判**永远注入假 fetcher**，测不到这条路径 ——
+                 抓住它的是 `npm run ingest` 的端到端跑；现在 test-all 里加了一条回归断言。 */
+  const { timeoutMs = FETCH_TIMEOUT_MS, headers } = opts || {};
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {

@@ -508,20 +508,23 @@ const MUTANTS = [
     to: "              const ids = ((DEFAULT_SOURCES.find((d) => d.feedUrl === src.feed_url) || {}).categories || []).map((n) => catIdByName.get(n)).filter((x) => x != null);",
     expect: '抓取打标签读的是 DB 里的映射',
   },
-  /* ── 阶段 D：本机专属类别**按需**登记（改坏了就是「新用户看到空 chip」或「类别根本不存在」）── */
+  /* ── 阶段 D：本机专属类别**按需**登记（改坏了就是「新用户看到空 chip」或「类别根本不存在」）──
+   * ⚠️ 2026-09-29：名单清空之后这两条**行为上不再可观测**（曾双双漏网）。
+   *    判据改成 test-all 里那条**源码接线断言** —— 它守的是"机制还在"，
+   *    而不是"此刻的数据能触发它"。 */
   {
     file: DB,
     why: '本机专属的那几个类别又无条件登记 ⇒ 全新用户重新看到「点进去永远空」的 chip（公网上没有源撑得住）',
     from: '    if (!includeLocalOnly && isLocalOnlyCategory(name)) return;',
     to: '    if (false) return;',
-    expect: '本机专属的那 6 个类别',
+    expect: '本机专属类别不建给新用户',
   },
   {
     file: DB,
     why: '开了本机源却不登记本机专属类别 ⇒ 用户抓回来一堆条目，筛选栏里连这个类别都没有',
     from: '  const cats = enabled ? ensureLocalCategories(db, nowIso) : { created: 0, added: 0 };',
     to: '  const cats = { created: 0, added: 0 };',
-    expect: '本机专属的那 6 个类别',
+    expect: '不再登记本机专属类别',
   },
   /* ── AI 简报（M1 交付物的最后一项）──
    * ⚠️ 这一层的错误形状和其它层不一样：它们**全都看起来是正常的** ——
@@ -670,9 +673,11 @@ const MUTANTS = [
   },
   {
     file: 'src/ingest/sources.js',
-    why: '本机专属名单写回旧状态 ⇒ 补了公网源的类别仍不给新用户建（白丢 chip），或反过来给新用户建空 chip',
-    from: "  '领域·汽车',\n  '性质·核查',\n]);",
-    to: "  '领域·汽车',\n  '性质·核查',\n  '领域·旅游',\n]);",
+    why: '本机专属名单与实测不符（往空名单里塞一个已经有公网源的类别）⇒ 新用户白丢一个 chip，或反过来建一个点进去永远空的 chip',
+    /* ⚠️ 锚点跟着数据走：这份名单 2026-09-29 已清空，旧锚点（列着两个类别的那几行）不存在了。
+       变异方式也跟着变：从"多列一个"变成"往空名单里塞一个"。 */
+    from: 'export const LOCAL_ONLY_CATEGORIES = Object.freeze([]);',
+    to: "export const LOCAL_ONLY_CATEGORIES = Object.freeze(['领域·旅游']);",
     expect: '本机专属名单与实测不符',
   },
   /* ── Feed 自动发现（2026-09-28）：用户粘网站首页也能加源 ──
@@ -750,6 +755,46 @@ const MUTANTS = [
     from: '            const r2 = await fetchText(cand, sameOrigin(cand, url) ? { headers: creds } : undefined);',
     to: '            const r2 = await fetchText(cand, { headers: creds });',
     expect: '会把自己的凭据发给第三方域名',
+  },
+  /* ── JSON 接口适配器（2026-09-29）：三个财经快讯 ──
+   * ⚠️ 它们的失败方式都很安静：源还在抓、日志里只有一句"不是 JSON"，
+   *    用户看到的是"源异常"，而真正的原因是这个适配器写错了。 */
+  {
+    file: 'src/ingest/parse-jsonnews.js',
+    why: '不剥 JSONP 壳 ⇒ 东财快讯（`var ajaxResult={…}`）永远解析不了，而报错只说"不是 JSON"',
+    from: '  const data = parseJson(unwrapJsonp(text), out);',
+    to: '  const data = parseJson(text, out);',
+    expect: '不是可解析的 JSON',
+  },
+  {
+    file: 'src/ingest/fetch-feeds.js',
+    why: 'fetchText 又接不住 null 选项 ⇒ 每一条**没有配凭据**的源都会以"未预期的异常"失败（真机实测：67 个源全挂）',
+    /* ⚠️ 这是真事故的回归靶子：离线考裁判**永远注入假 fetcher**，
+       所以那条路径只有端到端跑才走得到 —— 现在 test-all 里有一条直接调真 fetchText 的断言。 */
+    from: '  const { timeoutMs = FETCH_TIMEOUT_MS, headers } = opts || {};',
+    to: '  const { timeoutMs = FETCH_TIMEOUT_MS, headers } = opts;',
+    expect: '传 null 选项时抛了 TypeError',
+  },
+  {
+    file: 'src/ingest/parse-jsonnews.js',
+    why: '把东财的 `showtime` 当 UTC 解 ⇒ 条目时间差 8 小时，在 UTC 机器上会**掉出"今天"那一屏**而界面看不出异常',
+    from: "  const iso = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}+08:00`;",
+    to: "  const iso = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}Z`;",
+    expect: '北京时间没按 +08:00 解析',
+  },
+  {
+    file: 'src/ingest/parse-jsonnews.js',
+    why: '去掉"正文当标题"的兜底 ⇒ 华尔街见闻的快讯（title 常年是空串）一条都进不来',
+    from: '    const title = row.title && String(row.title).trim() ? row.title : flashTitleFrom(body);',
+    to: '    const title = row.title;',
+    expect: '不编造标题',
+  },
+  {
+    file: 'src/ingest/adapters.js',
+    why: '同花顺的判定放宽到整站 ⇒ 用户自己找到的同站 feed 会被塞进 JSON 适配器，永远解析不了',
+    from: '      return /^\\/tapp\\/news\\/push\\//.test(u.pathname);',
+    to: '      return true;',
+    expect: '判定太宽',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。

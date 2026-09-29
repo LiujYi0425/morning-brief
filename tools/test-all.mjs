@@ -64,6 +64,18 @@ import { parseFeed, parseDate, sniffContentKind } from '../src/ingest/feed-parse
 /* ★ Feed 自动发现（2026-09-28）：纯函数，所以能在这里穷举 ——
    而它守的是"用户粘一个网站首页也能加源"这件事的全部判据。 */
 import { discoverFeedLinks, DEFAULT_LIMIT } from '../src/ingest/feed-discover.js';
+/* ★ JSON 接口适配器（2026-09-29）：三个财经快讯接口 + 地址判定。
+   ⚠️ 这些断言都用**真响应的字段名与真实值**（不是想象的结构）——
+      `adapterFor` 在本文件前面已经 import 过（那里断言的是"认得哪些"）。 */
+import {
+  parseWscnLive,
+  parseThsFlash,
+  parseEastmoneyFlash,
+  unwrapJsonp,
+  unixSecondsToIso,
+  beijingTimeToIso,
+  flashTitleFrom,
+} from '../src/ingest/parse-jsonnews.js';
 /* ★ 源凭据（2026-09-28 的「授权途径」）：解析与脱敏都是纯函数 ——
    而"哪些头不许设、值会不会漏进日志"这两件事**必须**能被逐条断言。 */
 import {
@@ -95,7 +107,7 @@ import {
   TAXONOMY_VERSION,
 } from '../src/store/db.js';
 import { DEFAULT_CATEGORIES, DEFAULT_SOURCES, LOCAL_ONLY_CATEGORIES, isLocalOnlyCategory } from '../src/ingest/sources.js';
-import { runIngest, shouldRunNow, explainFetchFailure } from '../src/ingest/fetch-feeds.js';
+import { runIngest, shouldRunNow, explainFetchFailure, fetchText } from '../src/ingest/fetch-feeds.js';
 import {
   nextRunAt,
   catchUpDecision,
@@ -636,6 +648,45 @@ const GOOD_RSS = `<rss><channel><title>T</title>
   <item><title>条目二</title><link>https://e.com/b</link><pubDate>Tue, 22 Sep 2026 09:00:00 +0800</pubDate></item>
 </channel></rss>`;
 
+/* ★ 2026-09-29：假 fetcher 必须**按源给对形状的响应** ——
+   预置清单里现在有三条走 `adapters.js` 的 JSON 接口源（华尔街见闻/同花顺/东财）。
+   给它们喂 RSS 会让它们必然失败（适配器报"不是 JSON"），
+   于是"全部源成功"这类断言会**因为夹具不对**而红 —— 那是假失败，不是真缺陷。
+   ⚠️ 字段名与结构照抄真响应；但**链接统一用 e.com/a 与 e.com/b** ——
+      下面那条"跨源去重"断言要求所有源指向同两条内容，
+      而真实链接各不相同会让它变成"数一数几个源"（那就不是去重测试了）。 */
+const FIXTURES_BY_ADAPTER = {
+  'wscn-live': JSON.stringify({
+    code: 20000,
+    message: 'OK',
+    data: { items: [
+      { id: 1, uri: 'https://e.com/a', display_time: 1790661349, title: '', content_text: '<p>A股AI应用端持续反弹，纵横通信封涨停。</p>' },
+      { id: 2, uri: 'https://e.com/b', display_time: 1790661200, title: '已有标题的快讯', content_text: '正文' },
+    ] },
+  }),
+  'ths-flash': JSON.stringify({
+    code: 0,
+    msg: 'ok',
+    data: { list: [
+      { id: '1', title: '我国生成式人工智能用户规模突破7亿人', digest: '摘要一', url: 'https://e.com/a', ctime: '1790661559' },
+      { id: '2', title: '第二条快讯', digest: '摘要二', url: 'https://e.com/b', ctime: '1790661500' },
+    ] },
+  }),
+  'eastmoney-flash': 'var ajaxResult=' + JSON.stringify({
+    rc: 1,
+    LivesList: [
+      { newsid: '1', title: '减速器板块短线拉升', digest: '摘要一', url_unique: 'https://e.com/a', showtime: '2026-09-29 13:54:37' },
+      { newsid: '2', title: '第二条快讯', digest: '摘要二', url_unique: 'https://e.com/b', showtime: '2026-09-29 13:50:00' },
+    ],
+  }) + ';',
+};
+
+/** 这个 URL 的"正确形状"的响应体（JSON 接口源给 JSON，其余给 RSS） */
+function goodBodyFor(feedUrl) {
+  const a = adapterFor(feedUrl);
+  return a && FIXTURES_BY_ADAPTER[a.id] ? FIXTURES_BY_ADAPTER[a.id] : GOOD_RSS;
+}
+
 async function ingestWith(fetcherImpl, dbFile) {
   const logs = [];
   const r = await runIngest({
@@ -664,7 +715,7 @@ await (async () => {
   const map = {};
   // 让所有预置源都返回同一份好 feed（省得逐个配）
   const { DEFAULT_SOURCES } = await import('../src/ingest/sources.js');
-  for (const s of DEFAULT_SOURCES) map[s.feedUrl] = { ok: true, status: 200, text: GOOD_RSS };
+  for (const s of DEFAULT_SOURCES) map[s.feedUrl] = { ok: true, status: 200, text: goodBodyFor(s.feedUrl) };
 
   const { r } = await ingestWith(fakeFetcher(map), dbFile);
 
@@ -698,7 +749,7 @@ await (async () => {
     if (i === 0) map[s.feedUrl] = { ok: false, status: 500, error: 'HTTP 500' };
     else if (i === 1) map[s.feedUrl] = { ok: false, error: '超时（>15000ms）' };
     else if (i === 2) map[s.feedUrl] = { ok: true, status: 200, text: '<html>不是 feed</html>' };
-    else map[s.feedUrl] = { ok: true, status: 200, text: GOOD_RSS };
+    else map[s.feedUrl] = { ok: true, status: 200, text: goodBodyFor(s.feedUrl) };
   });
 
   const { r } = await ingestWith(fakeFetcher(map), dbFile);
@@ -1389,6 +1440,143 @@ ok('★ 发现结果：去重、按声明顺序、有上限；畸形输入不抛
 });
 
 /* ==================================================================
+ * JSON 接口适配器（2026-09-29）
+ * ------------------------------------------------------------------
+ * 起因是一句结论：「站点自己的公开 JSON 接口」这条路**当时必然判 0 条** ——
+ * 不是接口不可用，而是 `parseFeed` 只认 RSS/Atom/JSON-Feed，没人认它们。
+ * 这个文件补上三个财经快讯接口，于是：
+ *   · 判据必须**窄**（主机 + 路径）：接口形状是站点私有的，
+ *     按整站认会把"用户自己找到的同站 feed"也塞进来；
+ *   · 三条铁律照旧：**不编造时间 / 标题 / 链接**。
+ * ⚠️ 下面的片段都是**真响应的字段与真实值**（只有 id 之类缩过），
+ *    因为本项目栽过"拿想象的结构去喂解析器"。
+ * ================================================================== */
+say();
+say('--- JSON 接口适配器：三个财经快讯 ---');
+
+ok('★★ 地址判定要窄：同站但不同路径的地址不许被认领', () => {
+  assert.equal(adapterFor('https://api-one-wscn.awtmt.com/apiv1/content/lives?channel=global-channel&limit=20').id, 'wscn-live');
+  assert.equal(adapterFor('https://news.10jqka.com.cn/tapp/news/push/stock/?page=1&pagesize=20').id, 'ths-flash');
+  assert.equal(adapterFor('https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_50_1_.html').id, 'eastmoney-flash');
+  /* ⚠️ 同主机、别的路径 ⇒ **不认**（那些地址也许真是一个 feed，按整站认就会误伤） */
+  assert.equal(adapterFor('https://news.10jqka.com.cn/rss/all.xml'), null, 'ths 判定太宽：把同站别的路径也认领了');
+  assert.equal(adapterFor('https://api-one-wscn.awtmt.com/apiv1/content/articles'), null, 'wscn 判定太宽');
+  assert.equal(adapterFor('https://newsapi.eastmoney.com/other/x.html'), null, '东财判定太宽');
+  assert.equal(adapterFor('ftp://news.10jqka.com.cn/tapp/news/push/'), null, '非 http(s) 不该认领');
+  assert.equal(adapterFor(''), null);
+});
+
+ok('★★ 华尔街见闻：title 为空时用正文第一句（不编造），时间取 unix 秒', () => {
+  /* 真响应片段（2026-09-29 实测）：title 是空串、content_text 是正文、display_time 是秒 */
+  const text = JSON.stringify({
+    code: 20000,
+    message: 'OK',
+    data: {
+      items: [
+        { id: 3171938, uri: 'https://wallstreetcn.com/livenews/3171938', display_time: 1790661349, title: '', content_text: '<p>A股AI应用端持续反弹，纵横通信封涨停，此前掌阅科技、引力传媒涨停。</p>\n' },
+        { id: 3171939, uri: 'https://wallstreetcn.com/livenews/3171939', display_time: 1790661200, title: '已有标题的快讯', content_text: '正文与标题不同' },
+      ],
+    },
+  });
+  const r = parseWscnLive(text, { sourceName: '华尔街见闻·7×24快讯' });
+  assert.equal(r.ok, true, JSON.stringify(r.warnings));
+  assert.equal(r.items.length, 2);
+  assert.equal(r.items[0].url, 'https://wallstreetcn.com/livenews/3171938');
+  assert.ok(r.items[0].title.startsWith('A股AI应用端持续反弹'), 'title 为空时没拿正文兜底 ⇒ 这个源会一条都进不来');
+  assert.equal(r.items[0].title.includes('<'), false, '标题里残留了 HTML 标签');
+  assert.equal(r.items[1].title, '已有标题的快讯', '有标题时不该被正文覆盖');
+  assert.equal(r.items[0].publishedAt, new Date(1790661349 * 1000).toISOString(), 'unix 秒没被正确转成 ISO');
+});
+
+ok('★★ 同花顺：字段最全的一家（title / digest / url / ctime）', () => {
+  const text = JSON.stringify({
+    code: 0,
+    msg: 'ok',
+    data: {
+      list: [
+        { id: '5267097', title: '我国生成式人工智能用户规模突破7亿人', digest: '9月29日，中国互联网络信息中心……', url: 'https://news.10jqka.com.cn/20260929/c680356458.shtml', ctime: '1790661559', rtime: '1790661559' },
+      ],
+    },
+  });
+  const r = parseThsFlash(text);
+  assert.equal(r.ok, true, JSON.stringify(r.warnings));
+  assert.equal(r.items[0].title, '我国生成式人工智能用户规模突破7亿人');
+  assert.equal(r.items[0].url, 'https://news.10jqka.com.cn/20260929/c680356458.shtml');
+  assert.equal(r.items[0].summary.startsWith('9月29日'), true, '摘要没取到');
+  assert.equal(r.items[0].publishedAt, new Date(1790661559 * 1000).toISOString());
+});
+
+ok('★★ 东方财富：JSONP 壳要剥掉，时间按**北京时间**解析', () => {
+  /* 真响应形状：`var ajaxResult={…};`，showtime 是 "YYYY-MM-DD HH:mm:ss"（北京时间） */
+  const inner = JSON.stringify({
+    rc: 1,
+    LivesList: [
+      { newsid: '202609293886394561', title: '减速器板块短线拉升 巨轮智能一度涨超9%', digest: '减速器板块短线拉升……', url_w: 'http://stock.eastmoney.com/a/202609293886394561.html', url_unique: 'http://stock.eastmoney.com/a/202609293886394561.html', showtime: '2026-09-29 13:54:37' },
+    ],
+  });
+  const r = parseEastmoneyFlash('var ajaxResult=' + inner + ';');
+  assert.equal(r.ok, true, JSON.stringify(r.warnings));
+  assert.equal(r.items[0].url, 'http://stock.eastmoney.com/a/202609293886394561.html');
+  /* 13:54:37 +08:00 == 05:54:37Z —— 按本机/UTC 解都会得到别的值 */
+  assert.equal(
+    r.items[0].publishedAt,
+    '2026-09-29T05:54:37.000Z',
+    '北京时间没按 +08:00 解析 ⇒ 在 UTC 机器上这些条目会掉出"今天"那一屏',
+  );
+  /* 壳必须剥掉：直接喂给 JSON.parse 会失败 */
+  assert.equal(unwrapJsonp('var ajaxResult={"a":1};'), '{"a":1}');
+  assert.equal(unwrapJsonp('{"a":1}'), '{"a":1}', '不是这个壳的内容必须原样返回');
+});
+
+ok('★★ 三条铁律：不编造时间 / 不编造标题 / 不编造链接', () => {
+  /* ① 没有时间字段 ⇒ publishedAt 必须是 null（**不许**用抓取时刻冒充） */
+  const noTime = parseThsFlash(JSON.stringify({ data: { list: [{ id: '1', title: '没有时间的快讯', url: 'https://news.10jqka.com.cn/x.shtml' }] } }));
+  assert.equal(noTime.items.length, 1);
+  assert.equal(noTime.items[0].publishedAt, null, '接口没给时间却编了一个 —— 那会让"源没给时间"和"就是现在发的"混成一样');
+
+  /* ② 标题与正文都空 ⇒ 丢掉那条（不许编一个"无标题"） */
+  const noTitle = parseThsFlash(JSON.stringify({ data: { list: [{ id: '1', title: '', digest: '', url: 'https://e.com/x' }] } }));
+  assert.equal(noTitle.items.length, 0, '没有标题也没正文却产出了条目');
+  assert.equal(noTitle.ok, false);
+  assert.ok(noTitle.warnings.some((w) => w.includes('不编造标题')), '丢掉的原因要说清：' + noTitle.warnings.join(' | '));
+
+  /* ③ 链接不是 http(s) ⇒ 存成"没有链接"，但**条目要留下** */
+  const badUrl = parseThsFlash(JSON.stringify({ data: { list: [{ id: '1', title: '链接是相对路径', url: '/20260929/c1.shtml', ctime: '1790661559' }] } }));
+  assert.equal(badUrl.items.length, 1, '相对链接不该让整条消失');
+  assert.equal(badUrl.items[0].url, null, '相对地址被当成链接存下来了 —— 点开是死的');
+
+  /* ④ 时间工具本身：秒/毫秒都认，0 与垃圾一律 null */
+  assert.equal(unixSecondsToIso(1790661349), new Date(1790661349 * 1000).toISOString());
+  assert.equal(unixSecondsToIso(1790661349000), new Date(1790661349000).toISOString(), '13 位应当按毫秒解');
+  for (const bad of [0, -1, NaN, null, undefined, '', 'abc']) {
+    assert.equal(unixSecondsToIso(bad), null, `unixSecondsToIso(${String(bad)}) 应当返回 null`);
+  }
+  assert.equal(beijingTimeToIso('2026-09-29 13:54:37'), '2026-09-29T05:54:37.000Z');
+  assert.equal(beijingTimeToIso('2026-09-29T13:54'), '2026-09-29T05:54:00.000Z', '缺秒要补 00');
+  for (const bad of ['', '2026/09/29', null, 'x']) assert.equal(beijingTimeToIso(bad), null);
+
+  /* ⑤ 快讯标题的截断：长正文不许把标题撑成几百字 */
+  const long = '这是一条很长的快讯正文'.repeat(20);
+  assert.ok(flashTitleFrom(long).length <= 61, '快讯标题没有截断：' + flashTitleFrom(long).length);
+});
+
+ok('★★ 接口改版 / 拿到网页时，报错要指向下一步（而不是只说"解析失败"）', () => {
+  /* ① 拿到的是 HTML 页 ⇒ 要说清"实际是什么"（用户看到的诊断得能指导下一步） */
+  const html = parseWscnLive('<html><body>404</body></html>');
+  assert.equal(html.ok, false);
+  assert.ok(html.warnings.join(' ').includes('不是可解析的 JSON'), '失败信息没说清实际拿到的是什么');
+  assert.ok(html.contentKind, '没有给出 contentKind（界面与日志都要靠它说人话）');
+
+  /* ② 形状变了（顶层少了那个数组）⇒ 报错要**列出顶层字段**，下一个人一眼知道改哪 */
+  const changed = parseWscnLive(JSON.stringify({ code: 20000, data: { list: [] } }));
+  assert.equal(changed.ok, false);
+  assert.ok(changed.warnings.join(' ').includes('data.items'), '没说清缺的是哪个数组');
+  const changed2 = parseEastmoneyFlash(JSON.stringify({ rc: 1, List: [] }));
+  assert.ok(changed2.warnings.join(' ').includes('LivesList'), '东财的报错没说清缺的是哪个数组');
+  assert.ok(changed2.warnings.join(' ').includes('LivesList') && changed2.warnings.join(' ').includes('rc'), '应当把顶层字段列出来');
+});
+
+/* ==================================================================
  * 源凭据（2026-09-28 的「授权途径」）
  * ------------------------------------------------------------------
  * 有些**完全正当**的资讯途径要在请求里带凭据才肯返回 feed：
@@ -1468,8 +1656,7 @@ ok('★★ 脱敏：日志里只许出现名字，值必须是掩码', () => {
   assert.equal(describeHeaders({}), '');
 });
 
-aok('★★★ 凭据真的会随请求发出去、且**绝不出现在日志里**（跑一遍 runIngest）', async () => {
-  /* 这是这条链路唯一"真跑"的断言：
+aok('★★★ 凭据真的会随请求发出去、且**绝不出现在日志里**（跑一遍 runIngest）', async () => {  /* 这是这条链路唯一"真跑"的断言：
      `headersOf` 注入 ⇒ fetcher 收到的第二个参数 = 凭据；
      同时把 log 收集起来，断言**秘密一个字符都没进去**。 */
   const file = tmpDbFile('cred');
@@ -1496,6 +1683,39 @@ aok('★★★ 凭据真的会随请求发出去、且**绝不出现在日志里
   assert.equal(all.includes(SECRET), false, '凭据的值出现在日志里了 —— 加密存储全白做');
   assert.ok(all.includes('authorization'), '日志里应当只出现请求头的**名字**（否则用户不知道哪条源带了凭据）');
   /* runIngest 自己在 finally 里关库（见 fetch-feeds.js 末尾），这里不用再关 */
+});
+
+aok('★★★ 回归：fetchText 必须接得住 null 选项（它曾经让**所有源**全挂）', async () => {
+  /* ⚠️⚠️ 真事故（2026-09-28，端到端跑出来的，离线考裁判当时全绿）：
+     加了「源凭据」之后抓取层这样调用 —— `fetcher(url, creds)`，
+     而**没配凭据的源 creds 恰好是 null**；`fetchText` 当时写成
+     `(url, { timeoutMs = … } = {})`，解构 null 直接抛
+     `Cannot read properties of null (reading 'timeoutMs')`
+     ⇒ 真实抓取里 **67 个源全部失败**（界面上是一片"源异常"）。
+
+     为什么这里没抓住：本文件所有 ingest 用例都**注入假 fetcher**，
+     假 fetcher 忽略第二个参数 ⇒ 真实路径（真的 fetchText）一次都没被走到。
+     这条断言补上那个洞：**直接调真的 fetchText，并显式传 null**。
+
+     用 127.0.0.1:1 而不连外网：它必然连不上（立即 ECONNREFUSED），
+     所以"接不接得住 null"不需要网络也能判 —— 只要错误**不是**那个 TypeError。
+     ⚠️ 用 try/catch 包住：真出这个 bug 时抛的是**同步的 TypeError**，
+        不接住的话整条用例直接炸掉、连断言信息都打印不出来（那样变异体测试会
+        把它误报成"漏网"，因为 expectation 对不上）。 */
+  let r = null;
+  try {
+    r = await fetchText('http://127.0.0.1:1/definitely-not-listening', null);
+  } catch (e) {
+    r = { ok: false, error: String((e && e.message) || e) };
+  }
+  assert.equal(r.ok, false, '连不上的地址应当返回 ok:false');
+  assert.ok(
+    !/timeoutMs|Cannot read properties of null/.test(String(r.error)),
+    '传 null 选项时抛了 TypeError ⇒ 没有凭据的源会全部失败：' + r.error,
+  );
+  /* undefined 与空对象这两种写法也必须照常工作 */
+  assert.equal((await fetchText('http://127.0.0.1:1/definitely-not-listening')).ok, false);
+  assert.equal((await fetchText('http://127.0.0.1:1/definitely-not-listening', {})).ok, false);
 });
 
 ok('★ 条目顺序非单调时，库里按 published_at 排（36氪首条 16:33 后面还有 20:56）', () => {
@@ -4738,20 +4958,20 @@ await aok('★ setLocalSourcesEnabled：只动本机那一组，公网源一个�
   db.close();
 });
 
-await aok('★★ 本机专属的那 6 个类别：新库不建，开了本机源才登记', async () => {
+await aok('★★ 本机专属类别：新库不建它们；开了本机源才登记（2026-09-29 起名单已清空）', async () => {
   /* ⚠️⚠️ 这条断言守的是「**能不能发给别人用**」。
    *
    * 背景：阶段 C 把类别扩到 28 个，但撑其中 10 个的源全在本机 RSSHub 上、默认关闭。
    *   而「一个类别有没有内容，只取决于有没有源绑给它」
    *   ⇒ 全新用户装完之后会看到 10 个点进去永远空的 chip。
-   *   后来补了 8 条公网源（把 10 压到 6），剩下的 6 个**公网上确实没有可用源**
-   *   （约 90 个候选逐个实测，见 sources.js 的 LOCAL_ONLY_CATEGORIES）。
-   * ⇒ 用户拍板：这 6 个**不建给新用户**，等本机源被启用时再登记。
+   *   后来补了 8 条公网源（把 10 压到 6），再后来又补了两轮（6 → 2 → **0**），
+   *   现在**每个类别都有默认打开的源**。
    *
-   * 两个方向都要管：
-   *   ① 新库里**不许**出现它们（否则就是「看起来像 bug」的空 chip）；
-   *   ② 开了本机源之后**必须**补出来、并绑到**启用着的**源上
-   *      （否则这 6 个就成了「永远不存在」，比空 chip 更糟）。 */
+   * ⚠️ 名单清空之后这个机制并没有删：万一以后某个类别又只剩本机源，
+   *    把名字加回 `LOCAL_ONLY_CATEGORIES` 就恢复原行为 —— 所以下面两个方向都还要管：
+   *      ① 名单里的类别**不许**出现在新库里（否则就是"看起来像 bug"的空 chip）；
+   *      ② 开了本机源之后**必须**把它们补出来、并绑到**启用着的**源上。
+   *    名单为空时这两条自动变成"什么都不必做"（下面按 length 分支）。 */
   const f = tmpDbFile('local-only-cats');
   const fetcher = async () => ({ ok: true, text: GOOD_RSS });
   await runIngest({ dbFile: f, trigger: 'manual', ensureSources: true, fetcher });
@@ -4768,8 +4988,14 @@ await aok('★★ 本机专属的那 6 个类别：新库不建，开了本机�
   );
 
   const on = setLocalSourcesEnabled(db, true);
-  assert.equal(on.categoriesCreated, LOCAL_ONLY_CATEGORIES.length, '开了本机源却没把这 6 个类别补出来');
-  assert.ok(on.categoriesBound > 0, '类别建出来了却一条绑定都没有 ⇒ 点进去还是空的');
+  assert.equal(on.categoriesCreated, LOCAL_ONLY_CATEGORIES.length, '开了本机源却没把名单里的类别补出来');
+  if (LOCAL_ONLY_CATEGORIES.length) {
+    assert.ok(on.categoriesBound > 0, '类别建出来了却一条绑定都没有 ⇒ 点进去还是空的');
+  } else {
+    /* 名单为空 = 每个类别都已经有默认打开的公网源 ⇒ 开本机源时**不需要**补任何类别。
+       这时只要求它别把已有的东西弄坏（下面几条幂等断言继续管这件事）。 */
+    assert.equal(on.categoriesBound, 0, '名单为空却还绑了类别 —— 判据该改回"名单里有谁"');
+  }
   const enabledBound = db.prepare(
     'SELECT COUNT(*) AS n FROM source_category sc JOIN source s ON s.id = sc.source_id ' +
       'WHERE sc.category_id = ? AND s.enabled = 1',
@@ -4787,6 +5013,25 @@ await aok('★★ 本机专属的那 6 个类别：新库不建，开了本机�
     assert.ok(names().includes(n), '关掉本机源就把类别删了 —— 那是「只加不删」的反面');
   }
   db.close();
+});
+
+ok('★ 本机专属类别的两道闸还在（名单现在为空，但机制不许被拆掉）', () => {
+  /* ⚠️ 2026-09-29：`LOCAL_ONLY_CATEGORIES` 清空之后，下面这两处接线**行为上不再可观测** ——
+     名单为空 ⇒ 那个 `if` 永远不命中、`ensureLocalCategories` 永远返回 0。
+     实测后果：它们原有的两个变异体变得"改不改都一样"（双双漏网，被认为是假通过）。
+     ⇒ 用一条**源码断言**把接线钉住。理由不是"为了绿"：
+        以后若某个类别又只剩本机源（源失效、被墙），它会被加回名单 ——
+        而那时如果这两句早已被删掉，新用户就会看到一个点进去永远空的 chip，
+        且没有任何东西会提醒写代码的人。 */
+  const db = fs.readFileSync(path.resolve(HERE, '..', 'src', 'store', 'db.js'), 'utf8');
+  assert.ok(
+    /if \(!includeLocalOnly && isLocalOnlyCategory\(name\)\) return;/.test(db),
+    'ensurePresetCategories 里那道「本机专属类别不建给新用户」的闸被拆掉了',
+  );
+  assert.ok(
+    /const cats = enabled \? ensureLocalCategories\(db, nowIso\)/.test(db),
+    'setLocalSourcesEnabled 不再登记本机专属类别（开了本机源也补不出那几个 chip）',
+  );
 });
 
 /* ==================================================================

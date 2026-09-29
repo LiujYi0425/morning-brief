@@ -33,6 +33,11 @@ import { fileURLToPath } from 'node:url';
 
 import { fetchText } from '../src/ingest/fetch-feeds.js';
 import { parseFeed } from '../src/ingest/feed-parse.js';
+/* ★ 2026-09-29：探针也要认识**站点私有的公开 JSON 接口**（adapters.js）。
+   ⚠️ 上一轮的教训：那批 JSON 接口候选（东财/同花顺/华尔街见闻…）在探针里
+      **一律报 0 条**，于是被当成"接口不可用"—— 其实是没人认。
+      探针与真机必须用同一个解析器，否则"实测"两个字就失去意义。 */
+import { adapterFor } from '../src/ingest/adapters.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -66,7 +71,10 @@ async function probe(c) {
   }
   const body = res.text || '';
   const isHtml = /^\s*<(!doctype|html)/i.test(body);
-  const p = parseFeed(body);
+  const adapter = adapterFor(c.url);
+  const p = adapter
+    ? await Promise.resolve(adapter.parse(body, { sourceName: c.name }))
+    : parseFeed(body);
   const items = p.items || [];
   const dates = items.map((it) => it.publishedAt).filter(Boolean).sort();
   const latest = dates.length ? dates[dates.length - 1] : '';
@@ -87,6 +95,7 @@ async function probe(c) {
     ms,
     bytes: body.length,
     html: isHtml,
+    adapter: adapter ? adapter.id : null,
     format: p.format,
     title: p.title,
     items: items.length,

@@ -75,37 +75,23 @@ export const DEFAULT_CATEGORIES = [
  *   老库里早就有的这几个类别一行都不动 —— 登记与迁移都是**只加不删**。
  *
  * ---------------------------------------------------------------------
- * ⚠️ 2026-09-28 更新：名单从 **6 个压到 2 个**（当天四路并行补源实测的结果）
+ * ⚠️ 2026-09-29 更新：**名单已清空**（从 6 → 2 → 0）
  * ---------------------------------------------------------------------
- * 本轮把「公网上到底有没有源」重新查了一遍（56+ 个候选、工具 `tools/probe-feeds.mjs`、
- * 每个都真抓两轮）。结果：
- *   · **领域·军事** —— 拿到了默认打开的公网源（韩联社·朝鲜 中文 27 条／
- *     The War Zone／Defense News），⇒ 移出本名单；
- *   · **领域·旅游** —— 品橙旅游、TTG China 两个**直连** feed 实测可用，⇒ 移出；
- *   · **时效·专题** —— 中新网·东西问／理论／法治 三个官方 feed，⇒ 移出；
- *   · **形态·音频** —— 7 个中文播客 feed（Fireside / 喜马拉雅 / wavpub 托管）实测可用
- *     （**前提是解析器补上 `<enclosure>` 兜底**，见 feed-parse.js），⇒ 移出；
- *   · **领域·房产** —— 观点网**直连** feed 可用（100 条/当天），⇒ 类别已建，不进名单。
+ * 三个阶段的实测把这份名单一点点清掉了：
+ *   · 2026-09-28 第一轮补源：军事 / 旅游 / 时效·专题 / 形态·音频 拿到了**直连**源
+ *     （韩联社·朝鲜、品橙旅游、中新网·东西问、7 个中文播客…），房产也靠观点网建了出来；
+ *   · 2026-09-29 用户拍板「汽车 / 核查 全都做」：这两个类别公网上**确实只有第三方
+ *     RSSHub 镜像**（两轮独立复扫共 120+ 个直连候选，一个都没找到），
+ *     于是那 5 条镜像源改成**默认打开**（冷启动慢的代价如实写在 G7 的注释里）。
  *
- * 仍然在名单里的两个，是**真的只剩第三方镜像**：
- *   · **领域·汽车** —— 公网无任何直连官方 feed；只有 RSSHub 镜像的路由
- *     （电动邦／乘联会／中汽协）。**用户 2026-09-28 拍板：镜像源一律默认关闭**
- *     ⇒ 新用户看不到这个类别，想用的人在「编辑类型」里勾开镜像源即可。
- *   · **性质·核查** —— 中文同样只有镜像（中国互联网联合辟谣平台／果壳·科学人）；
- *     英文事实核查源（Snopes / PolitiFact / Full Fact…）本机可达但**不适合中文简报**
- *     ⇒ 同样维持「新用户不建」。
- *   ⚠️ 这两个类别的镜像源都**写进了库**（`enabled: false`，名字里带「镜像」），
- *      用户随时可以自己打开 —— 但它们不该由我们默认替用户决定。
+ * ⇒ 现在**每一个类别都有默认打开的源**，所以新用户看到的是全部类别，
+ *   `ensureLocalCategories`（开本机 RSSHub 时补类别）成了一个**空操作**——
+ *   机制留着没删：万一以后某个类别又只剩本机源，把名字加回这个数组就恢复原行为。
  *
- * ⚠️ 名单**不再依赖写死的数字**：测试里这条断言是**算出来的** ——
- *    「名单 == 没有任何默认打开的公网源撑着的类别」。
- *    所以以后补上（或失去）公网源时，忘了改这份名单会当场红，
- *    而不是靠人记得去改那个 `6`。
+ * ⚠️ 测试里那条断言是**算出来的**（「名单 == 没有任何默认打开源撑着的类别」），
+ *    所以清空之后它仍然管用：以后谁新增一个"新用户填不满"的类别，当场红。
  */
-export const LOCAL_ONLY_CATEGORIES = Object.freeze([
-  '领域·汽车',
-  '性质·核查',
-]);
+export const LOCAL_ONLY_CATEGORIES = Object.freeze([]);
 
 /** 这个类别是不是「只有本机源撑得起来」的那一类（见上面那段） */
 export function isLocalOnlyCategory(name) {
@@ -522,16 +508,21 @@ export const DEFAULT_SOURCES = [
   { name: '博物志', feedUrl: 'https://bowuzhi.typlog.io/feed/audio.xml', kind: 'rss', categories: ['形态·音频', '领域·文娱', '性质·实用', '时效·软新闻', '主体·UGC'] },
 
   /* —— G7. 第三方 RSSHub 镜像源（**全部 `enabled: false`**，用户自己勾）——
-     ⚠️ 为什么默认关闭：它们是第三方代抓、不是官网，会话内实测约 1/3 次 503/超时。
-        按口径⑤（"实测通不过的源不许默认打开"）与用户 2026-09-28 的拍板，
-        一律写进库但不默认抓 —— 用户能在「编辑类型」里看到并打开它们。
+     ⚠️ 默认态分两种（2026-09-29 用户拍板"汽车 / 核查 全都做"之后改过一次）：
+        · **汽车 / 核查那 5 条 ⇒ `enabled: true`（默认打开）**：这两个类别公网上
+          确实没有直连 feed，而用户要的就是"点进去有内容"。代价如实说：
+          镜像回源慢时**第一次**抓取可能超时（实测冷启动 0.5~24 秒，其中
+          辟谣平台/果壳 约 24 秒 > 抓取超时 15 秒），缓存热了之后 0.5~3.3 秒；
+          ⇒ 界面上偶尔会看到一个「源异常」，下一轮自己就好了。
+        · **其余（军事/房产/数据/体育/文娱/教育/健康）⇒ `enabled: false`**：
+          那些类别已经有默认打开的**直连**源撑着，没必要为它们多担一次第三方风险。
      ⚠️ 唯一用途是**填公网上确实没有直连 feed 的缺口**：汽车（完全没有）、
         核查（中文只有镜像）、数据、体育、文娱、教育、健康的补充。 */
-  { name: '电动邦（镜像）', feedUrl: 'https://rss.injahow.cn/diandong/news', kind: 'rss', categories: ['领域·汽车', '性质·快讯', '主体·垂直媒体'], enabled: false },
-  { name: '乘联会·文章（镜像）', feedUrl: 'https://rsshub.liumingye.cn/cpcaauto/news/news', kind: 'rss', categories: ['领域·汽车', '性质·数据', '主体·官方'], enabled: false },
-  { name: '中国汽车工业协会·统计（镜像）', feedUrl: 'https://rsshub.woodland.cafe/auto-stats', kind: 'rss', categories: ['领域·汽车', '性质·数据', '主体·官方'], enabled: false },
-  { name: '中国互联网联合辟谣平台·今日辟谣（镜像）', feedUrl: 'https://rsshub.liumingye.cn/piyao/jrpy', kind: 'rss', categories: ['性质·核查', '领域·民生', '时效·硬新闻', '主体·官方'], enabled: false },
-  { name: '果壳·科学人（镜像）', feedUrl: 'https://rsshub.liumingye.cn/guokr/scientific', kind: 'rss', categories: ['性质·核查', '领域·科技', '性质·实用', '主体·垂直媒体'], enabled: false },
+  { name: '电动邦（镜像）', feedUrl: 'https://rss.injahow.cn/diandong/news', kind: 'rss', categories: ['领域·汽车', '性质·快讯', '主体·垂直媒体'] },
+  { name: '乘联会·文章（镜像）', feedUrl: 'https://rsshub.liumingye.cn/cpcaauto/news/news', kind: 'rss', categories: ['领域·汽车', '性质·数据', '主体·官方'] },
+  { name: '中国汽车工业协会·统计（镜像）', feedUrl: 'https://rsshub.woodland.cafe/auto-stats', kind: 'rss', categories: ['领域·汽车', '性质·数据', '主体·官方'] },
+  { name: '中国互联网联合辟谣平台·今日辟谣（镜像）', feedUrl: 'https://rsshub.liumingye.cn/piyao/jrpy', kind: 'rss', categories: ['性质·核查', '领域·民生', '时效·硬新闻', '主体·官方'] },
+  { name: '果壳·科学人（镜像）', feedUrl: 'https://rsshub.liumingye.cn/guokr/scientific', kind: 'rss', categories: ['性质·核查', '领域·科技', '性质·实用', '主体·垂直媒体'] },
   { name: '中华网军事（镜像）', feedUrl: 'https://rsshub.liumingye.cn/china/news/military', kind: 'rss', categories: ['领域·军事', '领域·国际', '性质·快讯', '主体·主流媒体'], enabled: false },
   { name: '参考消息·军事（镜像）', feedUrl: 'https://rsshub.liumingye.cn/cankaoxiaoxi/column/junshi', kind: 'rss', categories: ['领域·军事', '性质·快讯', '主体·主流媒体'], enabled: false },
   { name: '环球网军事（镜像）', feedUrl: 'https://rsshub.liumingye.cn/huanqiu/news/mil', kind: 'rss', categories: ['领域·军事', '性质·快讯', '主体·主流媒体'], enabled: false },
@@ -545,6 +536,28 @@ export const DEFAULT_SOURCES = [
   { name: '健康界（镜像）', feedUrl: 'https://rsshub.rssforever.com/cn-healthcare/index', kind: 'rss', categories: ['领域·医疗健康', '性质·深度', '主体·垂直媒体'], enabled: false },
   { name: '北京市教委·通知公告（镜像）', feedUrl: 'https://rsshub.rssforever.com/gov/beijing/jw/tzgg', kind: 'rss', categories: ['领域·教育', '性质·实用', '主体·官方'], enabled: false },
   { name: '虎嗅·文章（镜像）', feedUrl: 'https://rsshub.liumingye.cn/huxiu/article', kind: 'rss', categories: ['领域·财经', '领域·科技', '性质·深度', '主体·垂直媒体'], enabled: false },
+
+  /* —— G8. 三个**财经快讯**的公开 JSON 接口（默认开）——
+     ★★ 这是「站点自己的公开 JSON 接口」这条路第一次真正走通（2026-09-29）。
+        上一轮的结论是"那条路必然判 0 条"，根因不是接口不可用，而是**没人认**：
+        `parseFeed` 只认 RSS/Atom/JSON-Feed，而当时唯一的私有适配器是 `toutiao-hot`。
+        补上适配器之后（`ingest/parse-jsonnews.js` + `adapters.js` 登记），三个接口全通。
+
+     ⚠️ 实测（2026-09-29，各两轮，走项目自己的探针 —— 探针也已改成认适配器）：
+        华尔街见闻·7×24  20 条 · 时间 20 · 链接 20 · ~0.35s
+        同花顺·7×24      20 条 · 时间 20 · 链接 20 · ~0.32s
+        东方财富·快讯    50 条 · 时间 50 · 链接 50 · ~0.32s
+        ⇒ 三者都**有时间有链接**，所以可以默认开（口径⑤只禁止"实测通不过的默认打开"）。
+
+     ⚠️ 各家字段不同、坑也不同（细节见 parse-jsonnews.js）：
+        · 华尔街见闻的 `title` **常常是空串** ⇒ 用正文第一句当标题（截断真实内容，不编造）；
+        · 东财返回的是 **JSONP 包装**（`var ajaxResult={…}`）⇒ 必须先剥壳；
+        · 东财的 `showtime` 是 `YYYY-MM-DD HH:mm:ss` **北京时间** ⇒ 按 +08:00 解析
+          （按本机时区解会让 UTC 机器上的条目掉出"今天"那一屏，而界面看不出异常）；
+        · 财联社那条**没做成**：`/v1/roll/get_roll_list` 返回 `{errno,msg}`，要签名，不做。 —— */
+  { name: '华尔街见闻·7×24快讯', feedUrl: 'https://api-one-wscn.awtmt.com/apiv1/content/lives?channel=global-channel&client=pc&limit=20', kind: 'json', categories: ['领域·财经', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'] },
+  { name: '同花顺·7×24快讯', feedUrl: 'https://news.10jqka.com.cn/tapp/news/push/stock/?page=1&tag=&track=website&pagesize=20', kind: 'json', categories: ['领域·财经', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'] },
+  { name: '东方财富·快讯', feedUrl: 'https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_50_1_.html', kind: 'json', categories: ['领域·财经', '性质·快讯', '时效·硬新闻', '主体·垂直媒体'] },
 
   /* ------------------------------------------------------------------
    * 本轮**试过但确认不可用**的（一句话结论，写给下一个人省时间）

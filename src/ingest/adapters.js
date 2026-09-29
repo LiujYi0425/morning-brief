@@ -21,6 +21,7 @@
  */
 
 import { parseToutiaoHot } from './parse-toutiao.js';
+import { parseWscnLive, parseThsFlash, parseEastmoneyFlash } from './parse-jsonnews.js';
 
 /** 去掉开头的 www.，统一小写 —— 与 urls.js 的归一化口径一致 */
 function bareHost(hostname) {
@@ -59,6 +60,65 @@ export const ADAPTERS = [
       return /^\/hot-event\//.test(u.pathname);
     },
     parse: parseToutiaoHot,
+  },
+
+  /* ==================================================================
+   * 财经快讯三兄弟（2026-09-29 加）—— 都是为了那句"站点自己的公开 JSON 接口
+   * 这条路当时必然判 0 条"：接口是通的、官方公开的、有时间有链接，只是没人认。
+   * ⚠️ 三个都是**财经快讯**，差别只在来源与字段名（见 parse-jsonnews.js 顶部）。
+   * ⚠️ 判据一律"主机 + 路径"双窄判据：接口形状是站点私有的，
+   *    按整站认会把"用户自己找到的同站 feed"也塞进这个解析器。
+   * ================================================================== */
+  {
+    id: 'wscn-live',
+    site: '华尔街见闻',
+    matches(feedUrl) {
+      let u;
+      try {
+        u = new URL(String(feedUrl || ''));
+      } catch {
+        return false;
+      }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      const host = bareHost(u.hostname);
+      if (host !== 'api-one-wscn.awtmt.com') return false;
+      return /^\/apiv1\/content\/lives/.test(u.pathname);
+    },
+    parse: parseWscnLive,
+  },
+  {
+    id: 'ths-flash',
+    site: '同花顺',
+    matches(feedUrl) {
+      let u;
+      try {
+        u = new URL(String(feedUrl || ''));
+      } catch {
+        return false;
+      }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      const host = bareHost(u.hostname);
+      if (host !== 'news.10jqka.com.cn') return false;
+      return /^\/tapp\/news\/push\//.test(u.pathname);
+    },
+    parse: parseThsFlash,
+  },
+  {
+    id: 'eastmoney-flash',
+    site: '东方财富',
+    matches(feedUrl) {
+      let u;
+      try {
+        u = new URL(String(feedUrl || ''));
+      } catch {
+        return false;
+      }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      const host = bareHost(u.hostname);
+      if (host !== 'newsapi.eastmoney.com') return false;
+      return /^\/kuaixun\//.test(u.pathname);
+    },
+    parse: parseEastmoneyFlash,
   },
 ];
 
