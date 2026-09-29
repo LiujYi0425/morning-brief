@@ -514,17 +514,24 @@ function checkAll(VMx) {
    *    **变异体的抓不抓得住是按 checkAll 判的** —— 写在外面的断言咬不到 M18/M19/M20。
    *    （我第一版就把它们写成了独立用例，结果三个变异体全活着。） */
   {
-    /* (a) 「精选」按钮只允许长在 领域· 上 —— 用一个**非领域**类别来验。 */
+    /* (a) **每一个类型 chip 都必须有「精选」按钮**（「全部」除外）。
+        ⚠️ 第一版判据是"名字以 领域· 开头"，真机截图当场否掉：
+           用户自建的类型（「产品与设计」「国际要闻」）也是他眼里的"领域"，
+           于是导轨上看起来"隔两条才有一个精选"（用户原话："位置放得很尴尬"）。 */
     const mixed = VMx.reduce(VMx.createView(), {
       type: 'categories',
-      list: [{ id: 91, name: '性质·快讯' }, { id: 92, name: '领域·财经' }],
+      list: [{ id: 91, name: '性质·快讯' }, { id: 92, name: '领域·财经' }, { id: 93, name: '产品与设计' }],
     });
     const chips = VMx.derive(mixed).chips;
     for (const c of chips) {
-      if (c.pickable && String(c.name).indexOf('领域·') !== 0) {
-        fail('I5', '非领域 chip 带上了精选按钮：' + c.name);
+      if (c.id == null) {
+        if (c.pickable) fail('I5', '「全部」不该带精选按钮（那一屏本来就是当天的 AI 精选）');
+        continue;
       }
+      if (!c.pickable) fail('I5', '类型 chip 没有精选按钮（每个类型都该有）：' + c.name);
     }
+    const custom = chips.find((c) => c.name === '产品与设计');
+    if (!custom || !custom.pickable) fail('I5', '用户自建的类型没有精选按钮（真机反馈就是这一条）');
     const fin = chips.find((c) => c.name === '领域·财经');
     if (!fin || !fin.pickable) fail('I5', '领域 chip 没有精选按钮 —— 用户要的"每个领域一个"没做到');
 
@@ -627,8 +634,12 @@ function stateProblems(VMx, s, where) {
         本来就不该存在；这里守的是"任何**可达**状态都不许自相矛盾"。 */
   const picked = d.pick && d.pick.categoryId != null;
   for (const c of d.chips) {
-    if (c.pickable && String(c.name).indexOf('领域·') !== 0) {
-      bad.push('可达 ' + where + ' 非领域 chip 带上了精选按钮：' + c.name);
+    /* 每个**类型**都有精选按钮；「全部」没有（判据 2026-09-29 修正过一次，
+       理由见 checkAll 里 I5 那一段）。 */
+    if (c.id == null) {
+      if (c.pickable) bad.push('可达 ' + where + ' 「全部」带上了精选按钮');
+    } else if (!c.pickable) {
+      bad.push('可达 ' + where + ' 类型 chip 没有精选按钮：' + c.name);
     }
     if (picked && c.picking && String(c.id) !== String(d.pick.categoryId)) {
       bad.push('可达 ' + where + ' chip 的 picking 与 pick.categoryId 不一致：' + c.name);
@@ -714,8 +725,8 @@ const MUTANTS = [
     (s) => s.replace('      pick: picking,\n    };', '      pick: false,\n    };'),
   ],
   [
-    'M19 每个 chip 都长精选按钮（连"性质/形态"这些维度也长）',
-    (s) => s.replace("        pickable: cname.indexOf('领域·') === 0,", '        pickable: true,'),
+    'M19 只有「领域·」前缀的类型才有精选按钮 ⇒ 用户自建的类型没有（真机反馈：隔两条才有一个，位置很尴尬）',
+    (s) => s.replace('        pickable: true,', "        pickable: cname.indexOf('领域·') === 0,"),
   ],
   [
     'M20 点精选不清"看今天全部"⇒ 两种口径同时成立（列表到底按哪个取数说不清）',
@@ -795,14 +806,18 @@ say('└────────────────────────
   ];
   const base = VM.reduce(VM.createView(), { type: 'categories', list: cats });
 
-  ok('★★ 「精选」按钮只长在「领域·」chip 上（别的维度一个都不给）', () => {
+  ok('★★ 每个类型 chip 都有「精选」按钮（「全部」除外）—— 自建类型也算', () => {
     const d = VM.derive(base);
     const byName = {};
     for (const c of d.chips) byName[c.name] = c;
-    assert.equal(byName['全部'].pickable, false, '「全部」不该带精选按钮');
+    assert.equal(byName['全部'].pickable, false, '「全部」不该带精选按钮（那一屏本来就是当天的 AI 精选）');
     assert.equal(byName['领域·财经'].pickable, true);
     assert.equal(byName['领域·科技'].pickable, true);
-    assert.equal(byName['性质·快讯'].pickable, false, '「性质·快讯」被当成了领域 —— 用户要的是每个领域一个');
+    /* ⚠️ 这一条是真机反馈（2026-09-29 截图）：导轨里还有用户**自建**的类型
+       （「产品与设计」「国际要闻」），它们没有 领域· 前缀。
+       第一版判据只认前缀 ⇒ 那些 chip 没有精选按钮 ⇒ 用户看到的画面是
+       "隔两条才有一个精选，位置很尴尬"。 */
+    assert.equal(byName['性质·快讯'].pickable, true, '非「领域·」的类型也该有精选按钮（真机反馈过）');
     for (const c of d.chips) assert.equal(c.picking, false, '初始状态不该有任何 chip 处于"正在看精选"');
   });
 
@@ -1488,12 +1503,14 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★★ 没有「领域·」前缀的 chip 一个精选按钮都不该有（用户要的是每个**领域**一个）', async () => {
-    /* AI / 开源 / 行业 三个 chip 都不是领域 —— 它们右边不该冒出精选按钮 */
-    for (const idx of [1, 2, 3]) {
-      assert.ok(!r.el('pick-' + idx), '第 ' + idx + ' 个 chip（非领域）带上了精选按钮');
+  ok('★★ 导轨里每个类型 chip 右边都有精选按钮，只有「全部」没有', async () => {
+    /* ⚠️ 判据 2026-09-29 改过一次：第一版只给「领域·」前缀的 chip 挂按钮，
+       而真机截图里用户自建的类型（没有前缀）就没有 ⇒ 看起来"隔两条才有一个"。
+       现在：**每个类型都有**，「全部」没有（那一屏本来就是当天的 AI 精选）。 */
+    assert.ok(!r.el('pick-0'), '「全部」不该带精选按钮');
+    for (const idx of [1, 2, 3, 4]) {
+      assert.ok(r.el('pick-' + idx), '第 ' + idx + ' 个类型 chip 没有精选按钮');
     }
-    assert.ok(r.el('pick-4'), '领域 chip 反而没有精选按钮');
   });
 }
 

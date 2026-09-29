@@ -309,8 +309,14 @@ export function makeRig(cardSrc) {
     more() { return { text: byId.btnMore.textContent, disabled: byId.btnMore.disabled, hidden: byId.btnMore.hidden }; },
     allBtn() { return { text: byId.btnAll.textContent, disabled: byId.btnAll.disabled, hidden: byId.btnAll.hidden }; },
     headline() { return byId.headline.textContent; },
-    /** 模拟"点某个 chip"（索引 0 = 全部） */
-    clickChip(i) { byId.filters.children[i].fire('click'); },
+    /** 模拟"点某个 chip"（索引 0 = 全部）
+     *  ⚠️ 按**类型 chip** 取第 i 个，不是按导轨的孩子序号（2026-09-29）：
+     *     每个类型右边多了一个「精选」按钮之后，`children[i]` 会指到那些按钮上 ——
+     *     "点第 2 个 chip"于是变成了"点了 AI 的精选"（真机上不可能发生，装置里发生了）。 */
+    clickChip(i) {
+      const chips = byId.filters.children.filter((c) => String(c.className || '').split(/\s+/).indexOf('chip') >= 0);
+      chips[i].fire('click');
+    },
     click(id) { byId[id].fire('click'); },
 
     /* ------------------------------------------------------------------
