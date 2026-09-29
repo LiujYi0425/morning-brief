@@ -759,18 +759,31 @@
       var goBtn = el('button', 'btn', ed.addSource.busy ? '验证中…' : '添加');
       goBtn.type = 'button';
       goBtn.disabled = ed.addSource.busy;
-      goBtn.addEventListener('click', function () { submitAddSource(nameInput.value, urlInput.value); });
+      goBtn.addEventListener('click', function () { submitAddSource(nameInput.value, urlInput.value, credInput.value); });
       addRow.appendChild(goBtn);
       frag.appendChild(addRow);
+
+      /* ★ 可选凭据（2026-09-28 的「授权途径」）：**单独一行**，不挤进上面那一行 ——
+         真机上踩过"把控件堆进同一行 ⇒ 按钮被挤出面板可视区"。
+         外观复用 `.catpanel__input`，不引入任何新的视觉语言。 */
+      var credRow = el('div', 'catpanel__row catpanel__add');
+      var credInput = el('input', 'catpanel__input');
+      credInput.type = 'text';
+      credInput.placeholder = ed.addSource.placeholderCredential;
+      credInput.setAttribute('aria-label', '附加请求头（可选）');
+      credInput.disabled = ed.addSource.busy;
+      credRow.appendChild(credInput);
+      frag.appendChild(credRow);
       frag.appendChild(el('div', 'catpanel__hint', ed.addSource.hint));
 
       var submitOnEnter = function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); submitAddSource(nameInput.value, urlInput.value); }
+        if (e.key === 'Enter') { e.preventDefault(); submitAddSource(nameInput.value, urlInput.value, credInput.value); }
         else if (e.key === 'Escape') { e.preventDefault(); dispatch({ type: 'addSourceToggle', on: false }); }
         e.stopPropagation(); // 别让顶栏/文档级的快捷键抢走按键
       };
       urlInput.addEventListener('keydown', submitOnEnter);
       nameInput.addEventListener('keydown', submitOnEnter);
+      credInput.addEventListener('keydown', submitOnEnter);
       /* 聚焦**地址**而不是名字：用户手里有的是地址，名字可以随口起一个 */
       setTimeout(function () { urlInput.focus(); }, 0);
     }
@@ -1309,22 +1322,33 @@
    * ⚠️ 忙碌期间整块禁用（`addSourceBusy`）：一次点击就是一次真抓，
    *    连点会对着同一个地址打好几遍 —— 与"刷新"那条守卫同一个道理。
    */
-  async function submitAddSource(name, feedUrl) {
+  async function submitAddSource(name, feedUrl, credential) {
     var ed = VM.derive(view).editor;
     if (!ed.visible || ed.saving || ed.addSource.busy) return;
     var url = String(feedUrl || '').trim();
     var nm = String(name || '').trim();
+    var cred = String(credential || '');
     if (!url) { toast('先粘贴一个 feed 地址（或网站首页地址）'); return; }
     if (!nm) { toast('给它起个名字吧'); return; }
 
     dispatch({ type: 'addSourceBusy', on: true });
-    api.log('[card] 添加源：' + nm + ' ' + url.slice(0, 70));
+    api.log('[card] 添加源：' + nm + ' ' + url.slice(0, 70) + (cred.trim() ? '（带凭据）' : ''));
     try {
-      var r = await api.brief.addSource({ name: nm, feedUrl: url, categoryId: ed.categoryId });
+      var r = await api.brief.addSource({ name: nm, feedUrl: url, credential: cred, categoryId: ed.categoryId });
       if (!r || !r.ok) {
         dispatch({ type: 'addSourceBusy', on: false });
         toast((r && r.reason) || '添加失败');
         api.log('[card] ❌ 添加源被拒：' + ((r && r.reason) || '未知原因'));
+        return;
+      }
+      /* ★ 三种成功形态要说清是哪一种（否则用户分不清"加上了"和"只是改了凭据"）：
+         ① 新源 + 带凭据；② 已有源 ⇒ 配了凭据；③ 已有源 + 留空 ⇒ 清了凭据。 */
+      if (r.updated) {
+        dispatch({ type: 'categories', list: r.categories || VM.derive(view).categories });
+        toast(r.credentialConfigured
+          ? '已给「' + r.name + '」配置凭据（' + (r.credentialNames || '') + '），试抓 ' + (r.itemCount || 0) + ' 条'
+          : '已清除「' + r.name + '」的凭据');
+        api.log('[card] ✓ 更新源凭据：' + r.name + ' ' + (r.credentialConfigured ? '已配置 ' + r.credentialNames : '已清除'));
         return;
       }
       /* 成功：收起输入行、把源清单重新读一遍（新源已经绑到当前类型） */
@@ -1334,9 +1358,11 @@
          不说的话他会以为自己粘错了地址（下次就不敢再用这个入口了）。 */
       toast(r.discoveredFrom
         ? '已从网页自动找到它的 feed：「' + r.name + '」（' + (r.itemCount || 0) + ' 条）'
-        : '已添加「' + r.name + '」（' + (r.itemCount || 0) + ' 条）');
+        : '已添加「' + r.name + '」（' + (r.itemCount || 0) + ' 条）'
+          + (r.credentialConfigured ? '，凭据已存' : ''));
       api.log('[card] ✓ 添加源成功：' + r.name + ' ' + r.feedUrl + ' ' + r.format +
-        (r.discoveredFrom ? '（从 ' + r.discoveredFrom + ' 自动发现）' : ''));
+        (r.discoveredFrom ? '（从 ' + r.discoveredFrom + ' 自动发现）' : '') +
+        (r.credentialConfigured ? '（凭据 ' + r.credentialNames + '）' : ''));
       loadEditorData(ed.categoryId);
     } catch (err) {
       dispatch({ type: 'addSourceBusy', on: false });

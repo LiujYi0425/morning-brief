@@ -87,6 +87,15 @@ import { validateNewSource } from './feed-url.js';
    而站点自己在 `<link rel="alternate">` 里声明了 feed 地址。
    判定逻辑是纯函数（可离线穷举），这里只负责"取一次页面 + 试几个候选"。 */
 import { discoverFeedLinks } from '../ingest/feed-discover.js';
+/* ★ 「源凭据」（用户 2026-09-28 授权的"授权途径"）：加密存储、只按名字打日志。
+   明文只在主进程内部出现，而且**只发给用户填的那个地址**（见 addSource 的同源判定）。 */
+import {
+  headersFor as sourceHeadersFor,
+  setHeaders as setSourceHeaders,
+  clearHeaders as clearSourceHeaders,
+  encryptionAvailable as sourceCredentialEncryptionAvailable,
+} from './source-credential-store.js';
+import { parseHeaderLines, hasCredentials, describeHeaders } from '../shared/source-credential.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
@@ -959,6 +968,9 @@ async function bootstrap() {
            托盘刷新不带（= null）⇒ 抓全部启用源 —— 托盘是"我现在就要
            最新的一份"，不该被卡片上的筛选状态影响。 */
         categoryIds,
+        /* ★ 每条源自己的凭据（用户配的"授权途径"）：
+           没有配的源拿回 null ⇒ 与以前逐字一致；配了的源才带上请求头。 */
+        headersOf: (src) => sourceHeadersFor(src.feed_url),
         log: (m) => console.log('[ingest]', m),
       });
       /* ★★ 抓完就生成当天的简报（用户拍板：自动 + 设置里可手动重生成）。
@@ -1340,8 +1352,85 @@ async function bootstrap() {
       }
       const url = v.feedUrl;
       const name = v.name;
-      if (listSources(d).some((s) => s.feed_url === url)) {
-        return { ok: false, reason: '这个地址已经在库里了' };
+
+      /* ★ 凭据（可选）：用户 2026-09-28 授权的「授权途径」。
+         ⚠️ 在**试抓之前**解析：需要凭据才肯返回 feed 的源，不带它就永远加不进来。
+         ⚠️ 解析规则是纯函数（shared/source-credential.js）：`名字: 值` 一行一条、
+            禁 `Host`/`Content-Length` 这类会改请求语义的头、值不许带控制字符。 */
+      const credParsed = parseHeaderLines(p.credential || '');
+      if (!credParsed.ok) {
+        console.log(`[source] ✗ 凭据格式不对：${credParsed.error}`);
+        return { ok: false, reason: '附加请求头的格式不对：' + credParsed.error };
+      }
+      const creds = hasCredentials(credParsed.headers) ? credParsed.headers : null;
+      /* ⚠️ 要存凭据就必须有系统加密：宁可让用户换一个源，也不多一条明文落盘的路
+            （与 AI Key 的取舍不同 —— 那个是必需功能，这个不是）。 */
+      if (creds && !sourceCredentialEncryptionAvailable()) {
+        return {
+          ok: false,
+          needsEncryption: true,
+          reason:
+            '这台机器的系统加密（safeStorage）不可用，所以不能安全地保存凭据。' +
+            '凭据不会以明文落盘 —— 你可以改用不带凭据的源。',
+        };
+      }
+      /* ⚠️⚠️ 凭据**只允许发给用户填的那个地址**（同源）。
+         自动发现会给出**别的域名**的 feed 候选；把 A 站的 Key 发给 B 站
+         等于把用户凭据泄漏给第三方。这一条是安全边界，不是优化。 */
+      const sameOrigin = (a, b) => {
+        try {
+          return new URL(a).origin === new URL(b).origin;
+        } catch {
+          return false;
+        }
+      };
+
+      /* ★ 地址已经在库里时，**不再是"一句拒绝"，而是"给这条源配凭据/改名"**
+         （2026-09-28）。用户想给一个源配 Key 时，顺手粘同一个地址是最自然的动作 ——
+         原来这会得到「这个地址已经在库里了」，然后他没有任何别的入口。
+         · 凭据留空 ⇒ **清除**这条源的凭据；
+         · 凭据非空 ⇒ 带它试抓一次，通了才存（凭据不管用就不要存进去骗自己）。 */
+      const existing = listSources(d).find((s) => s.feed_url === url);
+      if (existing) {
+        if (!creds) {
+          const cl = clearSourceHeaders(url);
+          if (!cl.ok) return { ok: false, reason: cl.reason };
+          console.log(`[source] 已清除「${name}」的凭据（${url}）`);
+          return {
+            ok: true,
+            updated: true,
+            name,
+            feedUrl: url,
+            credentialConfigured: false,
+            categories: listCategories(d),
+          };
+        }
+        let r1 = null;
+        try {
+          r1 = await fetchText(url, { headers: creds });
+        } catch (err) {
+          r1 = { ok: false, error: (err && err.message) || String(err) };
+        }
+        const p1 = r1 && r1.ok ? parseFeed(r1.text || '', { sourceName: name }) : null;
+        if (!r1 || !r1.ok || !p1 || !p1.ok) {
+          const why = r1 && r1.ok ? (p1 && p1.contentKind) || '不是可解析的 feed' : (r1 && r1.error) || '取不到';
+          console.log(`[source] ✗ 凭据没让它通（不保存）：${url} —— ${why}`);
+          return { ok: false, reason: `带这个凭据仍然抓不到：${why}` };
+        }
+        const saved = setSourceHeaders(url, creds);
+        if (!saved.ok) return { ok: false, reason: saved.reason, needsEncryption: saved.needsEncryption };
+        console.log(`[source] ✓ 已为「${name}」配置凭据（${saved.names}），试抓 ${p1.items.length} 条`);
+        return {
+          ok: true,
+          updated: true,
+          name,
+          feedUrl: url,
+          credentialConfigured: true,
+          credentialNames: saved.names,
+          format: p1.format,
+          itemCount: p1.items.length,
+          categories: listCategories(d),
+        };
       }
 
       /* ③ **先验再存**：用与正式抓取同一个 fetchText 真抓一次、真解析一次。
@@ -1355,7 +1444,9 @@ async function bootstrap() {
       let usedUrl = url;      // 真正会被存下来的地址（可能来自"自动发现"）
       let discoveredFrom = ''; // 从哪个页面发现的（回话给用户看）
       try {
-        const res = await fetchText(url);
+        /* ★ 试抓**带上凭据**：不带的话"需要 Key 的源"永远过不了这一关，
+           而这个功能存在的全部意义就是让它们能加进来。 */
+        const res = await fetchText(url, { headers: creds });
         if (!res.ok) fetchErr = res.error || `HTTP ${res.status}`;
         else {
           pageText = res.text || '';
@@ -1389,7 +1480,11 @@ async function bootstrap() {
           }
           let p2 = null;
           try {
-            const r2 = await fetchText(cand);
+            /* ⚠️⚠️ 凭据**只在同源时**才带（安全边界）：
+               页面声明的 feed 可能在**别的域名**上（CDN / 第三方托管），
+               把 A 站的 Key 发给 B 站等于把用户凭据泄漏给第三方。
+               宁可让那个候选抓不到，也不把凭据递出去。 */
+            const r2 = await fetchText(cand, sameOrigin(cand, url) ? { headers: creds } : undefined);
             if (r2.ok) p2 = parseFeed(r2.text || '', { sourceName: name });
           } catch {
             p2 = null;   // 试下一个候选
@@ -1434,6 +1529,18 @@ async function bootstrap() {
       const add = addCustomSource(d, { name, feedUrl: usedUrl, kind: parsed.format }, new Date().toISOString());
       if (!add.ok) return { ok: false, reason: add.reason, existed: add.existed };
 
+      /* ★ 存凭据（如果有）。**在源已经进库之后**做：
+         它失败（比如系统加密突然不可用）不该把"源已经加好了"这件事回滚 ——
+         但必须如实告诉用户"源加上了，凭据没存上"，否则他会以为配好了。 */
+      let credentialSaved = null;
+      if (creds) {
+        const saved = setSourceHeaders(usedUrl, creds);
+        credentialSaved = saved.ok ? describeHeaders(creds) : null;
+        if (!saved.ok) {
+          console.log(`[source] ⚠️ 源已添加，但凭据没存上：${saved.reason}`);
+        }
+      }
+
       /* ⚠️ 顺手绑到**当前类型**：用户是在某个类型的编辑面板里加的源，
          不绑的话它会是一个"抓得到但哪个类型都不属于"的孤儿 ——
          用户加完切回列表却什么也看不到，会以为没加上。 */
@@ -1446,6 +1553,7 @@ async function bootstrap() {
       console.log(
         `[source] ✓ 已添加自定义源「${name}」${usedUrl}（${parsed.format}，试抓拿到 ${parsed.items.length} 条）` +
           (discoveredFrom ? `—— 从 ${discoveredFrom} 自动发现` : '') +
+          (credentialSaved ? `；已配置凭据（${credentialSaved}）` : '') +
           (Number.isFinite(catId) ? `，并绑到类型 ${catId}` : ''),
       );
       return {
@@ -1456,6 +1564,10 @@ async function bootstrap() {
         /* ★ 让界面能说清"你给的是网页，我接的是它的 feed" ——
            不告诉用户，他会以为自己粘错了地址（下次就不敢再用这个入口）。 */
         discoveredFrom,
+        /* ★ 凭据只回**名字**，绝不回值（与 API Key 同一条边界） */
+        credentialConfigured: !!credentialSaved,
+        credentialNames: credentialSaved || '',
+        credentialSaved: creds ? !!credentialSaved : null,
         format: parsed.format,
         itemCount: parsed.items.length,
         categories: listCategories(d),
@@ -1661,7 +1773,12 @@ async function bootstrap() {
   scheduler = createScheduler({
     run: () =>
       serialize(() =>
-        runIngest({ dbFile: DB_FILE, trigger: 'schedule', log: (m) => console.log('[ingest]', m) }).then((r) => {
+        runIngest({
+          dbFile: DB_FILE,
+          trigger: 'schedule',
+          headersOf: (src) => sourceHeadersFor(src.feed_url),
+          log: (m) => console.log('[ingest]', m),
+        }).then((r) => {
           if (cardWin && !cardWin.isDestroyed()) cardWin.webContents.send('brief:updated', buildBrief());
           return r;
         }),

@@ -34,6 +34,9 @@ import { adapterFor } from './adapters.js';
    在这里再抄一份 isPrivateHost 等于造第二份口径 —— 本项目已经反复栽在
    这个模式上（CARD_SIZE / --win-pad / 数据目录口径，前后四处）。 */
 import { feedUrlGateReason, localServiceHint } from '../main/feed-url.js';
+/* 「源凭据」的**脱敏摘要**（纯函数，零依赖）：日志里只允许出现请求头的**名字**。
+   值一旦进了日志，加密存储这件事就一次性作废（与 API Key 同一条硬边界）。 */
+import { describeHeaders } from '../shared/source-credential.js';
 import {
   openDb,
   upsertSources,
@@ -90,9 +93,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *    不加这个，一个不响应的源会把整个抓取挂住。
  *
  * @param {string} url
+ * @param {{timeoutMs?:number, headers?:Record<string,string>}} [opts]
+ *   `headers` 是**这条源自己的凭据**（用户可选的「授权途径」，见 shared/source-credential.js）：
+ *   官方 API 型的 `X-API-Key` / `Authorization`、需要 Referer 的公开 JSON 接口等。
+ *   ⚠️ 凭据**只发给用户填的那个地址**，而且绝不出现在日志里（调用方只允许打名字）。
  * @returns {Promise<{ok:boolean, status?:number, text?:string, error?:string}>}
  */
-export async function fetchText(url, { timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+export async function fetchText(url, { timeoutMs = FETCH_TIMEOUT_MS, headers } = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -102,6 +109,9 @@ export async function fetchText(url, { timeoutMs = FETCH_TIMEOUT_MS } = {}) {
       headers: {
         'User-Agent': USER_AGENT,
         Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*;q=0.8',
+        /* ★ 用户配的凭据排在后面 ⇒ 可以覆盖上面两个默认头（比如有些源要求特定 UA）。
+           ⚠️ `Host` / `Content-Length` 之类在解析阶段就被拒了（parseHeaderLines）。 */
+        ...(headers || {}),
       },
     });
     if (!res.ok) {
@@ -157,6 +167,10 @@ export function explainFetchFailure(feedUrl, res) {
  * @param {number[]} [opts.categoryIds]  只抓这些类型**绑定的源并集**（缺省 = 全部启用源）
  * @param {(msg:string)=>void} [opts.log]
  * @param {typeof fetchText} [opts.fetcher] 便于测试注入（默认真抓）
+ * @param {(src:object)=>Record<string,string>|null} [opts.headersOf]
+ *   「这条源要不要带凭据」—— 默认返回 null（不带）。
+ *   ⚠️ 注入点放在这里而不是让 fetchText 自己去查：抓取层**不该知道**
+ *      凭据存在哪（那是主进程的事），而且离线考裁判要能完全绕开它。
  * @param {object} [opts.env] 读"本机地址放行开关"用的环境（默认 process.env；
  *   测试里注入，免得跑测试的那台机器上恰好设了这个变量而改变结果）
  */
@@ -168,6 +182,7 @@ export async function runIngest(opts) {
     categoryIds = null,
     log = () => {},
     fetcher = fetchText,
+    headersOf = () => null,
     env = process.env,
   } = opts;
 
@@ -344,7 +359,14 @@ export async function runIngest(opts) {
           one.status = 'blocked_local';
           one.error = gate;
         }
-        let res = gate ? null : await fetcher(src.feed_url);
+        /* ★ 这条源的凭据（用户配的「授权途径」）。**只打名字、绝不打值** ——
+           日志里出现一次凭据就等于加密存储白做了（与 API Key 同一条边界）。
+           默认的 headersOf 返回 null ⇒ 不带凭据，行为与以前逐字一致。 */
+        const creds = gate ? null : headersOf(src);
+        if (creds && Object.keys(creds).length) {
+          log(`${src.name}：带凭据请求（${describeHeaders(creds)}）`);
+        }
+        let res = gate ? null : await fetcher(src.feed_url, creds);
         let parsed = null;
         /* ★ 这条源是不是"某个站点自己的 JSON 接口"（见 adapters.js）。
            是的话解析器换成它，否则走通用的 RSS/Atom/RDF/JSON Feed 解析。
@@ -366,7 +388,7 @@ export async function runIngest(opts) {
             if (!looksBlocked || attempt >= RETRY_NOT_FEED) break;
             log(`${src.name}：拿到的是「${parsed.contentKind}」，重试一次`);
             await sleep(500 + Math.floor(Math.random() * 700));
-            res = await fetcher(src.feed_url);
+            res = await fetcher(src.feed_url, creds);
             if (!res.ok) break;
           }
         }

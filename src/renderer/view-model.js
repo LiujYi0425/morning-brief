@@ -998,9 +998,12 @@
            `<link rel="alternate">` 声明，自动找到它的 feed）。
            文案必须说出来 —— 不然用户看到"粘贴 feed 地址"就以为自己手上没有 feed 可粘。 */
         placeholder: '粘贴 feed 地址，或网站首页地址',
+        /* ★ 凭据（授权途径）：有些源要在请求里带 Key/Referer 才肯返回 feed。
+           加密存在本机、日志里只出现名字；把地址再提交一次且这里留空 = 清除已存的凭据。 */
+        placeholderCredential: '附加请求头（可选）：Authorization: Bearer xxx',
         hint: v.addSourceBusy
           ? '正在验证这个地址…（会真的抓一次，可能要几秒）'
-          : '支持 RSS / Atom / JSON Feed；粘网站首页也行，程序会自己找它的 feed。加进来的源只属于当前这个类型。',
+          : '支持 RSS / Atom / JSON Feed；粘网站首页也行，程序会自己找它的 feed。需要授权的源在下一行填请求头（加密存本机，留空重交=清除）。',
       },
     };
     /* 面板的入口按钮：只为**一个真实的类型**出现（「全部」不是类型，没有可编辑的东西） */

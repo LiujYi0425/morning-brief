@@ -1171,7 +1171,11 @@ const PANEL_SOURCES = [
     /* 打开「＋ 添加源」那一行 */
     r.clickPanelButton(/添加源/);
     await r.sleep(20);
-    assert.equal(r.panelInputs().length, 2, '「添加源」应当展开出"名字 + 地址"两个输入框');
+    assert.equal(
+      r.panelInputs().length,
+      3,
+      '「添加源」应当展开出"名字 + 地址 + 附加请求头（可选）"三个输入框',
+    );
 
     const filled = r.fillAddSource('示例站', 'https://example.com/feed');
     await r.sleep(20);
@@ -1179,6 +1183,9 @@ const PANEL_SOURCES = [
     assert.equal(req.kind, 'addSource', '点「添加」应当发出 addSource');
     assert.equal(req.payload.feedUrl, filled.url, '发出去的地址与输入框里的一致');
     assert.equal(req.payload.name, filled.name);
+    /* ★ 凭据字段必须**始终**随载荷发出去（哪怕是空串）——
+       漏了它，用户填了 Key 也会被当成"没填"，而界面上看不出任何异常。 */
+    assert.ok('credential' in req.payload, '载荷里没有 credential 字段 ⇒ 用户填的凭据会被丢掉');
     assert.equal(String(req.payload.categoryId), '2', '必须带上当前类型 —— 不带的话新源会变成哪个类型都不属于的孤儿');
 
     /* ★ 忙碌期间再点一次：不许发出第二笔 */
@@ -1247,7 +1254,7 @@ const PANEL_SOURCES = [
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
     r.clickPanelButton(/添加源/);
     await r.sleep(20);
-    assert.equal(r.panelInputs().length, 2);
+    assert.equal(r.panelInputs().length, 3, '展开后应当是 名字 / 地址 / 附加请求头 三个输入框');
     r.clickPanelButton(/^关闭$/);
     await r.sleep(20);
     r.click('btnEditCat');

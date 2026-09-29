@@ -64,6 +64,16 @@ import { parseFeed, parseDate, sniffContentKind } from '../src/ingest/feed-parse
 /* ★ Feed 自动发现（2026-09-28）：纯函数，所以能在这里穷举 ——
    而它守的是"用户粘一个网站首页也能加源"这件事的全部判据。 */
 import { discoverFeedLinks, DEFAULT_LIMIT } from '../src/ingest/feed-discover.js';
+/* ★ 源凭据（2026-09-28 的「授权途径」）：解析与脱敏都是纯函数 ——
+   而"哪些头不许设、值会不会漏进日志"这两件事**必须**能被逐条断言。 */
+import {
+  parseHeaderLines,
+  redactHeaders,
+  hasCredentials,
+  describeHeaders,
+  FORBIDDEN_HEADERS,
+  MAX_HEADER_COUNT,
+} from '../src/shared/source-credential.js';
 import {
   openDb,
   upsertSources,
@@ -1376,6 +1386,116 @@ ok('★ 发现结果：去重、按声明顺序、有上限；畸形输入不抛
     discoverFeedLinks(mixed, 'https://ok.com/'),
     ['https://ok.com/f', 'https://ok.com/rel'],
   );
+});
+
+/* ==================================================================
+ * 源凭据（2026-09-28 的「授权途径」）
+ * ------------------------------------------------------------------
+ * 有些**完全正当**的资讯途径要在请求里带凭据才肯返回 feed：
+ * 官方 API 型的 `X-API-Key` / `Authorization`、需要 Referer 的公开 JSON 接口、
+ * 自建服务上的私有 feed。没有这个能力，用户只能把 Key 拼进 URL ——
+ * 那串东西会**明文落库**、还会出现在日志与错误信息里。
+ * 下面守两件事：
+ *   ① 解析规则（尤其**哪些头不许设** —— 那是安全边界，不是洁癖）；
+ *   ② 脱敏（凭据的值**绝不许**进日志，与 API Key 同一条硬边界）。
+ * ================================================================== */
+say();
+say('--- 源凭据：解析与脱敏（授权途径）---');
+
+ok('★★ 凭据解析：一行一条「名字: 值」，注释/空行忽略，同名后者覆盖', () => {
+  const r = parseHeaderLines(
+    '# 这是我给的备注\n' +
+      'Authorization: Bearer sk-abc123\n' +
+      '\n' +
+      'X-API-Key: 9988\n' +
+      'Referer: https://example.com/\n',
+  );
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(Object.keys(r.headers).sort(), ['authorization', 'referer', 'x-api-key']);
+  assert.equal(r.headers.authorization, 'Bearer sk-abc123', '值两边的空白没去掉');
+  assert.deepEqual(r.names, ['Authorization', 'X-API-Key', 'Referer'], '名字要保留用户写的大小写（日志里好看）');
+
+  /* 同名后者覆盖：用户改一行不用先删掉旧行 */
+  const dup = parseHeaderLines('X-A: 1\nX-A: 2\n');
+  assert.equal(dup.headers['x-a'], '2', '同名没有按"后者覆盖"处理');
+
+  /* 空输入 = 没有凭据（不是错误）—— 界面上不填就是这个样子 */
+  assert.deepEqual(parseHeaderLines('').headers, {});
+  assert.deepEqual(parseHeaderLines(null).headers, {});
+  assert.equal(hasCredentials(parseHeaderLines('   \n# 只有注释\n').headers), false, '空凭据应当算"没配"');
+});
+
+ok('★★ 哪些请求头不许用户设（每一条都有具体后果，不是洁癖）', () => {
+  /* `Host` 改的是"请求打到哪个虚拟主机"（SSRF 的经典一步）；
+     `Content-Length`/`Transfer-Encoding`/`Connection` 是请求体框架，改坏会挂住；
+     `Upgrade` 会把普通 GET 变成协议升级。 */
+  for (const bad of FORBIDDEN_HEADERS) {
+    const r = parseHeaderLines(`${bad}: x\n`);
+    assert.equal(r.ok, false, `竟然允许设置 ${bad} —— 这是安全边界`);
+    assert.ok(r.error.includes(bad), `拒绝理由里要说清是哪个头：${r.error}`);
+  }
+  /* 大小写不敏感：`HOST:` 一样要拦 */
+  assert.equal(parseHeaderLines('HOST: evil.example\n').ok, false, '大写写法绕过了名单');
+  /* `Cookie` **允许**（自建服务上的私有 feed 就靠它），这是刻意的 */
+  assert.equal(parseHeaderLines('Cookie: a=1\n').ok, true, 'Cookie 被误拦 —— 自建 feed 会配不了');
+});
+
+ok('★★ 畸形凭据一律拒收，且理由能照着改（控制字符会构造头注入）', () => {
+  const cases = [
+    ['没有冒号', 'Authorization Bearer x'],
+    ['名字为空', ': value'],
+    ['名字有空格', 'X API Key: v'],
+    ['值为空', 'X-API-Key:'],
+    [`超过 ${MAX_HEADER_COUNT} 条`, Array.from({ length: MAX_HEADER_COUNT + 1 }, (_, i) => `X-${i}: v`).join('\n')],
+    ['值里有控制字符', 'X-A: a\u0007b'],
+  ];
+  for (const [label, text] of cases) {
+    const r = parseHeaderLines(text);
+    assert.equal(r.ok, false, `${label} 竟然被收下了`);
+    assert.ok(r.error && r.error.length > 3, `${label} 的拒绝理由太短，用户改不了：${r.error}`);
+  }
+});
+
+ok('★★ 脱敏：日志里只许出现名字，值必须是掩码', () => {
+  /* ⚠️ 这是**整条凭据链路的最后一道闸**：值一旦进日志，
+     加密存储、独立文件、IPC 不回传全都白做。 */
+  const red = redactHeaders({ authorization: 'Bearer sk-verysecret', 'x-api-key': 'abcd' });
+  assert.equal(red.authorization.includes('sk-verysecret'), false, '脱敏之后仍然带着明文');
+  assert.ok(/^••••/.test(red.authorization), '值没有被掩码：' + red.authorization);
+  assert.equal(red['x-api-key'].includes('abcd'), false, '短值被原样留下了');
+  /* 摘要只给名字，一个字母的值都不给 */
+  assert.equal(describeHeaders({ authorization: 'Bearer sk-x', referer: 'https://e/' }), 'authorization, referer');
+  assert.equal(describeHeaders({}), '');
+});
+
+aok('★★★ 凭据真的会随请求发出去、且**绝不出现在日志里**（跑一遍 runIngest）', async () => {
+  /* 这是这条链路唯一"真跑"的断言：
+     `headersOf` 注入 ⇒ fetcher 收到的第二个参数 = 凭据；
+     同时把 log 收集起来，断言**秘密一个字符都没进去**。 */
+  const file = tmpDbFile('cred');
+  const SECRET = 'sk-super-secret-xyz';
+  const seen = [];
+  const logs = [];
+  const fetcher = async (url, headers) => {
+    seen.push({ url, headers });
+    return { ok: true, text: GOOD_RSS };
+  };
+  await runIngest({
+    dbFile: file,
+    trigger: 'manual',
+    ensureSources: true,
+    fetcher,
+    log: (m) => logs.push(String(m)),
+    headersOf: (src) => (src.name === '量子位' ? { authorization: 'Bearer ' + SECRET } : null),
+  });
+  const withCred = seen.find((s) => s.headers);
+  assert.ok(withCred, 'headersOf 说这条源有凭据，但 fetcher 一个请求头都没收到 ⇒ 凭据白配了');
+  assert.equal(withCred.headers.authorization, 'Bearer ' + SECRET, '凭据的值被改动了');
+  assert.ok(seen.some((s) => !s.headers), '没有凭据的源应当收到 null（不能给所有源都发凭据）');
+  const all = logs.join('\n');
+  assert.equal(all.includes(SECRET), false, '凭据的值出现在日志里了 —— 加密存储全白做');
+  assert.ok(all.includes('authorization'), '日志里应当只出现请求头的**名字**（否则用户不知道哪条源带了凭据）');
+  /* runIngest 自己在 finally 里关库（见 fetch-feeds.js 末尾），这里不用再关 */
 });
 
 ok('★ 条目顺序非单调时，库里按 published_at 排（36氪首条 16:33 后面还有 20:56）', () => {
@@ -3703,7 +3823,7 @@ ok('★★ 添加源必须**真的**调用那两个校验、并且**先验再存
   const b = body[0];
   assert.ok(/validateNewSource\(p\)/.test(b), 'addSource 没有调用 validateNewSource —— 地址判定等于没做');
   assert.ok(/validateExternalUrl\(v\.feedUrl\)/.test(b), 'addSource 没有复用协议白名单（url-guard）');
-  assert.ok(/fetchText\(url\)/.test(b), 'addSource 没有真的抓一次 —— 那"先验再存"就是空话');
+  assert.ok(/fetchText\(url, \{ headers: creds \}\)/.test(b), 'addSource 没有真的抓一次（且要**带上凭据**）—— 需要 Key 的源永远加不进来');
   assert.ok(/parseFeed\(/.test(b), 'addSource 没有真的解析一次');
   assert.ok(/if \(!parsed \|\| !parsed\.ok\) \{/.test(b), '解析失败的分支没了 ⇒ 不是 feed 的地址也会被存成源');
   /* ★★ Feed 自动发现（2026-09-28）的三条接线，缺一条都会静默退化：
@@ -3722,6 +3842,20 @@ ok('★★ 添加源必须**真的**调用那两个校验、并且**先验再存
     /addCustomSource\(d, \{ name, feedUrl: usedUrl/.test(b),
     '存进库的不是自动发现出来的地址（抓的还是那个网页 ⇒ 每轮都失败，而用户不知道为什么）',
   );
+  /* ★★ 凭据链路（2026-09-28 的「授权途径」）——四条缺一条都会静默退化：
+     ① 解析（格式与"哪些头不许设"都在纯函数里）；
+     ② 试抓**带凭据**（不带的话需要授权的源永远过不了这一关）；
+     ③ 存进**加密存储**（`setSourceHeaders`），不是塞进库；
+     ④ 自动发现的候选**只在同源时**才带凭据 —— 页面声明的 feed 可能在别的域名上，
+        把 A 站的 Key 发给 B 站就是把用户凭据泄漏给第三方（安全边界）。 */
+  assert.ok(/parseHeaderLines\(p\.credential/.test(b), 'addSource 没有解析用户填的凭据');
+  assert.ok(/setSourceHeaders\(/.test(b), '凭据没有存进加密存储（难道塞进库了？）');
+  assert.ok(/sameOrigin\(cand, url\)/.test(b), '自动发现的候选不带同源判定 ⇒ 会把自己的凭据发给第三方域名');
+  assert.ok(
+    !/\$\{creds\}|JSON\.stringify\(creds|String\(creds\)/.test(b),
+    '凭据的值被拼进字符串了（日志/IPC 都可能带上它）—— 只允许打**名字**',
+  );
+  assert.ok(/saved\.names|credentialSaved/.test(b), '配好凭据之后没有留下"只含名字"的痕迹给日志用');
   /* ★ 两条**契约**断言（比"某个 if 还在不在"更结实）：
      ① 这个 handler 里**每一条失败返回都必须带 reason** ——
         原因是要给用户看的正文，静默失败在这里的表现是"点了没反应"；
@@ -3740,7 +3874,7 @@ ok('★★ 添加源必须**真的**调用那两个校验、并且**先验再存
   assert.ok(!/\|\|\s*'rss'/.test(code), "出现了 `|| 'rss'` 兜底 —— 它会把解析器契约的变化悄悄掩盖掉");
   /* 顺序：校验 → 试抓 → 入库。反过来的话"先存后验"，
      一个坏地址已经进库了才发现——那就留下了一个永远失败的源。 */
-  assert.ok(b.indexOf('validateNewSource(p)') < b.indexOf('fetchText(url)'), '校验必须在试抓之前');
+  assert.ok(b.indexOf('validateNewSource(p)') < b.search(/fetchText\(url/), '校验必须在试抓之前');
   assert.ok(b.indexOf('fetchText(url)') < b.indexOf('addCustomSource('), '试抓必须在入库之前（先验再存）');
 });
 

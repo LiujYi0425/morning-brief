@@ -712,6 +712,44 @@ const MUTANTS = [
     from: '      const add = addCustomSource(d, { name, feedUrl: usedUrl, kind: parsed.format }, new Date().toISOString());',
     to: '      const add = addCustomSource(d, { name, feedUrl: url, kind: parsed.format }, new Date().toISOString());',
     expect: '存进库的不是自动发现出来的地址',
+  },
+  /* ── 源凭据（2026-09-28 的「授权途径」）──
+   * ⚠️ 这一组里有两条是**泄漏类**缺陷：它们的失败方式不是"功能坏了"，
+   *    而是"看起来一切正常、但用户的 Key 已经在日志里/在别人服务器上了"。 */
+  {
+    file: 'src/shared/source-credential.js',
+    why: '凭据解析不再拦 Host/Content-Length 这类头 ⇒ 用户配的一行 `Host: evil` 就能把请求引到别的虚拟主机（SSRF 的经典一步）',
+    from: '    if (FORBIDDEN_HEADERS.includes(low)) {',
+    to: '    if (false) {',
+    expect: '竟然允许设置',
+  },
+  {
+    file: 'src/shared/source-credential.js',
+    why: '脱敏函数直接把明文还回去 ⇒ 凭据会出现在日志里（加密存储、独立文件、IPC 不回传全都白做）',
+    from: "    out[k] = s.length > 4 ? '••••' + s.slice(-2) : '••••';",
+    to: '    out[k] = s;',
+    expect: '脱敏之后仍然带着明文',
+  },
+  {
+    file: 'src/ingest/fetch-feeds.js',
+    why: '抓取时不把凭据传给 fetcher ⇒ 用户配了 Key 却永远抓不到（界面上只显示"源异常"）',
+    from: '        let res = gate ? null : await fetcher(src.feed_url, creds);',
+    to: '        let res = gate ? null : await fetcher(src.feed_url);',
+    expect: 'fetcher 一个请求头都没收到',
+  },
+  {
+    file: 'src/ingest/fetch-feeds.js',
+    why: '日志里打的是凭据**原文**而不是名字 ⇒ 密钥进日志（这条链路上最贵的一次泄漏）',
+    from: '          log(`${src.name}：带凭据请求（${describeHeaders(creds)}）`);',
+    to: '          log(`${src.name}：带凭据请求（${JSON.stringify(creds)}）`);',
+    expect: '凭据的值出现在日志里',
+  },
+  {
+    file: MAIN,
+    why: '自动发现的候选不再判同源 ⇒ 页面声明的第三方域名会收到用户凭据（把 Key 递给别人）',
+    from: '            const r2 = await fetchText(cand, sameOrigin(cand, url) ? { headers: creds } : undefined);',
+    to: '            const r2 = await fetchText(cand, { headers: creds });',
+    expect: '会把自己的凭据发给第三方域名',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。
