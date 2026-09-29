@@ -254,6 +254,48 @@ body {
   outline-offset: 1px;
 }
 
+/* ---------------- 「精选」按钮（每个「领域·」chip 右边那一个，2026-09-29） ----------------
+ * 它回答的是"这个领域今天最值得看的几条"（挑选判据见 shared/pick.js：
+ * 每个源轮着来、新的优先），与点 chip 得到的"时间流水"是两种口径。
+ *
+ * ⚠️ 视觉上必须**与 chip 分得开**（否则用户以为它也只是筛选的一种），
+ *    但又不能引入新的语言：沿用同一套形状（圆角/高度/圆角chip），
+ *    只把底色调成透明、文字降到 tertiary、描边用 divider。
+ * ⚠️ 对比度：`--text-tertiary` 在全壁纸区间是 5.01–5.40:1，符合 R-C02 的 4.5:1
+ *    （见 tokens.css 那张表）—— 不要顺手改成更淡的值。
+ * ⚠️ 24px 最小高度同样来自 WCAG 2.2 SC 2.5.8（与 .chip 同一档），
+ *    它是个**真的会被点的**按钮，不是装饰。 */
+.chippick {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 4px 8px;
+  min-height: 24px;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--divider);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--fs-meta);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.chippick:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+/* 正在看这个领域的精选：与 chip 的选中态同源（accent 描边 + 加粗），
+   但**不**用左侧竖条 —— 那个竖条是"当前筛选"的专属记号，两处都用就分不清了。 */
+.chippick[data-on='on'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.chippick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* 「＋」新增类型：与普通 chip 区分，但同属一条视觉语言。
    ⚠️ 它现在就住在 .catbar 这一行里（不在导轨里，理由见 card.html 的注释），
       所以要按这一行的行高对齐，不能沿用导轨里那份 25px 的高度。 */

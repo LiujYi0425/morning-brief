@@ -35,17 +35,29 @@ export const CARD_SRC = fs.readFileSync(path.join(RENDERER, 'card.js'), 'utf8');
 export const VM_SRC = fs.readFileSync(path.join(RENDERER, 'view-model.js'), 'utf8');
 export const INDEX_SRC = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
 
-/** 测试用的类别表（与 test-interaction.mjs 的 CATS 同源） */
+/** 测试用的类别表（与 test-interaction.mjs 的 CATS 同源）
+ *  ⚠️ 2026-09-29：第 4 项带**领域·**前缀 —— 「精选」按钮只长在这一维度的 chip 上
+ *     （判据见 view-model 的 pickable）。夹具里没有领域 chip 就等于
+ *     **这个功能没有任何真点击断言**，而"按钮渲染出来了但没接上动作"正是最常见的坏法。 */
 export const CATS = [
   { id: 1, name: 'AI' },
   { id: 2, name: '开源' },
   { id: 3, name: '行业' },
+  { id: 4, name: '领域·财经' },
 ];
 
 /* ------------------------------------------------------------------ */
 /* 极简 DOM —— 只实现 card.js 真正用到的那几个面                        */
 /* ------------------------------------------------------------------ */
-function makeNode(tag) {
+/**
+ * @param {string} tag
+ * @param {(node:object)=>void} [registry]
+ *   ★ 2026-09-29：把"动态建出来的元素登记进 byId"这件事**挂在节点上**（`_reg`），
+ *   而不是放一个模块级变量 —— 两个 rig 同时活着时，模块级那一份会被后建的覆盖，
+ *   于是前一个 rig 的 `getElementById` 悄悄查不到运行时按钮（而那种失效看起来
+ *   像"新功能没有断言"）。
+ */
+function makeNode(tag, registry) {
   /* ⚠️ `textContent` 的读法必须是**递归拼接后代文本**，与真 DOM 一致。
      第一版只返回节点自己写进去的那一份，于是"从容器上读面板的文案"永远得到空串 ——
      而那会让断言去改本来完全正确的 card.js（我在这上面误判过一次：
@@ -59,6 +71,7 @@ function makeNode(tag) {
   const n = {
     tagName: String(tag || 'div').toUpperCase(),
     children: [], parentNode: null,
+    _reg: registry || null,
     style: {}, dataset: {}, attrs: {}, handlers: {}, _text: '',
     hidden: false, disabled: false, tabIndex: 0, value: '0', min: '0', max: '0',
     type: '', id: '', className: '', title: '',
@@ -76,12 +89,15 @@ function makeNode(tag) {
        片段本身不留在树上。忘了这一步，列表看起来就只有 1 个孩子（一个片段），
        而那是装置的假象，不是 card.js 的问题 —— 我在这上面误判过一次。 */
     if (c && c.isFragment) {
-      for (const k of c.children.slice()) { k.parentNode = n; n.children.push(k); }
+      for (const k of c.children.slice()) { k.parentNode = n; n.children.push(k); if (n._reg) n._reg(k); }
       c.children.length = 0;
       return c;
     }
     c.parentNode = n;
     n.children.push(c);
+    /* ★ 动态元素登记：真 DOM 里 getElementById 找得到运行时装上去的 chip / 精选按钮，
+       装置必须同样找得到 —— 否则新加的按钮只能靠咬源码来"验证"（2026-09-29）。 */
+    if (n._reg) n._reg(c);
     return c;
   };
   n.removeChild = (c) => { const i = n.children.indexOf(c); if (i >= 0) n.children.splice(i, 1); return c; };
@@ -118,7 +134,17 @@ export function makeRig(cardSrc) {
   let nextId = 100;
 
   const byId = {};
-  for (const id of IDS) { const n = makeNode('div'); n.id = id; byId[id] = n; }
+  /* ★ 动态建出来的元素也要能被 getElementById 找到（2026-09-29）。
+     ⚠️ 之前 byId 只装 IDS 里那批固定 id —— 而**真 DOM 不是这样**：
+        card.js 给 chip 设的 `chip-3`、给「精选」按钮设的 `pick-4` 都是运行时才有的，
+        真实浏览器里 getElementById 照样找得到。
+        装置漏了这一步的后果是"**新加的动态按钮没有真点击断言**"：
+        测试只能去咬源码，而"按钮渲染出来了但没接上动作"恰恰是最常见的坏法。
+     ⚠️ 只在 appendChild 时登记（不在设 id 时）：与真 DOM 一致（不在树上的不算）。 */
+  function registerId(node) {
+    if (node && node.id != null && node.id !== '') byId[node.id] = node;
+  }
+  for (const id of IDS) { const n = makeNode('div', registerId); n.id = id; byId[id] = n; }
   [['catSlider', 'input'], ['catPrev', 'button'], ['catNext', 'button'], ['btnAddCat', 'button'],
     ['btnEditCat', 'button'], ['btnMore', 'button'], ['btnAll', 'button'], ['btnRefresh', 'button'],
     ['btnCollapse', 'button'],
@@ -127,7 +153,7 @@ export function makeRig(cardSrc) {
      否则"选中「全部」时编辑入口不出现"这条断言会基于一个假前提取证。 */
   byId.btnEditCat.setAttribute('hidden', 'hidden');
 
-  const cardNode = makeNode('div');
+  const cardNode = makeNode('div', registerId);
   cardNode.className = 'card';
   /* ⚠️ `.card` 必须返回**同一个节点**（真 DOM 里本来就是同一个元素）。
      每次新建一个的话，"在节点上累计的量"会与另一端对不上 ——
@@ -139,15 +165,20 @@ export function makeRig(cardSrc) {
     body: makeNode('body'),
     activeElement: null,
     getElementById: (id) => byId[id] || null,
-    createElement: (tag) => makeNode(tag),
+    createElement: (tag) => makeNode(tag, registerId),
     createDocumentFragment: () => { const f = makeNode('fragment'); f.isFragment = true; return f; },
     querySelector: (sel) => (sel === '.card' ? cardNode : sel === '.foot' ? byId.foot : null),
     /* ⚠️ 只支持测试真正用到的两个选择器，其余返回空 —— 装置**宁缺毋滥**：
        一个"什么都匹配得上"的假 querySelector 会让 DOM 自检读出一堆假阳性。 */
     querySelectorAll: (sel) => {
-      if (sel === '#filters .chip') return byId.filters.children;
-      if (sel === '#filters .chip[role="radio"]') return byId.filters.children.filter((c) => c.getAttribute('role') === 'radio');
-      if (sel === '#filters .chip[aria-checked="true"]') return byId.filters.children.filter((c) => c.getAttribute('aria-checked') === 'true');
+      /* ⚠️ 必须**按 class 过滤**（2026-09-29）：导轨里现在除了 chip 还有「精选」按钮，
+         而真 DOM 的 `.chip` 只匹配带这个 class 的元素。
+         不过滤的话 `#filters .chip` 会把精选按钮也算成一个"类型选项"，
+         于是"chips 数量"这类断言开始说谎（我当场撞到：数出来 6 个而不是 5 个）。 */
+      const isChip = (c) => String(c && c.className ? c.className : '').split(/\s+/).indexOf('chip') >= 0;
+      if (sel === '#filters .chip') return byId.filters.children.filter(isChip);
+      if (sel === '#filters .chip[role="radio"]') return byId.filters.children.filter((c) => isChip(c) && c.getAttribute('role') === 'radio');
+      if (sel === '#filters .chip[aria-checked="true"]') return byId.filters.children.filter((c) => isChip(c) && c.getAttribute('aria-checked') === 'true');
       return [];
     },
     addEventListener: () => {},
@@ -266,7 +297,13 @@ export function makeRig(cardSrc) {
     el(id) { return byId[id]; },
     /** 读某个元素的属性（只读）。用于断言 `data-editing` 这类"状态开关" */
     attr(id, name) { const n = byId[id]; return n ? n.getAttribute(name) : null; },
-    chips() { return byId.filters.children.map((c) => ({ name: c.textContent, on: c.getAttribute('data-on') === 'on' })); },
+    /* ⚠️ 只数**类型 chip**：导轨里现在还有领域 chip 右边的「精选」按钮（2026-09-29），
+       它不是我所谓的"类型选项"。按 `.chip` 的 class 过滤，与真 DOM 的语义一致。 */
+    chips() {
+      return byId.filters.children
+        .filter((c) => String(c.className || '').split(/\s+/).indexOf('chip') >= 0)
+        .map((c) => ({ name: c.textContent, on: c.getAttribute('data-on') === 'on' }));
+    },
     rows() { return byId.list.children.map((r) => r.children.map((x) => x.textContent).join('|')); },
     rowTitles() { return byId.list.children.map((r) => (r.children[0] ? r.children[0].textContent : r.textContent)); },
     more() { return { text: byId.btnMore.textContent, disabled: byId.btnMore.disabled, hidden: byId.btnMore.hidden }; },

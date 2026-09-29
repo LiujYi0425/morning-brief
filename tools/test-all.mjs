@@ -189,6 +189,11 @@ import { IPC_CHANNELS, checkChannelParity } from '../src/shared/ipc-channels.js'
 /* 本次功能（筛选栏）：配额选取是**零依赖纯函数**，所以它能被离线穷举 ——
    这不是巧合：它 import 不了 electron，写进 main/index.js 就等于永远没有断言。 */
 import { selectByQuota, quotaOf, scopedQuota, classOf, PREF } from '../src/shared/quota.js';
+/* ★★ 领域精选（用户 2026-09-29 的需求：每个领域一个「精选」按钮）：
+   挑法在 shared/pick.js（纯函数），取数胶水在 brief-service.pickDomainToday（不碰 electron，
+   所以下面能拿临时库真跑一遍 —— 而不是只咬源码）。 */
+import { pickDiverse, DOMAIN_PICK } from '../src/shared/pick.js';
+import { pickDomainToday } from '../src/main/brief-service.js';
 
 const lines = [];
 const say = (s = '') => {
@@ -5488,6 +5493,196 @@ for (const m of MUTANTS) {
   if (!caught) survived += 1;
   say(`  ${caught ? '✓' : '✗'} ${m.id} ${m.desc} → ${caught ? '落网' : '存活！用例表是假测试'}`);
 }
+
+/* ==================================================================
+ * 第二十一层 · 领域精选（用户 2026-09-29：「每个领域加一个精选按键」）
+ * ------------------------------------------------------------------
+ * 需求原话：「对每一个领域均增加一个精选按键，点击即可查看本次筛选类型的精选资讯，
+ *            精选资讯有多少条你需要自己进行判断」。
+ *
+ * 为什么需要一个新的挑法：点领域 chip 得到的是**时间流水** —— 实测那天
+ * 「财经」219 条来自 8 个源，而时间倒序的前 15 条可能 9 条来自同一个高频源。
+ * 精选要解决的就两件事：**每个源别抢占**、**新的优先**。
+ *
+ * ⚠️ 条数（8）不是我拍的，是量出来的 —— 依据与算式在 shared/pick.js 文件头，
+ *    下面第一条断言把它钉住：以后谁改这个数，必须同时改那段理由。
+ * ================================================================== */
+say();
+say('--- 第二十一层 · 领域精选 ---');
+
+ok('★★ 精选器：上限就是 DOMAIN_PICK（8 条），而且**绝不**为了凑数放宽口径', () => {
+  const many = [];
+  for (let s = 1; s <= 6; s += 1) {
+    for (let i = 0; i < 10; i += 1) {
+      many.push({ id: s * 100 + i, source_id: s, source_name: 'S' + s, published_at: new Date(Date.UTC(2026, 8, 29, 10, i)).toISOString() });
+    }
+  }
+  const r = pickDiverse(many);
+  assert.equal(DOMAIN_PICK, 8, '精选条数变了 —— 请同时更新 shared/pick.js 文件头那段依据（实测数据）');
+  assert.equal(r.items.length, 8);
+  assert.equal(r.stats.picked, 8);
+  assert.equal(r.stats.pool, 60);
+  assert.equal(r.stats.short, false);
+  /* 6 个源、8 个位置 ⇒ 第一轮 6 条、第二轮补 2 条 ⇒ 至少 6 个源都出现了 */
+  assert.equal(r.stats.sources, 6, '轮转没有让每个源都露脸：' + JSON.stringify(r.stats.bySource));
+  /* 输入不许被改动（纯函数） */
+  assert.equal(many.length, 60);
+});
+
+ok('★★ 源轮转：一个高频源**不能**霸屏，但稀疏领域照样能填满', () => {
+  /* 场景一：A 源 20 条、B 源 3 条 —— 时间上 A 全部更新 ⇒ 纯按时间取会是 A 的 8 条 */
+  const a = [];
+  for (let i = 0; i < 20; i += 1) {
+    a.push({ id: 1000 + i, source_id: 1, source_name: 'A', published_at: new Date(Date.UTC(2026, 8, 29, 12, 0, i)).toISOString() });
+  }
+  for (let i = 0; i < 3; i += 1) {
+    a.push({ id: 2000 + i, source_id: 2, source_name: 'B', published_at: new Date(Date.UTC(2026, 8, 29, 1, 0, i)).toISOString() });
+  }
+  const r1 = pickDiverse(a);
+  assert.equal(r1.items.length, 8);
+  assert.equal(r1.stats.bySource['1'], 5, '高频源占了 ' + r1.stats.bySource['1'] + ' 条（轮转应当让它最多 5 条）');
+  assert.equal(r1.stats.bySource['2'], 3, 'B 源那 3 条应当都被选上（它一共就 3 条）');
+
+  /* 场景二：**单源领域**（房产/体育那种）—— 轮转的"第二轮"要能把它填满 8 条。
+     ⚠️ 这一条是"用每源硬上限"和"用轮转"的分水岭：硬上限会把它砍到上限以内。 */
+  const one = [];
+  for (let i = 0; i < 19; i += 1) {
+    one.push({ id: 3000 + i, source_id: 9, source_name: '独苗', published_at: new Date(Date.UTC(2026, 8, 29, 9, 0, i)).toISOString() });
+  }
+  const r2 = pickDiverse(one);
+  assert.equal(r2.items.length, 8, '单源领域只给了 ' + r2.items.length + ' 条 —— 被"每源上限"砍了');
+  assert.equal(r2.stats.sources, 1);
+});
+
+ok('★★ 三条纪律：不编造时间、确定（同输入同输出）、候选不够要说出来', () => {
+  const items = [
+    { id: 1, source_id: 1, published_at: null, fetched_at: '2026-09-29T08:00:00.000Z' },
+    { id: 2, source_id: 1, published_at: null, fetched_at: null },
+    { id: 3, source_id: 1, published_at: '2026-09-29T07:00:00.000Z' },
+  ];
+  const r = pickDiverse(items);
+  assert.equal(r.items.length, 3);
+  /* 用 fetched_at 兜底的那条排在"真正有时间"的后面、排在"两个都没有"的前面 */
+  assert.deepEqual(r.items.map((x) => x.id), [3, 1, 2], '排序兜底不对：' + r.items.map((x) => x.id).join(','));
+  /* 确定性：同一份输入两次结果逐字相同 */
+  assert.deepEqual(pickDiverse(items).items.map((x) => x.id), r.items.map((x) => x.id));
+  assert.equal(r.stats.short, true, '候选只有 3 条，short 应当是 true（界面要如实说"今天就这么多"）');
+
+  /* 空池：不抛错、不编造 */
+  const empty = pickDiverse([]);
+  assert.equal(empty.items.length, 0);
+  assert.equal(empty.stats.pool, 0);
+  assert.equal(empty.stats.short, true);
+  assert.equal(pickDiverse(null).items.length, 0, '传 null 不许抛');
+
+  /* 夹取：0 → 1，超大 → 50 */
+  assert.equal(pickDiverse(items, { limit: 0 }).items.length, 1);
+  assert.equal(pickDiverse(items, { limit: 999 }).items.length, 3);
+});
+
+ok('★★ 「不喜欢」是**沉底**不是丢掉（与配额那条路径同一口径）', () => {
+  const mk = (n, dis) => ({ id: n, source_id: n, published_at: new Date(Date.UTC(2026, 8, 29, 10, n)).toISOString(), dis });
+  /* ⚠️ 被标成"不喜欢"的三条必须放在**最新**那一端：时间倒序它们本来排最前，
+     只有"沉底"这条规则能把它们压下去。
+     （第一版我把它们放在最旧的位置 —— 于是不沉底也轮不到它们，
+      变异体当场存活：夹具没咬住判据，看起来像断言失效。） */
+  const many = Array.from({ length: 12 }, (_, i) => mk(i, i >= 9));
+  const r1 = pickDiverse(many, { limit: 8, isDisliked: (it) => !!it.dis });
+  assert.equal(r1.items.length, 8);
+  assert.equal(r1.stats.dislikedPicked, 0, '够数的时候不该出现"不喜欢"的内容（它们是最新的三条，不沉底就必然被选上）');
+  assert.equal(r1.items.some((it) => it.dis), false);
+  /* 候选不够时（只有 2 条干净的 + 3 条不喜欢的）⇒ 不喜欢的仍然要补上（"少放但不会没有"） */
+  const few = [mk(0, false), mk(1, false), mk(9, true), mk(10, true), mk(11, true)];
+  const r2 = pickDiverse(few, { limit: 8, isDisliked: (it) => !!it.dis });
+  assert.equal(r2.items.length, 5, '不足上限时应当把不喜欢的也补上（而不是留空位）');
+  assert.equal(r2.stats.dislikedPicked, 3);
+});
+
+await aok('★★★ 领域精选的取数（真库）：只今天、只这个领域、够 8 条、来自多个源', async () => {
+  /* ⚠️ 这条是**行为**断言而不是源码扫描：pickDomainToday 不碰 electron，
+     所以能拿临时库真跑一遍 —— 那正是它住在 brief-service 而不是 index.js 的原因。 */
+  const f = tmpDbFile('pick-domain');
+  const db = await openDb(f);
+  const now = new Date().toISOString();
+  const runId = startRun(db, 'manual', now) || 1;
+  /* 两个类别 + 两个源：领域A（3 个源共 30 条）+ 领域B（1 个源 5 条） */
+  upsertCategory(db, '领域·测试A', 0, now);
+  upsertCategory(db, '领域·测试B', 1, now);
+  const catA = listCategories(db).find((c) => c.name === '领域·测试A').id;
+  const catB = listCategories(db).find((c) => c.name === '领域·测试B').id;
+  upsertSources(db, [
+    { feedUrl: 'https://e.com/1', name: '源一', kind: 'rss' },
+    { feedUrl: 'https://e.com/2', name: '源二', kind: 'rss' },
+    { feedUrl: 'https://e.com/3', name: '源三', kind: 'rss' },
+  ], now);
+  const srcIds = listSources(db).map((s) => s.id);
+  const todayIso = new Date();
+  todayIso.setHours(0, 0, 0, 0);
+  const sinceIso = todayIso.toISOString();
+  /* ⚠️ 条目时间**从 sinceIso 加偏移**算出来，而不是用 Date.UTC(本地日期的 UTC 部分) ——
+     后者在 UTC+8 会把"本地今天的 10:00"算成**昨天**的 10:00Z，
+     于是所有条目都落在 sinceIso 之前、候选池变成 0（我第一次就是这么错的）。
+     从边界加偏移没有任何时区解释空间。 */
+  const at = (mins) => new Date(new Date(sinceIso).getTime() + mins * 60000).toISOString();
+  let n = 0;
+  for (let s = 0; s < 3; s += 1) {
+    for (let i = 0; i < 10; i += 1) {
+      n += 1;
+      const r = insertItem(db, { title: `A${s}-${i}`, url: `https://e.com/a${s}/${i}`, publishedAt: at(600 + s * 60 + i), sourceId: srcIds[s], sourceName: '源' + (s + 1) }, runId, now);
+      const id = r && r.id != null ? r.id : r;
+      db.prepare('INSERT OR IGNORE INTO item_category (item_id, category_id) VALUES (?, ?)').run(id, catA);
+    }
+  }
+  for (let i = 0; i < 5; i += 1) {
+    const r = insertItem(db, { title: `B${i}`, url: `https://e.com/b/${i}`, publishedAt: at(540 + i), sourceId: srcIds[0], sourceName: '源一' }, runId, now);
+    const id = r && r.id != null ? r.id : r;
+    db.prepare('INSERT OR IGNORE INTO item_category (item_id, category_id) VALUES (?, ?)').run(id, catB);
+  }
+  /* 一条**昨天**的条目挂到 A 上：精选必须把它排除（"今天这个领域"） */
+  const y = new Date(new Date(sinceIso).getTime() - 26 * 3600 * 1000).toISOString();
+  const oldR = insertItem(db, { title: '昨天的', url: 'https://e.com/old', publishedAt: y, sourceId: srcIds[2], sourceName: '源三' }, runId, now);
+  db.prepare('INSERT OR IGNORE INTO item_category (item_id, category_id) VALUES (?, ?)').run(oldR && oldR.id != null ? oldR.id : oldR, catA);
+
+  const a = pickDomainToday(db, { categoryIds: [catA], sinceIso });
+  assert.equal(a.items.length, 8, '领域A 应当给 8 条，实际 ' + a.items.length + ' · stats=' + JSON.stringify(a.stats));
+  assert.equal(a.stats.pool, 30, '候选池应当是今天那 30 条（不含昨天那条），实际 ' + a.stats.pool);
+  assert.equal(a.stats.sources, 3, '3 个源都该露脸');
+  assert.equal(a.items.some((it) => it.title === '昨天的'), false, '把昨天的条目挑进来了 —— 精选只承诺"今天这个领域"');
+  assert.equal(a.items.every((it) => /^A/.test(it.title)), true, '挑进了别的领域的条目：' + a.items.map((it) => it.title).join(','));
+
+  const b = pickDomainToday(db, { categoryIds: [catB], sinceIso });
+  assert.equal(b.items.length, 5, '领域B 今天就 5 条 ⇒ 给 5 条');
+  assert.equal(b.stats.short, true);
+  assert.equal(b.stats.sources, 1);
+
+  /* 「不喜欢」某个类别 ⇒ 那个类别的内容沉底（这里：给 A 的内容打上不喜欢的标签） */
+  const prefs = new Map([[String(catA), -1]]);
+  const c = pickDomainToday(db, { categoryIds: [catA], sinceIso, prefs });
+  assert.equal(c.items.length, 8, '沉底之后仍然要给满 8 条（不是丢掉）');
+  db.close();
+});
+
+ok('★★ 领域精选在主进程的接线：只认单类别、清掉分页、并把口径如实回给界面', () => {
+  /* ⚠️ main/index.js 顶层 import electron ⇒ 离线加载不了，只能咬源码。
+     行为那一半（怎么挑）已经在上面用真库跑过了；这里守的是**接线**：
+     少了这几句，用户看到的是"界面写着精选、列表是流水"或
+     "点展开更多往精选里追加了没被挑中的条目"。 */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  assert.ok(/pick = false \} = \{\}/.test(src), 'buildBrief 不再接受 pick 参数 ⇒ 界面的意图传不进来');
+  assert.ok(
+    /const pickIds = pick && categoryIds && categoryIds\.length === 1 \? categoryIds : null;/.test(src),
+    '精选的判据变了（必须**明确要求 pick 且只筛一个类别** —— 多个类别时"精选"没有意义）',
+  );
+  assert.ok(/pickDomainToday\(/.test(src), '没有调用 pickDomainToday（挑选必须在 brief-service 那一层）');
+  const i = src.indexOf('if (pickIds) {');
+  assert.ok(i > 0, '找不到精选分支');
+  const body = src.slice(i, i + 900).replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(/hasMore = false;/.test(body), '精选不许带 hasMore ⇒ 展开更多会把没被挑中的条目追加进这份精选');
+  assert.ok(/nextCursor = null;/.test(body), '精选不该留游标');
+  assert.ok(/pickInfo = sel\.stats;/.test(body), '没有把挑选口径（候选池/条数/源数）记下来 ⇒ 界面说不出"从多少条里挑的"');
+  assert.ok(/pickView: !!pickInfo,/.test(src), '返回值里没有 pickView ⇒ 界面不知道这是精选');
+  assert.ok(/pick: DOMAIN_PICK,/.test(src), '返回值里没有 pick（口径常量）⇒ 界面无法解释"最多 8 条"');
+});
 
 /* ================================================================== */
 say();

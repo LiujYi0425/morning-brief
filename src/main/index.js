@@ -57,6 +57,9 @@ import {
   upsertSources,
 } from '../store/db.js';
 import { selectByQuota, quotaOf, scopedQuota } from '../shared/quota.js';
+/* ★ 领域精选的"挑法"（纯函数，可离线穷举）—— 用户 2026-09-29 的需求：
+   每个领域一个「精选」按钮。挑多少条、怎么保证不出现"一个源刷屏"全在那边。 */
+import { pickDiverse, DOMAIN_PICK } from '../shared/pick.js';
 /* ★ 「添加源」要复用这两件**已经存在**的东西，不许另写一份：
      · `validateExternalUrl` —— 协议白名单（安全边界，见 url-guard.js）
      · `fetchText` / `parseFeed` —— 与正式抓取同一个抓取器与同一个解析器
@@ -73,7 +76,7 @@ import { DEFAULT_ENDPOINT, DEFAULT_MODEL, DEFAULT_PICK_COUNT } from '../shared/a
 import { getBrief as getStoredBrief } from '../store/db.js';
 import { countUnreadToday } from '../store/db.js';
 import { readKey, status as keyStatus, setKey, clearKey } from './keystore.js';
-import { generateBrief, readAiConfig, writeAiConfig, todayUsage } from './brief-service.js';
+import { generateBrief, readAiConfig, writeAiConfig, todayUsage, pickDomainToday } from './brief-service.js';
 import { createAiClient, testConnection } from '../shared/ai/client.js';
 import { fetchText } from '../ingest/fetch-feeds.js';
 import { parseFeed } from '../ingest/feed-parse.js';
@@ -406,6 +409,11 @@ const PAGE = Number(process.env.MB_PAGE || 15);
 /** "看今天全部"模式一次最多取多少条（上限 200 由 db.queryItems 夹取） */
 const ALL_LIMIT = Number(process.env.MB_ALL_LIMIT || 120);
 
+/** ★ 领域精选：候选池取多大（挑 8 条之前先看多少条）。
+ *  200 与 db.queryItems 的上限一致 —— 实测那天最大的领域（财经 219 条）也基本能装下，
+ *  而且它只是一次带索引的查询，不是分页。 */
+const PICK_POOL = 200;
+
 /**
  * 有偏好时，候选池取 `want × 这个倍数`（再与 200 夹取）。
  *
@@ -524,7 +532,7 @@ async function generateTodayBrief(force) {
 }
 
 /** 组一份"当前简报"给界面 */
-function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } = {}) {
+function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false, pick = false } = {}) {
   const d = getDb();
   /* ⚠️ 夹取：`limit` 来自渲染层，属于**请求参数**，不能直接当口径值用 */
   const want = Math.max(1, Math.min(200, Number.isFinite(Number(limit)) ? Math.round(Number(limit)) : CURATED));
@@ -549,7 +557,24 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
   const hasPref = [...prefs.values()].some((p) => p !== 0);
   const pool = hasPref ? Math.min(200, Math.max(want * QUOTA_POOL_FACTOR, want + 60)) : want;
 
-  const page = queryItems(d, { limit: pool, categoryIds, todayOnly: !!todayOnly, sinceIso });
+  /* ★★ 领域精选（用户 2026-09-29 的需求：每个领域一个「精选」按钮）。
+   *
+   * 走的是**另一条选取口径**：常规路径按"配额"（少放但不能没有），
+   * 精选按"轮转"（每个源别抢占）—— 两者的目标不同，混在一起会互相打架。
+   * 判据只有一条：**明确要求 pick、而且正好筛了一个类别**。
+   *   · 多个类别时不认（"每天十几个领域的精选"没有意义）；
+   *   · `todayOnly` 强制打开：精选说的是"今天这个领域值得看的几条"。
+   *
+   * ⚠️ 这里仍然照常走一遍常规取数（limit 压到 1），因为**总览数字与返回结构
+   *    只有一处口径**；精选再在候选池上重挑一次并覆盖 items。
+   *    多一次极小的查询，换的是"不存在第二套取数口径"。 */
+  const pickIds = pick && categoryIds && categoryIds.length === 1 ? categoryIds : null;
+  const page = queryItems(d, {
+    limit: pickIds ? 1 : pool,
+    categoryIds,
+    todayOnly: pickIds ? true : !!todayOnly,
+    sinceIso,
+  });
 
   let items = page.rows;
   let hasMore = page.hasMore;
@@ -646,6 +671,28 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
         : null;
   }
 
+  /* ★★ 领域精选：在候选池上重挑一次（判据与理由见上面 pickIds 那一段）。
+   * ⚠️ `hasMore`/`nextCursor` 必须一起清掉：留着的话「展开更多」会往这份精选里
+   *    追加**没被挑中**的条目，而用户以为那是同一份东西（与简报视图同一条纪律）。
+   * ⚠️ 候选池用 `todayOnly: true` **硬收口到今天**：精选的承诺是"今天这个领域的",
+   *    不收口就会把前几天的高分条目挑进来，而用户看不出那是旧的。 */
+  let pickInfo = null;
+  if (pickIds) {
+    /* 挑选本身住在 brief-service（不碰 electron ⇒ 能被离线断言真跑一遍），
+       这里只负责"何时走这条路"与"返回值怎么摆"。 */
+    const sel = pickDomainToday(d, { categoryIds: pickIds, sinceIso, prefs, limit: DOMAIN_PICK, poolLimit: PICK_POOL });
+    items = sel.items;
+    pickInfo = sel.stats;
+    hasMore = false;
+    nextCursor = null;
+    seenIds = null;
+    quotaCounts = null;
+    console.log(
+      `[pick] 领域精选：类别 ${pickIds.join('/')} —— 候选 ${pickInfo.pool} 条，挑了 ${pickInfo.picked} 条 ` +
+        `（${pickInfo.sources} 个源${pickInfo.short ? '，候选不够' : ''}）`,
+    );
+  }
+
   const health = sourceHealth(d);
   const lastIngest = getMeta(d, 'last_ingest_at');
   /* ★ "今天到底抓到没有"（本轮修复的另一半）。
@@ -698,6 +745,13 @@ function buildBrief({ limit = CURATED, categoryIds = null, todayOnly = false } =
     hasMore: briefView ? false : hasMore,
     nextCursor: briefView ? null : nextCursor,
     briefView,
+    /* ★ 领域精选（2026-09-29）：`pickView` 告诉界面"这一屏是某个领域的精选"，
+       `pickInfo` 让它能如实说出"从今天 N 条里挑了 M 条、来自 K 个源" ——
+       说不出这句的话，用户会把"只给 8 条"读成"我的条目丢了"。
+       `pick` 与 `curated` 一样是**口径常量**，不是本次请求的回显。 */
+    pickView: !!pickInfo,
+    pick: DOMAIN_PICK,
+    pickInfo,
     todayTotal,
     unreadToday,
     filteredTotal,

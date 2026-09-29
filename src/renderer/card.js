@@ -144,6 +144,15 @@
   /* 渲染：全部从 derive(view) 取值，分块记忆化（避免拖动滑动条时重绘列表）  */
   /* ================================================================== */
   var memo = { chips: null, slider: null, list: null, listArr: null, foot: null, head: null, health: null, ai: null };
+
+  /* ★ 导轨上的两类按钮（2026-09-29 加的「精选」按钮让这件事不能再靠 childIndex）：
+       · railChips   —— 只有类型 chip（滑动条 / 方向键 / 滚进视野都按它算下标）
+       · railButtons —— chip + 它右边那个「精选」按钮，**按拼接顺序**编号（焦点还给它用）
+     ⚠️ 为什么不就地用 `elFilters.children[i]`：领域 chip 右边多了一个按钮之后，
+        同一个下标会指到另一个元素上 —— 表现是"按方向键换类型时焦点跳错、
+        或者高亮滚不进视野"，而这种错位在只有 3 个 chip 的测试装置里**看不出来**。 */
+  var railChips = [];
+  var railButtons = [];
   var lastDerived = null;
 
   function renderHealth(d) {
@@ -206,23 +215,32 @@
    *   真机反馈"一收起类型选项就没了"的病根就是旧版把这个判断放在了 CSS 里。
    */
   function renderChips(d) {
-    var sig = d.chips.map(function (c) { return c.id + ':' + c.name + ':' + (c.on ? 1 : 0) + ':' + c.pref; }).join('|');
+    /* ★ 签名要包含 pickable/picking：否则"点了精选按钮之后 chip 上的高亮状态"
+       不会触发重绘（memo 认为一切照旧）—— 表现是"点了没反应"。 */
+    var sig = d.chips
+      .map(function (c) {
+        return c.id + ':' + c.name + ':' + (c.on ? 1 : 0) + ':' + c.pref + ':' + (c.pickable ? 1 : 0) + ':' + (c.picking ? 1 : 0);
+      })
+      .join('|');
     if (memo.chips === sig) return;
     var prevIndex = memo.chipsIndex;
     memo.chips = sig;
     memo.chipsIndex = d.activeIndex;
 
     /* ★ 焦点保持（R4 无障碍契约：不许因为重绘把焦点丢到 body）。
-       重绘会重建整排 chip，而重建时若焦点正在其中某个 chip 上，
+       重绘会重建整排按钮，而重建时若焦点正在其中某一个上，
        浏览器会把 activeElement 掉回 <body> —— 键盘用户就此"迷路"。
-       ⇒ 先记住焦点在第几个，重建完再还回去。 */
-    var focusIdx = -1;
+       ⇒ 先记住焦点在第几个**导轨按钮**上，重建完再还回去。
+       （用 data-rail 而不是 chip 下标：见上面 railChips/railButtons 的说明。） */
+    var focusRail = -1;
     if (document.activeElement && elFilters.contains(document.activeElement)) {
-      focusIdx = Number(document.activeElement.dataset.index);
-      if (!Number.isFinite(focusIdx)) focusIdx = -1;
+      focusRail = Number(document.activeElement.dataset && document.activeElement.dataset.rail);
+      if (!Number.isFinite(focusRail)) focusRail = -1;
     }
 
     elFilters.textContent = '';
+    railChips = [];
+    railButtons = [];
     d.chips.forEach(function (c, i) {
       var b = el('button', 'chip', c.name);
       b.type = 'button';
@@ -233,6 +251,7 @@
       /* roving tabindex：整排在 Tab 序列里只占一格（APG Radio Group） */
       b.tabIndex = c.on ? 0 : -1;
       b.dataset.index = String(i);
+      b.dataset.rail = String(railButtons.length);
       if (c.on) b.setAttribute('data-on', 'on');
       /* ★ 偏好标记（本次功能）：让"这个类型是我不喜欢的"在导轨上就看得见。
          用户设完之后如果界面上完全没有痕迹，"设了"与"没设"在他眼里是一样的。
@@ -245,9 +264,36 @@
         dispatch({ type: 'setCategory', id: c.id });
       });
       elFilters.appendChild(b);
+      railChips.push(b);
+      railButtons.push(b);
+
+      /* ★★ 领域精选（用户 2026-09-29 的需求）：每个「领域·」chip 右边挂一个
+         「精选」按钮 —— 点它 = 看**这个领域**今天最值得看的几条
+         （挑选判据在 shared/pick.js：每个源轮着来、新的优先）。
+         ⚠️ 为什么做成 chip 的**兄弟节点**而不是嵌套：HTML 不许 button 套 button；
+            而嵌在 chip 里的假按钮只能靠坐标命中，那种东西离线考不了。
+         ⚠️ 无障碍取舍（如实记下）：它住在 role=radiogroup 的容器里，
+            严格说单选组里不该混别的控件。这里保留了按钮语义与 Tab 可达性
+            （没有把它设成 tabindex=-1 藏起来），因为"键盘用户点不到精选"
+            比"读屏软件念到一个多余的按钮"更糟。 */
+      if (c.pickable) {
+        var pb = el('button', 'chippick', '精选');
+        pb.type = 'button';
+        pb.id = 'pick-' + i;
+        pb.setAttribute('aria-label', '「' + c.name + '」的精选');
+        pb.title = '看「' + c.name + '」今天最值得看的几条（每个源都会照顾到）';
+        pb.dataset.rail = String(railButtons.length);
+        if (c.picking) pb.setAttribute('data-on', 'on');
+        pb.addEventListener('click', function () {
+          api.log('[card] 点击「' + c.name + '」的精选');
+          dispatch({ type: 'pickCategory', id: c.id });
+        });
+        elFilters.appendChild(pb);
+        railButtons.push(pb);
+      }
     });
 
-    if (focusIdx >= 0 && elFilters.children[focusIdx]) elFilters.children[focusIdx].focus();
+    if (focusRail >= 0 && railButtons[focusRail] && railButtons[focusRail].focus) railButtons[focusRail].focus();
 
     /* 选中项滚进视野（横向导轨可能装不下全部 chip）。
        ⚠️ 不用 scrollIntoView：它会连带滚动祖先，在一个 overflow:hidden 的
@@ -257,7 +303,9 @@
 
   function scrollChipIntoView(index) {
     if (!elFilters || rail.moved) return;
-    var node = elFilters.children[index];
+    /* ⚠️ 用 railChips 而不是 elFilters.children：领域 chip 右边多了「精选」按钮之后，
+       同一个下标会指到别的元素上（高亮滚不进视野，而测试装置里 chip 少、看不出来）。 */
+    var node = railChips[index];
     if (!node) return;
     var left = node.offsetLeft;
     var w = node.offsetWidth;
@@ -976,6 +1024,10 @@
             limit: opts.limit,
             categoryIds: opts.categoryIds || undefined,
             todayOnly: !!opts.todayOnly,
+            /* ★ 领域精选（本次功能）：把"这一屏要精选"的意图如实带给主进程 ——
+               漏了它，服务端就按常规口径返回该领域的时间流水，
+               而界面标题写着"精选"，两边各说各话。 */
+            pick: !!opts.pick,
           });
           if (VM.fetchKey(view) !== key) continue; // 意图已变 ⇒ 这份结果作废
           fetchIO.done = key;
@@ -1593,7 +1645,8 @@
     var n = d.chips.length;
     var next = (d.activeIndex + delta + n) % n;
     dispatch({ type: 'setCategoryIndex', index: next });
-    var node = elFilters && elFilters.children[next];
+    /* 焦点落在**类型 chip**上（不是它右边那个「精选」按钮）：方向键的语义是"换类型" */
+    var node = railChips[next];
     if (node && node.focus) node.focus();
   }
 

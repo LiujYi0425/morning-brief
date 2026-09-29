@@ -509,6 +509,61 @@ function checkAll(VMx) {
     }
   }
 
+  /* ---------- I5 领域精选（2026-09-29）----------
+   * ⚠️ 这三条必须住在这里（而不是某个单独的 ok 用例里）：
+   *    **变异体的抓不抓得住是按 checkAll 判的** —— 写在外面的断言咬不到 M18/M19/M20。
+   *    （我第一版就把它们写成了独立用例，结果三个变异体全活着。） */
+  {
+    /* (a) 「精选」按钮只允许长在 领域· 上 —— 用一个**非领域**类别来验。 */
+    const mixed = VMx.reduce(VMx.createView(), {
+      type: 'categories',
+      list: [{ id: 91, name: '性质·快讯' }, { id: 92, name: '领域·财经' }],
+    });
+    const chips = VMx.derive(mixed).chips;
+    for (const c of chips) {
+      if (c.pickable && String(c.name).indexOf('领域·') !== 0) {
+        fail('I5', '非领域 chip 带上了精选按钮：' + c.name);
+      }
+    }
+    const fin = chips.find((c) => c.name === '领域·财经');
+    if (!fin || !fin.pickable) fail('I5', '领域 chip 没有精选按钮 —— 用户要的"每个领域一个"没做到');
+
+    /* (b) 点精选 ⇒ 三件事同时成立：类别跟随、取数走 pick、退出"看今天全部" */
+    const pickedState = VMx.reduce(VMx.reduce(mixed, { type: 'setShowingAll', on: true }), {
+      type: 'pickCategory',
+      id: 92,
+    });
+    if (String(pickedState.pickedCategory) !== '92') fail('I5', 'pickCategory 没设上 pickedCategory');
+    if (String(pickedState.activeCategory) !== '92') fail('I5', 'pickCategory 没把类别设成那个领域');
+    if (pickedState.showingAll) fail('I5', '点精选之后仍然是"看今天全部"（两种口径同时成立）');
+    const pd = VMx.derive(pickedState);
+    if (!pd.pick || pd.pick.active !== true) fail('I5', 'derive 没把"正在看精选"表达出来');
+    if (pd.fetch.pick !== true) fail('I5', '精选模式下取数没有带 pick ⇒ 服务端会按流水返回');
+    if (!pd.fetch.categoryIds || pd.fetch.categoryIds.length !== 1 || String(pd.fetch.categoryIds[0]) !== '92') {
+      fail('I5', '精选模式没有只筛那个领域：' + JSON.stringify(pd.fetch.categoryIds));
+    }
+    if (pd.fetch.todayOnly !== true) fail('I5', '精选模式没有收口到今天');
+    const onChip = pd.chips.find((c) => String(c.id) === '92');
+    if (!onChip || onChip.picking !== true) fail('I5', 'chip 上没有"正在看这个领域的精选"的记号');
+    /* 幂等 */
+    const twice = VMx.reduce(pickedState, { type: 'pickCategory', id: 92 });
+    if (VMx.fetchKey(twice) !== VMx.fetchKey(pickedState)) fail('I5', '同一个领域连点两次变成了两次不同的取数');
+    /* (c) 取数身份必须跟着精选变（否则点了没反应） */
+    const plain = VMx.reduce(mixed, { type: 'setCategory', id: 92 });
+    if (VMx.fetchKey(plain) === VMx.fetchKey(pickedState)) fail('I5', '流水与精选的 fetchKey 相同 ⇒ 界面不会重取');
+    /* (d) 退出姿势：点 chip / 看这个领域的全部 / 滑动条 */
+    for (const [what, act] of [
+      ['点 chip', { type: 'setCategory', id: 92 }],
+      ['看这个领域的全部', { type: 'toggleAll' }],
+      ['滑动条', { type: 'setCategoryIndex', index: 1 }],
+    ]) {
+      if (VMx.reduce(pickedState, act).pickedCategory != null) fail('I5', what + ' 没能退出精选模式');
+    }
+    /* (e) expand 不许碰它（正交） */
+    const expanded = VMx.reduce(pickedState, { type: 'expand', on: true });
+    if (String(expanded.pickedCategory) !== '92') fail('I5', 'expand 把精选模式弄丢了');
+  }
+
   return bad;
 }
 
@@ -561,6 +616,33 @@ function stateProblems(VMx, s, where) {
   if (d.buttons.more.visible && d.buttons.more.enabled && !d.buttons.more.label) bad.push('可达 ' + where + '"展开更多"可点但没有文案');
   if (typeof d.headline.text !== 'string' || !d.headline.text.length) bad.push('可达 ' + where + ' 总览句为空');
   if (d.curatedLimit < VMx.CURATED_MIN || d.curatedLimit > VMx.CURATED_MAX) bad.push('可达 ' + where + ' curatedLimit 越界');
+
+  /* ★★ 领域精选的三条不变量（2026-09-29）——
+     变异体的"抓不抓得住"是拿这个函数判的，所以规则写在这里才算数：
+       ① 「精选」按钮只允许长在 领域· 上（别的维度的 chip 不该有）；
+       ② 处于精选模式时，取数必须是 pick + 单类别 + 收口今天
+          （漏掉 pick ⇒ 界面写着精选、服务端返回流水）；
+       ③ 精选模式与"看今天全部"互斥（同时成立就说不清按哪个取数）。
+     ⚠️ 只在这个状态真的可达时才判 —— 起点是"精选 + 看今天全部"这种组合
+        本来就不该存在；这里守的是"任何**可达**状态都不许自相矛盾"。 */
+  const picked = d.pick && d.pick.categoryId != null;
+  for (const c of d.chips) {
+    if (c.pickable && String(c.name).indexOf('领域·') !== 0) {
+      bad.push('可达 ' + where + ' 非领域 chip 带上了精选按钮：' + c.name);
+    }
+    if (picked && c.picking && String(c.id) !== String(d.pick.categoryId)) {
+      bad.push('可达 ' + where + ' chip 的 picking 与 pick.categoryId 不一致：' + c.name);
+    }
+  }
+  if (picked) {
+    const f = d.fetch;
+    if (!f || f.pick !== true) bad.push('可达 ' + where + ' 精选模式下取数没有带 pick');
+    if (!f || !f.categoryIds || f.categoryIds.length !== 1 || String(f.categoryIds[0]) !== String(d.pick.categoryId)) {
+      bad.push('可达 ' + where + ' 精选模式没有只筛那个领域');
+    }
+    if (!f || f.todayOnly !== true) bad.push('可达 ' + where + ' 精选模式没有收口到今天');
+    if (s.showingAll) bad.push('可达 ' + where + ' 精选与"看今天全部"同时成立');
+  }
   return bad;
 }
 
@@ -582,11 +664,21 @@ const MUTANTS = [
   ],
   [
     'M4 正交破坏：setCategory 顺手清掉 showingAll（旧代码就是这样）',
-    (s) => s.replace('return copy(v, { activeCategory: a.id == null ? null : String(a.id) });', 'return copy(v, { activeCategory: a.id == null ? null : String(a.id), showingAll: false });'),
+    /* ⚠️ 锚点跟着源码走：`setCategory` 2026-09-29 多了"顺手退出领域精选"
+       （`pickedCategory: null`）。这里注入的仍然是**当年那个真正的缺陷** ——
+       点 chip 顺手改了 showingAll，于是"点 AI → 看今天全部 → 点 AI"
+       会把用户的"看今天全部"意图吃掉。 */
+    (s) => s.replace(
+      'return copy(v, { activeCategory: a.id == null ? null : String(a.id), pickedCategory: null });',
+      'return copy(v, { activeCategory: a.id == null ? null : String(a.id), pickedCategory: null, showingAll: false });',
+    ),
   ],
   [
     'M5 去掉幂等：setCategory 变回 toggle',
-    (s) => s.replace('return copy(v, { activeCategory: a.id == null ? null : String(a.id) });', 'var id = a.id == null ? null : String(a.id);\n      return copy(v, { activeCategory: v.activeCategory === id ? null : id });'),
+    (s) => s.replace(
+      'return copy(v, { activeCategory: a.id == null ? null : String(a.id), pickedCategory: null });',
+      'var id = a.id == null ? null : String(a.id);\n      return copy(v, { activeCategory: v.activeCategory === id ? null : id, pickedCategory: null });',
+    ),
   ],
   [
     'M6 取数被窗口大小污染：fetchKey 掺进 expanded',
@@ -616,7 +708,22 @@ const MUTANTS = [
     'M11 滑动条序号与选中项脱钩',
     (s) => s.replace('value: activeIndex,', 'value: 0,'),
   ],
+  /* ── 领域精选（2026-09-29）：状态机这一侧最容易做坏的三处 ── */
   [
+    'M18 取数漏掉 pick：界面写着"精选"、服务端按流水返回',
+    (s) => s.replace('      pick: picking,\n    };', '      pick: false,\n    };'),
+  ],
+  [
+    'M19 每个 chip 都长精选按钮（连"性质/形态"这些维度也长）',
+    (s) => s.replace("        pickable: cname.indexOf('领域·') === 0,", '        pickable: true,'),
+  ],
+  [
+    'M20 点精选不清"看今天全部"⇒ 两种口径同时成立（列表到底按哪个取数说不清）',
+    (s) => s.replace(
+      'return copy(v, { activeCategory: id, pickedCategory: id, showingAll: false });',
+      'return copy(v, { activeCategory: id, pickedCategory: id });',
+    ),
+  ],  [
     'M12 乱序保护失效：晚到的旧响应可以覆盖新响应',
     (s) => s.replace('if (a.seq != null && num(a.seq) < v.dataSeq) return v;', 'if (false) return v;'),
   ],
@@ -669,6 +776,107 @@ function ok(name, fn) {
 say('┌─ 晨报机 · 交互一致性离线考裁判 ─────────────────────────');
 say('│ 纯 Node：不联网、不需要 Electron');
 say('└────────────────────────────────────────────────────────');
+
+/* ==================================================================
+ * 领域精选（用户 2026-09-29：每个领域一个「精选」按钮）
+ * ------------------------------------------------------------------
+ * ⚠️ 这一组是**状态机层**的断言：一个动作该改哪几个字段、取数身份会不会变。
+ *    最容易做坏的两件事都在这里：
+ *      ① `fetchKey` 里漏掉 `pick` ⇒ "领域流水 → 该领域精选"算出同一个 key
+ *         ⇒ 界面认为数据没变、**根本不重取**（点了按钮没反应，日志里也没异常）；
+ *      ② 「精选」被卷进 `showingAll` 那一个布尔量 ⇒ 点一下 chip 想回普通列表，
+ *         结果切成了"看今天全部"。
+ * ================================================================== */
+{
+  const cats = [
+    { id: 1, name: '领域·财经', pref: 0 },
+    { id: 2, name: '性质·快讯', pref: 0 },
+    { id: 3, name: '领域·科技', pref: 0 },
+  ];
+  const base = VM.reduce(VM.createView(), { type: 'categories', list: cats });
+
+  ok('★★ 「精选」按钮只长在「领域·」chip 上（别的维度一个都不给）', () => {
+    const d = VM.derive(base);
+    const byName = {};
+    for (const c of d.chips) byName[c.name] = c;
+    assert.equal(byName['全部'].pickable, false, '「全部」不该带精选按钮');
+    assert.equal(byName['领域·财经'].pickable, true);
+    assert.equal(byName['领域·科技'].pickable, true);
+    assert.equal(byName['性质·快讯'].pickable, false, '「性质·快讯」被当成了领域 —— 用户要的是每个领域一个');
+    for (const c of d.chips) assert.equal(c.picking, false, '初始状态不该有任何 chip 处于"正在看精选"');
+  });
+
+  ok('★★ 点精选：一次动作同时摆正三件事（类别 / 模式 / 退出"看今天全部"）', () => {
+    /* 先进入一个"看起来最容易被精选搞混"的起点：全部模式 + 选了财经 */
+    let v = VM.reduce(base, { type: 'setShowingAll', on: true });
+    v = VM.reduce(v, { type: 'setCategory', id: 1 });
+    assert.equal(VM.derive(v).allMode, true, '前置条件：应当处在"看今天全部"');
+
+    const p = VM.reduce(v, { type: 'pickCategory', id: 1 });
+    const d = VM.derive(p);
+    assert.equal(p.pickedCategory, '1', 'pickedCategory 没被设上 ⇒ 取数不会走精选');
+    assert.equal(p.activeCategory, '1', 'chip 高亮没跟着走 ⇒ 界面会显示成"全部"的精选');
+    assert.equal(p.showingAll, false, '「看今天全部」没被退出 ⇒ 两种口径同时成立');
+    assert.equal(d.pick.active, true);
+    assert.equal(d.chips.find((c) => c.id === '1').picking, true, 'chip 上没有"正在看这个领域的精选"的记号');
+    /* 幂等：连点两次结果一样 */
+    const again = VM.reduce(p, { type: 'pickCategory', id: 1 });
+    assert.equal(again.pickedCategory, '1');
+    assert.equal(VM.fetchKey(again), VM.fetchKey(p), '同一个领域连点两次变成了两次不同的请求');
+  });
+
+  ok('★★★ 取数身份必须跟着精选变（漏了就"点了没反应"）', () => {
+    const plain = VM.reduce(base, { type: 'setCategory', id: 1 });   // 财经的流水
+    const pickd = VM.reduce(plain, { type: 'pickCategory', id: 1 }); // 财经的精选
+    assert.notEqual(VM.fetchKey(plain), VM.fetchKey(pickd), '★ 流水与精选的 fetchKey 相同 ⇒ 界面不会重取，用户点了没反应');
+    const f = VM.derive(pickd).fetch;
+    assert.equal(f.pick, true, 'fetch 里没有 pick ⇒ 服务端不会换选取口径（界面标题写着精选、列表是流水）');
+    /* ⚠️ 比字符串而不是 deepEqual：`f.categoryIds` 是**沙箱那个 realm** 里的数组，
+       它的原型与测试进程的不是同一个 ⇒ `assert.deepStrictEqual` 会判不相等
+       （内容一样也过不去）。这条踩过一次，别改回去。 */
+    assert.equal(f.categoryIds.map(String).join(','), '1', '精选的类别没带上：' + JSON.stringify(f));
+    assert.equal(f.todayOnly, true, '精选没有收口到今天 ⇒ 会把前几天的条目挑进来');
+    /* 反面：普通列表**不许**带 pick（否则每个领域点进去都变成精选） */
+    assert.equal(VM.derive(plain).fetch.pick, false, '普通列表带上了 pick');
+  });
+
+  ok('★★ 退出姿势：点 chip / 点"看这个领域的全部" / 滑滑动条都要退出精选', () => {
+    const pickd = VM.reduce(base, { type: 'pickCategory', id: 1 });
+    assert.equal(VM.reduce(pickd, { type: 'setCategory', id: 1 }).pickedCategory, null, '点回同一个 chip 没能退出精选（用户没有别的返回键）');
+    assert.equal(VM.reduce(pickd, { type: 'toggleAll' }).pickedCategory, null, '「看这个领域的全部」没退出精选');
+    assert.equal(VM.reduce(pickd, { type: 'setCategoryIndex', index: 2 }).pickedCategory, null, '滑动条换类型没退出精选');
+    /* expand 永远不碰它（I3 正交） */
+    const expanded = VM.reduce(pickd, { type: 'expand', on: true });
+    assert.equal(expanded.pickedCategory, '1', '收起/展开把精选模式弄丢了');
+    assert.equal(VM.fetchKey(expanded), VM.fetchKey(pickd), '窗口大小影响了查询口径');
+  });
+
+  ok('★★ 总览句要**如实**说清"从多少条里挑的、来自几个源"（说不清就会被读成丢条目）', () => {
+    const pickd = VM.reduce(base, { type: 'pickCategory', id: 1 });
+    const v = VM.reduce(pickd, { type: 'data', seq: 1, forKey: VM.fetchKey(pickd), payload: {
+      items: [{ id: 1, title: 'x' }, { id: 2, title: 'y' }],
+      filteredTotal: 219,
+      pickView: true,
+      pickInfo: { pool: 219, limit: 8, picked: 8, sources: 8, short: false },
+    } });
+    const d = VM.derive(v);
+    assert.equal(d.pick.active, true, '服务端说这是精选，界面没认');
+    assert.ok(d.headline.text.includes('精选 8 条'), '总览句没说"精选了几条"：' + d.headline.text);
+    assert.ok(d.headline.text.includes('219'), '总览句没说候选池有多大：' + d.headline.text);
+    assert.ok(d.headline.text.includes('8 个源'), '总览句没说来自几个源：' + d.headline.text);
+    /* 候选不够时（稀疏领域）也必须说出来 */
+    const few = VM.reduce(v, { type: 'data', seq: 2, forKey: VM.fetchKey(v), payload: {
+      items: [{ id: 1, title: 'x' }], filteredTotal: 4, pickView: true,
+      pickInfo: { pool: 4, limit: 8, picked: 4, sources: 2, short: true },
+    } });
+    assert.ok(VM.derive(few).headline.text.includes('就这么多'), '候选不足时没有如实说明：' + VM.derive(few).headline.text);
+  });
+
+  ok('★ 底栏那个按钮在精选模式下换了含义（否则用户不知道按下去会得到什么）', () => {
+    const d = VM.derive(VM.reduce(base, { type: 'pickCategory', id: 1 }));
+    assert.ok(d.buttons.all.label.includes('这个领域的全部'), '精选模式下底栏按钮还在说"今天全部/只看精选"：' + d.buttons.all.label);
+  });
+}
 
 say('');
 say('【第一层】加载方式与真机一致');
@@ -954,7 +1162,7 @@ await (async () => {
   ok('启动后只发出一次有效取数，且首页到位', () => {
     assert.equal(r.calls.filter((c) => c.kind === 'get').length, 2, '启动应当恰好两次 get（第一次被紧随的 invalidate 作废）');
     assert.equal(r.view.items.length, 15);
-    assert.equal(r.chips().length, 4, 'chips 应当有「全部」+ 3 个类别');
+    assert.equal(r.chips().length, 5, 'chips 应当有「全部」+ 4 个类别（2026-09-29 加了领域·财经）');
     assert.equal(r.more().disabled, false);
   });
 }
@@ -1243,6 +1451,49 @@ const PANEL_SOURCES = [
     r.fillAddSource('', 'https://example.com/feed');
     await r.sleep(20);
     assert.ok(!r.calls.slice(n).some((c) => c.kind === 'addSource'), '名字为空时不该发请求');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★★★ 点「精选」按钮：一次点击 = 一次**带 pick 的取数**，而且只筛那个领域', async () => {
+    /* 这条是「每个领域一个精选按键」的**真点击**断言。
+       最容易做坏的两种情形它都盯着：
+         ① 按钮渲染出来了、但没接上动作（点了没反应）；
+         ② 请求发出去了、却漏了 `pick`（服务端按流水返回，界面标题写着"精选"）。 */
+    const n = r.calls.length;
+    /* chips 顺序是 [全部, AI, 开源, 行业, 领域·财经] ⇒ 领域 chip 的序号是 4，
+       它的精选按钮 id 就是 pick-4（见 card.js 的 renderChips）。
+       ⚠️ 用 `r.el(...)` 查 DOM，不是 `r.has(...)` —— 后者问的是"有没有在途的 IPC"。 */
+    assert.ok(r.el('pick-4'), '导轨里没有领域 chip 的「精选」按钮');
+    r.click('pick-4');
+    await r.sleep(20);
+    const gets = r.calls.slice(n).filter((c) => c.kind === 'get');
+    assert.equal(gets.length, 1, '点一次精选应当恰好发一次取数，实际 ' + gets.length);
+    const o = gets[0].opts;
+    assert.equal(o.pick, true, '请求里没有 pick ⇒ 服务端会按流水返回，而界面写着"精选"');
+    assert.equal(String(o.categoryIds && o.categoryIds.join(',')), '4', '精选没有只筛那个领域：' + JSON.stringify(o.categoryIds));
+    assert.equal(o.todayOnly, true, '精选没有收口到今天');
+    /* 反过来：点**chip 本身**（不是精选按钮）必须回到普通列表 —— 这是用户唯一的退出方式 */
+    r.ok('get', { ok: true, items: [{ id: 1, title: 'x' }], filteredTotal: 5, todayTotal: 5, curated: 15 });
+    await r.sleep(20);
+    const before = r.calls.length;
+    r.click('chip-4');
+    await r.sleep(20);
+    const again = r.calls.slice(before).filter((c) => c.kind === 'get');
+    assert.equal(again.length, 1, '点 chip 应当重新取数（口径从"精选"变回"流水"）');
+    assert.equal(!!again[0].opts.pick, false, '点 chip 之后还带着 pick ⇒ 用户退不出精选');
+  });
+}
+
+{
+  const r = await bootedRigOnChip(2);
+  ok('★★ 没有「领域·」前缀的 chip 一个精选按钮都不该有（用户要的是每个**领域**一个）', async () => {
+    /* AI / 开源 / 行业 三个 chip 都不是领域 —— 它们右边不该冒出精选按钮 */
+    for (const idx of [1, 2, 3]) {
+      assert.ok(!r.el('pick-' + idx), '第 ' + idx + ' 个 chip（非领域）带上了精选按钮');
+    }
+    assert.ok(r.el('pick-4'), '领域 chip 反而没有精选按钮');
   });
 }
 

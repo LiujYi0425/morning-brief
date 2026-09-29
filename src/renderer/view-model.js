@@ -231,6 +231,24 @@
       /* —— 模式面（用户意图） —— */
       /** 数据口径：false = 只看精选，true = 看今天全部 */
       showingAll: false,
+      /** ★★ 领域精选（用户 2026-09-29 的需求：每个领域一个「精选」按钮）。
+       *  非 null = "正在看**这个领域**的精选"。
+       *
+       *  ⚠️ 为什么不复用 `showingAll` 那一个布尔量：它们回答的是两个不同的问题 ——
+       *     `showingAll` 是"全部还是精选"（**范围**没变，还是整个今天），
+       *     这个字段是"精选的范围收窄到某个领域"。
+       *     合成一个布尔量之后，"退出领域精选"必然变成"切到看今天全部"：
+       *     用户点一下那个领域 chip 想回到普通列表，列表却从 8 条精选
+       *     变成 200 条流水 —— 那不是他要的动作。
+       *  ⚠️ 它与 I3（正交）的关系：点任何 chip、点「看今天全部」都会把它**清掉**
+       *     （"筛选顺手把模式清了"，与 showingAll 的既有规矩逐字一致），
+       *     而 expand（收起/展开）永远不碰它。 */
+      pickedCategory: null,
+      /** 服务端回的"这一屏是领域精选"+ 挑选口径。
+       *  ⚠️ 挑选**只在服务端**做（判据在 shared/pick.js），界面只负责说实话：
+       *     "从今天 N 条里挑了 M 条、来自 K 个源"。 */
+      pickView: false,
+      pickInfo: null,
 
       /* —— 视图面（窗口） —— */
       /** ⚠️ 这一项**只影响布局**，绝不影响查询口径（病 3 的修法） */
@@ -264,7 +282,22 @@
     out.dataSeq = Math.max(0, Math.round(num(out.dataSeq)));
     out.hasMore = !!out.hasMore;
     out.showingAll = !!out.showingAll;
+    out.pickView = !!out.pickView;
+    out.pickInfo = out.pickInfo && typeof out.pickInfo === 'object' ? out.pickInfo : null;
     out.expanded = !!out.expanded;
+    /* ★ 领域精选的收敛：`pickedCategory` 必须指向一个**真实存在**的类别 ——
+       否则用户删掉那个领域之后，界面会卡在一个永远取不到数据的"精选"模式里
+       （chip 都没了，却还在发 pick 请求）。
+       ⚠️ 与 `activeCategory` 同一条规矩：类别表为空时**不动它**（启动瞬间
+          表还没到，这时清掉会把用户刚点的那个模式弹回去）。 */
+    out.pickedCategory = out.pickedCategory == null ? null : String(out.pickedCategory);
+    if (out.pickedCategory != null && out.categories.length) {
+      var pickFound = false;
+      for (var pk = 0; pk < out.categories.length; pk += 1) {
+        if (out.categories[pk] && String(out.categories[pk].id) === out.pickedCategory) { pickFound = true; break; }
+      }
+      if (!pickFound) out.pickedCategory = null;
+    }
     if (!PHASES[out.phase]) out.phase = 'init';
 
     /* 类别收敛：只有当**类别表已知**、而当前选中项不在表里时才清掉。
@@ -393,6 +426,11 @@
         sinceIso: p.sinceIso === undefined ? v.sinceIso : p.sinceIso,
       ai: p.ai === undefined ? v.ai : p.ai,
       briefView: p.briefView === undefined ? v.briefView : p.briefView,
+      /* ★ 领域精选：`pickView`/`pickInfo` 与 `briefView` 同一条规矩 ——
+         服务端说是就是，界面不自己推（否则"界面以为在精选、实际是流水"又回来了）。
+         服务端没给这个字段时（老响应）保持原值，**不清空**用户意图。 */
+      pickView: p.pickView === undefined ? v.pickView : !!p.pickView,
+      pickInfo: p.pickInfo === undefined ? v.pickInfo : p.pickInfo,
       unreadToday: p.unreadToday === undefined ? v.unreadToday : (Number(p.unreadToday) || 0),
       version: p.version === undefined ? v.version : String(p.version || ''),
         /* 服务端若知道"用户上次选的类别"而本地还没选，采纳它；否则尊重本地 */
@@ -479,14 +517,17 @@
       return copy(v, { expanded: !!a.on });
     },
 
-    /** 数据口径开关 —— 只改这一个字段（不影响窗口、不影响类别） */
+    /** 数据口径开关 —— 只改这一个字段（不影响窗口、不影响类别）
+     *  ★ 2026-09-29：顺手清掉**领域精选**模式 —— "看今天全部"与
+     *    "某个领域的精选"是互斥的两种口径，同时成立会让查询自相矛盾。
+     *    （这就是既有的"筛选顺手把模式清了"那条规矩的延伸。） */
     toggleAll: function (v) {
-      return copy(v, { showingAll: !v.showingAll });
+      return copy(v, { showingAll: !v.showingAll, pickedCategory: null });
     },
 
     /** 显式设定口径（测试与快捷键用） */
     setShowingAll: function (v, a) {
-      return copy(v, { showingAll: !!a.on });
+      return copy(v, { showingAll: !!a.on, pickedCategory: null });
     },
 
     /** 选类别（**幂等**：点已选中的那一项不会取消它）。
@@ -496,17 +537,37 @@
      *    与"点 AI → 点 AI → 点全部"结果不同，用户无法预测。
      *    改成幂等之后，chip 的语义就是**纯粹的选择**：
      *    同一目标点几次结果都一样（`f(f(x)) = f(x)`）。
-     *    "取消筛选"由第一项「全部」显式承担 —— 它永远在导轨最左边。 */
+     *    "取消筛选"由第一项「全部」显式承担 —— 它永远在导轨最左边。
+     * ★ 2026-09-29：同时退出**领域精选** —— 点 chip 表示"我要看这个类型的列表"，
+     *   而不是"我要看它的精选"（后者有专门的按钮）。这也让"点一下那个领域 chip
+     *   就回到普通列表"成为唯一的退出方式，用户不用找返回键。 */
     setCategory: function (v, a) {
-      return copy(v, { activeCategory: a.id == null ? null : String(a.id) });
+      return copy(v, { activeCategory: a.id == null ? null : String(a.id), pickedCategory: null });
     },
 
-    /** 按序号选类别（滑动条用）—— 语义与 setCategory 不同：**不取消** */
+    /** ★★ 领域精选（本次功能）：点那个「精选」按钮。
+     *
+     * 一次动作同时表达三件事，缺一件用户就会看到别的口径：
+     *   ① `activeCategory` —— 精选是**这个领域**的，chip 必须跟着高亮；
+     *   ② `pickedCategory` —— 取数要走精选那条路（服务端据此换选取口径）；
+     *   ③ `showingAll = false` —— 精选不是"看今天全部"。
+     * ⚠️ 幂等：同一个领域连点两次结果一样（与 setCategory 同一条规矩）。 */
+    pickCategory: function (v, a) {
+      var id = a.id == null ? null : String(a.id);
+      return copy(v, { activeCategory: id, pickedCategory: id, showingAll: false });
+    },
+
+    /** 按序号选类别（滑动条用）—— 语义与 setCategory 不同：**不取消**
+     *  ★ 滑动条划过类型时也要退出领域精选：滑动条是"换一个类型看"，
+     *    它与点 chip 是同一件事的两种手势，口径必须一致。 */
     setCategoryIndex: function (v, a) {
       var idx = Math.max(0, Math.round(num(a.index)));
-      if (idx === 0) return copy(v, { activeCategory: null });
+      if (idx === 0) return copy(v, { activeCategory: null, pickedCategory: null });
       var c = v.categories[idx - 1];
-      return copy(v, { activeCategory: c ? String(c.id) : v.activeCategory });
+      return copy(v, {
+        activeCategory: c ? String(c.id) : v.activeCategory,
+        pickedCategory: null,
+      });
     },
 
     /** 新增类别成功后并入（保持当前选择不变） */
@@ -729,18 +790,33 @@
   function fetchPlan(v) {
     var n = normalize(v);
     var allMode = n.showingAll;
+    /* ★★ 领域精选（本次功能）：它是一条**独立的口径**，不是"类别 + 全部"的组合。
+       · `pick: true` 让服务端换用"轮转挑 N 条"的选取逻辑（判据在 shared/pick.js）；
+       · `todayOnly: true` 是硬要求 —— 精选承诺的是"今天这个领域值得看的几条"，
+         不收口会把前几天的高分条目挑进来，而用户看不出那是旧的；
+       · `limit` 照常给（服务端按自己的口径常量截断，这里只是请求形状的一部分）。 */
+    var picking = n.pickedCategory != null;
     return {
       limit: allMode ? ALL_LIMIT : n.curated,
-      categoryIds: n.activeCategory == null ? null : [String(n.activeCategory)],
+      categoryIds: picking
+        ? [n.pickedCategory]
+        : n.activeCategory == null
+          ? null
+          : [String(n.activeCategory)],
       /* ★ 「看今天全部」必须**真的**只取今天 ——
          按钮上写着"（N）"而 N 是当日总数；查询不按日期收口的话，
          点下去会翻出前几天的条目，用户会认为"筛选是坏的"。
-         精选模式刻意**不**收口：今天还没抓到时卡片也不该空着。 */
-      todayOnly: allMode,
+         精选模式刻意**不**收口：今天还没抓到时卡片也不该空着。
+         ⚠️ 领域精选是例外：它**必须**收口（见上面那条）。 */
+      todayOnly: allMode || picking,
+      pick: picking,
     };
   }
 
-  /** 取数身份字符串。与 fetchPlan 同源（同一份 limit/categoryIds/todayOnly）。 */
+  /** 取数身份字符串。与 fetchPlan 同源（同一份 limit/categoryIds/todayOnly/pick）。
+   *  ⚠️ `pick` **必须**进这个 key：否则"这个领域的流水 → 这个领域的精选"两次请求
+   *     会算出同一个 key ⇒ 界面认为数据没变、**根本不重取** ⇒
+   *     用户点了「精选」按钮没反应，而日志里连一条异常都没有。 */
   function fetchKeyOf(view) {
     var n = normalize(view);
     var f = fetchPlan(n);
@@ -748,6 +824,7 @@
       f.limit + '|' +
       (f.categoryIds ? f.categoryIds.join(',') : '*') + '|' +
       (f.todayOnly ? 'today' : 'all') + '|' +
+      (f.pick ? 'pick' : '-') + '|' +
       num(n.forceToken)
     );
   }
@@ -784,6 +861,21 @@
       lead = '⚠ ' + (why || '摘要没生成');
     }
     if (lead) parts.unshift(lead);
+    /* ★★ 领域精选（本次功能）：这一屏**不是**流水账，必须让用户看出区别。
+       ⚠️ 说不出"从多少条里挑的、来自几个源"的话，用户会把"只给 8 条"
+          读成"我的条目丢了/筛选坏了" —— 这是这个功能最容易翻车的地方。
+       ⚠️ 挑不够时（sparse 领域）也要**如实说**"今天这个领域就这几条"，
+          而不是让他以为是程序截断了。 */
+    var pi = view.pickView ? view.pickInfo : null;
+    if (pi && num(pi.picked) > 0) {
+      parts.push(
+        '· 精选 ' + num(pi.picked) + ' 条' +
+          (num(pi.pool) > num(pi.picked) ? '（从今天 ' + num(pi.pool) + ' 条里挑的' : '（这个领域今天一共 ' + num(pi.pool) + ' 条'),
+      );
+      if (num(pi.sources) > 0) parts[parts.length - 1] += '，来自 ' + num(pi.sources) + ' 个源';
+      parts[parts.length - 1] += '）';
+      if (pi.short) parts.push('今天这个领域就这么多');
+    }
     parts.push((view.showingAll ? '今天全部 ' : '今天共 ') + d.filteredTotal + ' 条');
     var older = Math.max(0, d.shown - d.filteredTotal);
     if (older > 0) parts.push('另含更早 ' + older + ' 条');
@@ -822,18 +914,27 @@
        （真机反馈"收起后类型选项消失"：那是 CSS 把 .filters 在收起态设成
          display:none 造成的。现在 chips 的**存在性**由这里保证，
          收起态只允许压缩它的高度，不允许把它拿掉。） */
-    var chips = [{ id: null, name: '全部', on: v.activeCategory == null, custom: false, pref: 0 }];
+    var chips = [{ id: null, name: '全部', on: v.activeCategory == null, custom: false, pref: 0, pickable: false, picking: false }];
     for (var i = 0; i < v.categories.length; i += 1) {
       var c = v.categories[i];
+      var cname = String(c.name == null ? '' : c.name);
       chips.push({
         id: String(c.id),
-        name: String(c.name == null ? '' : c.name),
+        name: cname,
         on: v.activeCategory === String(c.id),
         custom: true,
         /* ★ 偏好随 chip 一起给出去（本次功能）：界面上要能一眼看出
            "这个类型是我不喜欢的"，否则用户设完就再也看不到它 ——
            而"设了看不见"与"没设"在用户眼里完全一样。 */
         pref: num(c.pref),
+        /* ★★ 领域精选（用户 2026-09-29 的需求）：**只有「领域·」这一维度的
+           chip 带「精选」按钮**。
+           ⚠️ 判据是名字前缀，不是"类别个数"或"是不是预置" ——
+              用户自己新增的类型（名字由他起）不该被卷进来；
+              而 领域· 这个前缀是**代码里定死的分类学**（见 sources.js 的五大维度），
+              离线可穷举、也不会随数据变化。 */
+        pickable: cname.indexOf('领域·') === 0,
+        picking: v.pickedCategory != null && v.pickedCategory === String(c.id),
       });
     }
     var activeIndex = 0;
@@ -868,6 +969,14 @@
       chips: chips,
       activeChip: chips[activeIndex],
       activeIndex: activeIndex,
+      /* ★ 领域精选：给卡片的那一份（`active` 决定列表标题要不要挂"精选"标记，
+         文案本身由 headlineOf 拼） */
+      pick: {
+        active: v.pickedCategory != null,
+        categoryId: v.pickedCategory,
+        limit: v.pickInfo && v.pickInfo.limit != null ? num(v.pickInfo.limit) : null,
+        info: v.pickInfo,
+      },
       /* ★ 翻页语境的出处：调用方（card.js）拿它**在发请求前**捕获，
          并把它原样带回来给 `data` / `moreData` / `error` 做身份校验。
          没有它，payload 就可能"游标来自旧查询、筛选项来自新查询"。 */
@@ -902,7 +1011,14 @@
         all: {
           visible: allVisible,
           enabled: allVisible,
-          label: allMode ? '只看精选' : '看今天全部（' + filteredTotal + '）',
+          /* ★ 领域精选中，这个按钮的含义变了：它不再是"全部/精选"的总开关，
+             而是"这个领域**不要**精选、把今天这个领域的都给我看" ——
+             文案跟着说清楚，否则用户不知道自己按下去会得到什么。 */
+          label: v.pickedCategory != null
+            ? '看这个领域的全部（' + filteredTotal + '）'
+            : allMode
+              ? '只看精选'
+              : '看今天全部（' + filteredTotal + '）',
           primary: !allMode,
         },
         collapse: { visible: v.expanded, enabled: v.expanded },

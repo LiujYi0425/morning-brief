@@ -11,7 +11,7 @@
  *   不需要网络、不需要 Key、不花一分钱。Key 由调用方注入，且只在这一层被透传给 client。
  * =====================================================================
  */
-import { getBrief, itemsForBrief, saveBrief, getMeta, setMeta, briefTokenUsage } from '../store/db.js';
+import { getBrief, itemsForBrief, saveBrief, getMeta, setMeta, briefTokenUsage, queryItems } from '../store/db.js';
 import { createAiClient } from '../shared/ai/client.js';
 import {
   DEFAULT_ENDPOINT, DEFAULT_MODEL, DEFAULT_PICK_COUNT, DEFAULT_RANK_POOL,
@@ -22,8 +22,60 @@ import {
   MAX_PICKS, briefCacheKey, compressionRatio, fallbackRank, pickExcerpt, selectRankInput, shouldGenerate, sumUsage,
 } from '../shared/ai/plan.js';
 import { localDay, localDayStartIso } from '../shared/day.js';
+import { pickDiverse, DOMAIN_PICK } from '../shared/pick.js';
 
 const META_KEYS = { endpoint: 'ai_endpoint', model: 'ai_model', pickCount: 'ai_pick_count' };
+
+/**
+ * ★★ 领域精选：把"某个领域今天最值得看的几条"从库里取出来（2026-09-29 的用户需求）。
+ *
+ * 为什么住在这里而不是 index.js：
+ *   挑选要**先说清候选池多大、有多少条因为"不喜欢"被沉底、最后来自几个源** ——
+ *   这些都是能被离线断言的东西，而 index.js import 了 electron ⇒ 考不了。
+ *   住在这一层，测试就能拿一个临时库真跑一遍（见 tools/test-all.mjs）。
+ *
+ * ⚠️ 口径三件（每一条错了用户都会看到"另一份东西"，而他不会知道）：
+ *   ① 候选池**硬收口到今天**（`todayOnly: true`）—— 精选的承诺是"今天这个领域的"；
+ *   ② 只认**一个**类别 —— "十几个领域合起来的精选"没有意义；
+ *   ③ `prefs` 里标了「不喜欢」的那些类别，其条目**沉底**（不是丢掉，
+ *      与 shared/quota.js 的"少放但不会没有"同一口径）。
+ *
+ * @param {object} db
+ * @param {{categoryIds:number[], sinceIso:string, prefs?:Map, limit?:number, poolLimit?:number}} opts
+ * @returns {{items:Array<object>, stats:object}} stats 直接回给界面做解释用
+ */
+export function pickDomainToday(db, opts = {}) {
+  const categoryIds = Array.isArray(opts.categoryIds) ? opts.categoryIds.filter((n) => Number.isFinite(Number(n))) : [];
+  const sinceIso = String(opts.sinceIso || '');
+  const poolLimit = Math.max(1, Math.min(200, Number(opts.poolLimit) || 200));
+  /* 候选池：今天、这个领域、按时间倒序（queryItems 的排序） */
+  const page = queryItems(db, { limit: poolLimit, categoryIds, todayOnly: true, sinceIso });
+  const rows = page.rows || [];
+  /* 「不喜欢」的类别：一次 SQL 取出命中的条目（与配额那条路径同一手法，
+     避免 200 条 × 1 次查询） */
+  const dislikedCats = [];
+  if (opts.prefs && typeof opts.prefs.forEach === 'function') {
+    opts.prefs.forEach((v, k) => {
+      const n = Number(k);
+      if (Number(v) === -1 && Number.isFinite(n)) dislikedCats.push(n);
+    });
+  }
+  let dislikedItems = null;
+  if (dislikedCats.length && rows.length) {
+    const ids = rows.map((r) => r.id);
+    const hits = db
+      .prepare(
+        `SELECT DISTINCT item_id FROM item_category WHERE item_id IN (${ids.map(() => '?').join(',')}) ` +
+          `AND category_id IN (${dislikedCats.map(() => '?').join(',')})`,
+      )
+      .all(...ids, ...dislikedCats);
+    dislikedItems = new Set(hits.map((r) => Number(r.item_id)));
+  }
+  return pickDiverse(rows, {
+    limit: opts.limit == null ? DOMAIN_PICK : opts.limit,
+    isDisliked: dislikedItems ? (it) => dislikedItems.has(Number(it.id)) : null,
+  });
+}
 
 /** 读 AI 配置（**不含 Key** —— Key 住在 keystore，永远不进这张表） */
 export function readAiConfig(db) {

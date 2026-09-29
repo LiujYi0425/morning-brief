@@ -826,6 +826,38 @@ const MUTANTS = [
     from: "const tray256 = path.join(assetsDir, 'tray-256.png');",
     to: "const tray256 = path.join(assetsDir, 'tray-256-unused.png');",
     expect: '不再产出 tray-256.png',
+  },
+  /* ── 领域精选（用户 2026-09-29：每个领域一个「精选」按钮）──
+   * ⚠️ 挑法在 shared/pick.js（纯函数），取数在 brief-service.pickDomainToday ——
+   *    两者的断言都在 test-all 里**真跑**（含一个真库用例）。这里咬的是
+   *    最容易静默退化的几处：退化之后界面照样有内容，只是"不是精选了"。 */
+  {
+    file: 'src/shared/pick.js',
+    why: '去掉源轮转（所有条目算作同一个源）⇒ 一个高频源就能霸屏，"精选"退化成时间流水的前 8 条',
+    from: '    const k = sourceKeyOf(m.it);',
+    to: "    const k = '所有';",
+    expect: '轮转应当让它最多',
+  },
+  {
+    file: 'src/shared/pick.js',
+    why: '「不喜欢」不再沉底 ⇒ 用户明确标了不喜欢的类型照样挤进精选（他说的是"少放"，得到的是"照放"）',
+    from: '    if (a.dis !== b.dis) return a.dis ? 1 : -1;',
+    to: '    if (false) return 1;',
+    expect: '够数的时候不该出现',
+  },
+  {
+    file: 'src/shared/pick.js',
+    why: '候选不足时不再如实报 short ⇒ 界面把"今天就 4 条"说成"精选 4 条"，用户以为程序截断了',
+    from: '      short: out.length < limit,',
+    to: '      short: false,',
+    expect: 'short 应当是 true',
+  },
+  {
+    file: MAIN,
+    why: '领域精选仍然带着 hasMore ⇒ 「展开更多」会往精选里追加**没被挑中**的条目，而用户以为那是同一份东西',
+    from: '    items = sel.items;\n    pickInfo = sel.stats;\n    hasMore = false;',
+    to: '    items = sel.items;\n    pickInfo = sel.stats;\n    hasMore = true;',
+    expect: '精选不许带 hasMore',
   },]
 
 /* ⚠️⚠️ 所有替换都必须用**函数形式**的 replacer，不能用字符串形式。
