@@ -191,16 +191,31 @@ npm run test:mutants        # 83 个变异体 —— ⚠️ 全量约一小时�
 2. 在**副本**的 runner 里打三行小补丁（按下标范围只跑一段），
 3. 每个分片给**各自的 `TMP`/`TEMP`**（⚠️ 见第 6 节第 3 条），并行跑，最后把结论并起来。
 
+那三行补丁（打在副本的 `tools/test-mutants.mjs` 上，**仓库里那份不要动**）：
+
+```js
+/* ① 在 `const ONLY = String(process.argv[2] || '')` 之后加一行： */
+const MB_RANGE = '0:21'.split(':').map(Number)   // ← 每个分片换成自己的范围
+/* ② 把 `for (const m of MUTANTS) {` 那两行换成： */
+let MB_I = -1
+for (const m of MUTANTS) {
+  MB_I += 1
+  if (MB_I < MB_RANGE[0] || MB_I >= MB_RANGE[1]) continue
+```
+
 ```powershell
-# 复制（脚本在 %TEMP%\mb-mutant-copy.mjs；第三个参数是分片范围，左闭右开）
-node "$env:TEMP\mb-mutant-copy.mjs" "D:\morning-brief" "$env:TEMP\mb-mut-s0" 0:21
+# 复制（副本目录名随便；注意别复制 node_modules）
+robocopy D:\morning-brief "$env:TEMP\mb-mut-s0" /E /XD node_modules .git release data .npm-cache build > $null
+# 各自独立的临时目录（否则多个分片会互相覆盖 mb-mutant-child.log）
 $env:TMP="$env:TEMP\mb-tmp-s0"; $env:TEMP=$env:TMP
 cd "$env:TEMP\mb-mut-s0"; node tools/test-mutants.mjs
 ```
 
-⚠️ 两点必须说清：
+⚠️ 三点必须说清：
 - 分片**只改"跑哪些"**（判据、还原、哨兵一字未改）；仓库里那份 runner **没有**分片代码。
 - 分片只是**初筛**：真出现"漏网"要用**仓库里那份未打补丁的** runner 单独复验一条。
+- 本会话那个"复制 + 打补丁"的小脚本放在 `%TEMP%` 里、**随时会被清掉**；
+  照上面两步重建即可（约 40 行），别把 `%TEMP%` 里的路径写进任何文档当依赖。
 
 ### 3.3 分片结果的原始形态（可复核）
 
