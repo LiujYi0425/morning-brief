@@ -220,7 +220,13 @@ const MUTANTS = [
        离线考裁判当时**一声都不响**（假清单只有 9 个源，装得下）。 */
     from: '          .filter((s) => boundSet.has(Number(s.id)))\n',
     to: '',
-    expect: '面板的源清单只能列',
+    /* ⚠️ expect 改成**源码断言**那一条（2026-09-30 全量复跑抓出来的）：
+       旧值写的是"面板的源清单只能列…"—— 那是**行为**断言，而它的夹具里
+       抄了一份 `impl` 副本（上面第 4173 行那段）⇒ 变异体改的是 main/index.js，
+       副本**没被改**，所以那条永远是绿的。
+       真正咬住它的是紧跟其后的源码断言「main/index.js 里那段实现必须**过滤**源清单
+       （副本对了不算数）」—— 那条断言存在的理由就是这件事。 */
+    expect: '必须**过滤**源清单',
   },
   {
     file: INGEST,
@@ -791,7 +797,12 @@ const MUTANTS = [
     why: '去掉"正文当标题"的兜底 ⇒ 华尔街见闻的快讯（title 常年是空串）一条都进不来',
     from: '    const title = row.title && String(row.title).trim() ? row.title : flashTitleFrom(body);',
     to: '    const title = row.title;',
-    expect: '不编造标题',
+    /* ⚠️ expect 写的是**最先咬住它的那条断言**（2026-09-30 全量复跑抓出来的）：
+       旧值 `不编造标题` 只是那条断言**标签**里的一个词（"（不编造）"），
+       字面上对不上 ⇒ 收紧判据之后这一条被误报成"漏网"。
+       实际红的是「★★ 华尔街见闻：title 为空时用正文第一句…」那条，
+       明细写着"title 为空时没拿正文兜底 ⇒ 这个源会一条都进不来"。 */
+    expect: 'title 为空时用正文第一句',
   },
   {
     file: 'src/ingest/adapters.js',
