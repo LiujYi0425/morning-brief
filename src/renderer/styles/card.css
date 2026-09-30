@@ -254,55 +254,35 @@ body {
   outline-offset: 1px;
 }
 
-/* ---------------- 「精选」按钮（每个类型 chip 右边那一个，2026-09-29） ----------------
- * 它回答的是"这个类型今天最值得看的几条"（挑选判据见 shared/pick.js：
- * 每个源轮着来、新的优先），与点 chip 得到的"时间流水"是两种口径。
+/* ---------------- 「精选」按钮（滑动条那一行，2026-09-30 从 chip 上挪过来） ----------------
+ * ★★ 为什么挪：v0.1.15/16 把「精选」挂在导轨里每个类型 chip 的右边，
+ *    真机实测导轨滚动宽度从 ~2900px 涨到 **4499px**（38 个类型）——
+ *    用户原话："上方的选择栏目很多，向右拖动选择的时候很不方便"。
+ *    ⇒ 收成**一个**跟随当前类型的按钮，导轨回到纯 chip。
  *
- * ⚠️ 视觉上必须**与 chip 分得开**（否则用户以为它也只是筛选的一种），
- *    但又不能引入新的语言：沿用同一套形状（圆角/高度/圆角chip），
- *    只把底色调成透明、文字降到 tertiary、描边用 divider。
- * ⚠️ 对比度：`--text-tertiary` 在全壁纸区间是 5.01–5.40:1，符合 R-C02 的 4.5:1
- *    （见 tokens.css 那张表）—— 不要顺手改成更淡的值。
- * ⚠️ 24px 最小高度同样来自 WCAG 2.2 SC 2.5.8（与 .chip 同一档），
- *    它是个**真的会被点的**按钮，不是装饰。
- *
- * ★★ 位置（用户 2026-09-29 的第二条反馈："这个位置放得很尴尬"）：
- *    导轨的统一间距是 `gap: 4px`，于是「chip 精选 chip 精选」读起来是**四个等距的块**，
- *    分不出哪个按钮属于哪个 chip。修法是**借间距**：左边 −3px（贴住自己的 chip，
- *    只剩 1px）、右边 +3px（与下一个 chip 拉开到 7px）——
- *    视觉上就成了"一块 chip + 它的一个小尾巴"。刻意**不**引入包裹元素：
- *    那会动到 focus/滚动所用的下标口径（见 card.js 里 railChips/railButtons 的说明）。 */
-.chippick {
+ * ⚠️ 视觉上沿用「编辑」那一档（同为"对当前类型做的事"），但**用描边而不是实底**：
+ *    两者挨着，都做成实底会让这一行看起来有两个"主按钮"。
+ * ⚠️ 与 `.chip` 同一套形状（高度 24px / 圆角 chip / meta 字号）——
+ *    不引入新的视觉语言；24px 也满足 WCAG 2.2 SC 2.5.8 的指针目标要求。
+ * ⚠️ `.chippick`（导轨里那个旧样式）已删除：留着会让人以为还有第二条路径。 */
+.chip--pick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
-  white-space: nowrap;
-  margin-left: -3px;
-  margin-right: 3px;
-  padding: 4px 8px;
-  min-height: 24px;
-  border-radius: var(--radius-chip);
-  border: 1px solid var(--divider);
-  background: transparent;
-  color: var(--text-tertiary);
-  font-size: var(--fs-meta);
-  font-family: inherit;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
-}
-.chippick:hover {
-  background: var(--hover-bg);
-  color: var(--text-primary);
-}
-/* 正在看这个领域的精选：与 chip 的选中态同源（accent 描边 + 加粗），
-   但**不**用左侧竖条 —— 那个竖条是"当前筛选"的专属记号，两处都用就分不清了。 */
-.chippick[data-on='on'] {
-  border-color: var(--accent);
+  height: 24px;
+  padding: 0 8px;
   color: var(--accent);
-  font-weight: 600;
+  border-color: var(--accent);
+  background: transparent;
 }
-.chippick:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+.chip--pick:hover {
+  background: var(--accent-soft);
+}
+/* 正在看这个类型的精选：实底 + 加粗（与「编辑」的"面板开着"同一档强度） */
+.chip--pick[data-on='on'] {
+  background: var(--accent-soft);
+  font-weight: 600;
 }
 
 /* 「＋」新增类型：与普通 chip 区分，但同属一条视觉语言。

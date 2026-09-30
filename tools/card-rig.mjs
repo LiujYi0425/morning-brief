@@ -117,7 +117,7 @@ function makeNode(tag, registry) {
 }
 
 const IDS = ['date', 'health', 'healthText', 'headline', 'filters', 'catSlider', 'catLabel', 'catPrev',
-  'catNext', 'btnAddCat', 'btnEditCat', 'catPanel', 'list', 'foot', 'toast', 'btnMore', 'btnAll',
+  'catNext', 'btnAddCat', 'btnEditCat', 'btnPick', 'catPanel', 'list', 'foot', 'toast', 'btnMore', 'btnAll',
   'btnRefresh', 'btnCollapse', 'bar', 'grip', 'catbar'];
 
 /* ------------------------------------------------------------------ */
@@ -146,7 +146,7 @@ export function makeRig(cardSrc) {
   }
   for (const id of IDS) { const n = makeNode('div', registerId); n.id = id; byId[id] = n; }
   [['catSlider', 'input'], ['catPrev', 'button'], ['catNext', 'button'], ['btnAddCat', 'button'],
-    ['btnEditCat', 'button'], ['btnMore', 'button'], ['btnAll', 'button'], ['btnRefresh', 'button'],
+    ['btnEditCat', 'button'], ['btnPick', 'button'], ['btnMore', 'button'], ['btnAll', 'button'], ['btnRefresh', 'button'],
     ['btnCollapse', 'button'],
   ].forEach(([id, tag]) => { byId[id].tagName = tag.toUpperCase(); });
   /* ⚠️ 两个入口按钮在 card.html 里带 `hidden` —— 装置必须**照抄**这一点，

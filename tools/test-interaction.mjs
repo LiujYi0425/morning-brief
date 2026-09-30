@@ -1471,29 +1471,28 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★★★ 点「精选」按钮：一次点击 = 一次**带 pick 的取数**，而且只筛那个领域', async () => {
-    /* 这条是「每个领域一个精选按键」的**真点击**断言。
-       最容易做坏的两种情形它都盯着：
+  ok('★★★ 点「精选」按钮：一次点击 = 一次**带 pick 的取数**，而且只筛当前类型', async () => {
+    /* ★ 2026-09-30 位置改了：按钮**不再挂在每个 chip 上**，而是滑动条那一行里的
+       **一个**、跟随当前选中的类型（导轨因此回到纯 chip —— 真机实测导轨宽度
+       曾从 ~2900px 涨到 4499px，38 个类型拖不动）。
+       这条断言盯的仍然是那两件最容易做坏的事：
          ① 按钮渲染出来了、但没接上动作（点了没反应）；
          ② 请求发出去了、却漏了 `pick`（服务端按流水返回，界面标题写着"精选"）。 */
+    assert.equal(r.el('btnPick').hidden, false, '选中了类型，「精选」按钮却不可见');
     const n = r.calls.length;
-    /* chips 顺序是 [全部, AI, 开源, 行业, 领域·财经] ⇒ 领域 chip 的序号是 4，
-       它的精选按钮 id 就是 pick-4（见 card.js 的 renderChips）。
-       ⚠️ 用 `r.el(...)` 查 DOM，不是 `r.has(...)` —— 后者问的是"有没有在途的 IPC"。 */
-    assert.ok(r.el('pick-4'), '导轨里没有领域 chip 的「精选」按钮');
-    r.click('pick-4');
+    r.click('btnPick');
     await r.sleep(20);
     const gets = r.calls.slice(n).filter((c) => c.kind === 'get');
     assert.equal(gets.length, 1, '点一次精选应当恰好发一次取数，实际 ' + gets.length);
     const o = gets[0].opts;
     assert.equal(o.pick, true, '请求里没有 pick ⇒ 服务端会按流水返回，而界面写着"精选"');
-    assert.equal(String(o.categoryIds && o.categoryIds.join(',')), '4', '精选没有只筛那个领域：' + JSON.stringify(o.categoryIds));
+    assert.equal(String(o.categoryIds && o.categoryIds.join(',')), '2', '精选没有只筛当前类型：' + JSON.stringify(o.categoryIds));
     assert.equal(o.todayOnly, true, '精选没有收口到今天');
-    /* 反过来：点**chip 本身**（不是精选按钮）必须回到普通列表 —— 这是用户唯一的退出方式 */
+    /* 反过来：点**chip 本身**（不是精选按钮）必须回到普通列表 —— 用户唯一的退出方式 */
     r.ok('get', { ok: true, items: [{ id: 1, title: 'x' }], filteredTotal: 5, todayTotal: 5, curated: 15 });
     await r.sleep(20);
     const before = r.calls.length;
-    r.click('chip-4');
+    r.click('chip-2');
     await r.sleep(20);
     const again = r.calls.slice(before).filter((c) => c.kind === 'get');
     assert.equal(again.length, 1, '点 chip 应当重新取数（口径从"精选"变回"流水"）');
@@ -1502,15 +1501,22 @@ const PANEL_SOURCES = [
 }
 
 {
-  const r = await bootedRigOnChip(2);
-  ok('★★ 导轨里每个类型 chip 右边都有精选按钮，只有「全部」没有', async () => {
-    /* ⚠️ 判据 2026-09-29 改过一次：第一版只给「领域·」前缀的 chip 挂按钮，
-       而真机截图里用户自建的类型（没有前缀）就没有 ⇒ 看起来"隔两条才有一个"。
-       现在：**每个类型都有**，「全部」没有（那一屏本来就是当天的 AI 精选）。 */
-    assert.ok(!r.el('pick-0'), '「全部」不该带精选按钮');
-    for (const idx of [1, 2, 3, 4]) {
-      assert.ok(r.el('pick-' + idx), '第 ' + idx + ' 个类型 chip 没有精选按钮');
+  const r = await bootedRig();
+  ok('★★ 导轨里不该再有任何「精选」按钮（它现在只有一个，住在滑动条那一行）', async () => {
+    /* ⚠️ 这条守的是"位置"这件事本身：一旦有人把按钮挂回 chip 上，
+       导轨宽度会再次翻倍（真机反馈："向右拖动选择的时候很不方便"）。 */
+    for (let i = 0; i <= 6; i += 1) {
+      assert.ok(!r.el('pick-' + i), '导轨里又出现了挂回 chip 的精选按钮：pick-' + i);
     }
+    const chips = r.el('filters').children;
+    assert.equal(chips.length, 5, '导轨里应当只有 5 个 chip（全部 + 4 个类型），实际 ' + chips.length);
+    /* 选中「全部」时它不该出现（那一屏本来就是当天的 AI 精选） */
+    r.click('chip-0');
+    await r.sleep(20);
+    assert.equal(r.el('btnPick').hidden, true, '选中「全部」时「精选」按钮应当隐藏');
+    r.click('chip-3');
+    await r.sleep(20);
+    assert.equal(r.el('btnPick').hidden, false, '选中自定义类型时「精选」按钮应当出现（自建类型也算）');
   });
 }
 

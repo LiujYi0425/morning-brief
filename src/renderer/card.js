@@ -83,6 +83,7 @@
   var elCatNext = $('catNext');
   var btnAddCat = $('btnAddCat');
   var btnEditCat = $('btnEditCat');
+  var btnPick = $('btnPick');
   var elCatPanel = $('catPanel');
   var elList = $('list');
   var elFoot = $('foot');
@@ -266,31 +267,6 @@
       elFilters.appendChild(b);
       railChips.push(b);
       railButtons.push(b);
-
-      /* ★★ 领域精选（用户 2026-09-29 的需求）：每个「领域·」chip 右边挂一个
-         「精选」按钮 —— 点它 = 看**这个领域**今天最值得看的几条
-         （挑选判据在 shared/pick.js：每个源轮着来、新的优先）。
-         ⚠️ 为什么做成 chip 的**兄弟节点**而不是嵌套：HTML 不许 button 套 button；
-            而嵌在 chip 里的假按钮只能靠坐标命中，那种东西离线考不了。
-         ⚠️ 无障碍取舍（如实记下）：它住在 role=radiogroup 的容器里，
-            严格说单选组里不该混别的控件。这里保留了按钮语义与 Tab 可达性
-            （没有把它设成 tabindex=-1 藏起来），因为"键盘用户点不到精选"
-            比"读屏软件念到一个多余的按钮"更糟。 */
-      if (c.pickable) {
-        var pb = el('button', 'chippick', '精选');
-        pb.type = 'button';
-        pb.id = 'pick-' + i;
-        pb.setAttribute('aria-label', '「' + c.name + '」的精选');
-        pb.title = '看「' + c.name + '」今天最值得看的几条（每个源都会照顾到）';
-        pb.dataset.rail = String(railButtons.length);
-        if (c.picking) pb.setAttribute('data-on', 'on');
-        pb.addEventListener('click', function () {
-          api.log('[card] 点击「' + c.name + '」的精选');
-          dispatch({ type: 'pickCategory', id: c.id });
-        });
-        elFilters.appendChild(pb);
-        railButtons.push(pb);
-      }
     });
 
     if (focusRail >= 0 && railButtons[focusRail] && railButtons[focusRail].focus) railButtons[focusRail].focus();
@@ -303,8 +279,9 @@
 
   function scrollChipIntoView(index) {
     if (!elFilters || rail.moved) return;
-    /* ⚠️ 用 railChips 而不是 elFilters.children：领域 chip 右边多了「精选」按钮之后，
-       同一个下标会指到别的元素上（高亮滚不进视野，而测试装置里 chip 少、看不出来）。 */
+    /* ⚠️ 用 railChips（只含类型 chip）而不是 elFilters.children：
+       导轨里将来若再混进别的按钮，children 的下标就会错位
+       （表现是"高亮滚不进视野"，而测试装置里 chip 少、看不出来）。 */
     var node = railChips[index];
     if (!node) return;
     var left = node.offsetLeft;
@@ -698,6 +675,14 @@
     var ed = d.editor;
 
     setShown(elCatPanel, ed.visible);
+    /* ★ 滑动条那一行里的「精选」按钮（2026-09-30 从 chip 上挪过来的）：
+       跟随当前类型 —— 选中「全部」时不出现。 */
+    if (btnPick) {
+      setShown(btnPick, d.pickButton.visible);
+      if (d.pickButton.on) btnPick.setAttribute('data-on', 'on');
+      else btnPick.removeAttribute('data-on');
+      btnPick.title = d.pickButton.title;
+    }
     if (btnEditCat) {
       setShown(btnEditCat, d.editorButton.visible);
       if (d.editorButton.open) btnEditCat.setAttribute('data-open', 'on');
@@ -1019,6 +1004,13 @@
         var opts = VM.derive(view).fetch;
         setLoading(true);
         var mySeq = ++fetchIO.seq;
+        /* ★ 往返耗时（2026-09-30）：用户报"切一个类型要等很久"。
+           主进程那边的查询实测是**亚毫秒**（6067 条 / 26k 标签的真实库），
+           所以这句要么证明慢在 IPC/主进程忙，要么证明"界面根本没慢、
+           只是网上没有新内容可刷"（那天 64 个源全挂、今天 0 条）。
+           ⇒ 不打这句，下次还只能靠猜。 */
+        var t0 = Date.now();
+        api.log('[card] 取数开始 key=' + key);
         try {
           var r = await api.brief.get({
             limit: opts.limit,
@@ -1037,7 +1029,8 @@
           dispatch({ type: 'data', seq: mySeq, payload: r, forKey: key });
           api.log(
             '[card] data ok key=' + key + ' items=' + (r.items || []).length + ' hasMore=' + !!r.hasMore +
-              ' todayTotal=' + r.todayTotal + ' filteredTotal=' + r.filteredTotal + ' curated=' + r.curated,
+              ' todayTotal=' + r.todayTotal + ' filteredTotal=' + r.filteredTotal + ' curated=' + r.curated +
+              ' 往返=' + (Date.now() - t0) + 'ms',
           );
         } catch (err) {
           if (VM.fetchKey(view) !== key) continue;
@@ -1679,6 +1672,20 @@
   if (elCatPrev) elCatPrev.addEventListener('click', function () { selectByOffset(-1); });
   if (elCatNext) elCatNext.addEventListener('click', function () { selectByOffset(1); });
   if (btnAddCat) btnAddCat.addEventListener('click', function () { openCategoryInput(); });
+  /* ★ 精选（2026-09-30）：一个跟随当前类型的按钮 —— 点它看**当前这个类型**
+     今天最值得看的几条（判据在 shared/pick.js：每个源轮着来、新的优先）。
+     ⚠️ 幂等：同一个类型连点两次结果一样（reducer 里保证）。
+     ⚠️ 日志里带上类型名：用户报"点了没反应"时，这一行能分清是没点到、
+        还是点了但取数没回来。 */
+  if (btnPick) {
+    btnPick.addEventListener('click', function () {
+      var d = VM.derive(view);
+      var chip = d.activeChip;
+      if (!chip || chip.id == null) return;   // 「全部」时按钮本来就不可见
+      api.log('[card] 点击「' + chip.name + '」的精选');
+      dispatch({ type: 'pickCategory', id: chip.id });
+    });
+  }
   /* 编辑入口（本次功能）：已经开着就关掉 —— 同一个按钮两态是用户最省心的约定 */
   if (btnEditCat) {
     btnEditCat.addEventListener('click', function () {
