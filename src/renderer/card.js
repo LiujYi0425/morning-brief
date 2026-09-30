@@ -1989,6 +1989,7 @@
           more: d.buttons.more.visible + '/' + d.buttons.more.enabled,
           all: d.buttons.all.visible,
           collapse: d.buttons.collapse.visible,
+          pick: d.pickButton.visible,
         },
         actual: {
           chipCount: document.querySelectorAll('#filters .chip').length,
@@ -2005,6 +2006,12 @@
             /* ★ 编辑入口也报（本次功能）：它是新按钮，而"新按钮到底在屏幕的
                哪个像素上"只有这里能回答 —— 我在真机上靠推断坐标点了三次都没中。 */
             edit: btnInfo('btnEditCat'),
+            /* ★★ 「精选」也必须报（2026-09-30 补）：审查 #3 那个 `hidden` 失效的
+               真机 bug，**两个按钮里有一个正是它**（.chip--pick 的 display:flex
+               把 hidden 顶了回来）—— 而自检当时根本没在看它。
+               ⚠️ 这条就是"自检的覆盖范围必须包括出过事的那个元素"：
+               只报 edit 的话，下次同一个 bug 落在 pick 上仍然看不见。 */
+            pick: btnInfo('btnPick'),
           },
         },
         filters: box('#filters'),
@@ -2077,7 +2084,8 @@
         verdict.push(
           '按钮：展开更多=' + b.more + '（应' + (want.more.split('/')[0] === 'true' ? '显示' : '隐藏') + '）' +
             ' 看今天全部=' + b.all + '（应' + (want.all ? '显示' : '隐藏') + '）' +
-            ' 收起=' + b.collapse + '（应' + (want.collapse ? '显示' : '隐藏') + '）',
+            ' 收起=' + b.collapse + '（应' + (want.collapse ? '显示' : '隐藏') + '）' +
+            ' 精选=' + b.pick + '（应' + (want.pick ? '显示' : '隐藏') + '）',
         );
         // 期望与实际不符时直接点名，不留给人工比对
         if (want.more.split('/')[0] === 'true' && /hidden/.test(b.more)) verdict.push('❌ 展开更多：该显示却被藏了');
@@ -2091,6 +2099,9 @@
         if (want.more.split('/')[0] === 'false' && !/hidden/.test(b.more)) verdict.push('❌ 展开更多：该藏起来却还在显示（点了没反应）');
         if (!want.all && !/hidden/.test(b.all)) verdict.push('❌ 看今天全部：该藏起来却还在显示（点了没反应）');
         if (!want.collapse && !/hidden/.test(b.collapse)) verdict.push('❌ 收起：该藏起来却还在显示（点了没反应）');
+        /* 精选：审查 #3 就是它（与编辑一起）—— 两个方向都要点名 */
+        if (want.pick && /hidden/.test(b.pick)) verdict.push('❌ 精选：该显示却被藏了');
+        if (!want.pick && !/hidden/.test(b.pick)) verdict.push('❌ 精选：该藏起来却还在显示（点了没反应）');
 
         /* 编辑面板（本次功能）。四种判据分开说 —— 与上面那套同一口径：
            "没开"是正常状态，"开了却看不见/被裁"才是缺陷。 */
