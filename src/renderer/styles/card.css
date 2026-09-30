@@ -254,6 +254,22 @@ body {
   outline-offset: 1px;
 }
 
+/* ---------------- `hidden` 必须**真的**隐藏（2026-09-30 审查修复） ----------------
+ * ⚠️⚠️ 作者样式表里的 `display` 会压过浏览器默认的 `[hidden] { display: none }`。
+ *    本项目里 `.chip--edit` / `.chip--pick` 都写了 `display: flex`（为了居中文案），
+ *    于是 `setShown(node, false)`（只增删 hidden 属性）对这两个按钮**完全无效**：
+ *       · 选中「全部」时「编辑」「精选」照样显示；
+ *       · 点下去什么也不发生（card.js 里 `chip.id == null` 直接 return）——
+ *         正是本项目最忌讳的"点了没反应"。
+ *    ⇒ 用一条 `!important` 的全局重置把它钉死。**这一条不能删**：
+ *      它是"整个界面里 hidden 语义还成立"的唯一保证。
+ *    ⚠️ 为什么以前没被发现：离线装置没有 CSS（tools/card-rig.mjs 只有 `style: {}`），
+ *      而断言查的是 IDL 属性 `el.hidden` —— 属性确实被设置了，所以离线全绿、真机坏。
+ *      ⇒ 真机自检要判 `getComputedStyle(el).display === 'none'`，别只看属性。 */
+[hidden] {
+  display: none !important;
+}
+
 /* ---------------- 「精选」按钮（滑动条那一行，2026-09-30 从 chip 上挪过来） ----------------
  * ★★ 为什么挪：v0.1.15/16 把「精选」挂在导轨里每个类型 chip 的右边，
  *    真机实测导轨滚动宽度从 ~2900px 涨到 **4499px**（38 个类型）——
