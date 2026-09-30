@@ -768,19 +768,45 @@ const say = (s = '') => { lines.push(s); console.log(s); };
 let failed = 0;
 let passed = 0;
 
+/** 失败输出（ok 与 aok 共用）：**整段**打出来 —— 只打第一行会丢掉"违反项："后面的清单 */
+function reportFailure(name, err) {
+  failed += 1;
+  say('  ✘ ' + name);
+  const all = String(err && err.message ? err.message : err).split('\n');
+  for (const ln of all.slice(0, 16)) say('      ' + ln);
+  if (all.length > 16) say('      …（还有 ' + (all.length - 16) + ' 行）');
+}
+
+/**
+ * 同步用例。
+ * ⚠️⚠️ 返回 Promise 的用例**必须**走 aok（2026-09-30 审查发现）：
+ *   同步版拿到 Promise 就直接算通过 ⇒ 失败被记成 ✔、结论行还写"全部通过"，
+ *   之后才以未处理 rejection 崩溃（报告文本与实际相反）。
+ *   这道守卫 test-all.mjs 里一直有，本文件漏了 —— 18 处 async 用例因此假绿过。
+ */
 function ok(name, fn) {
   try {
-    fn();
+    const r = fn();
+    if (r && typeof r.then === 'function') {
+      reportFailure(name, new Error('用例返回了 Promise —— 同步 ok() 接不住它（假绿）。请用 await aok(...)。'));
+      r.catch(() => {}); // 吞掉 rejection：失败已经记过一次，别再炸一次
+      return;
+    }
     passed += 1;
     say('  ✔ ' + name);
   } catch (err) {
-    failed += 1;
-    say('  ✘ ' + name);
-    /* ⚠️ 失败信息要**整段**打出来。只打第一行会丢掉"违反项："后面的清单 ——
-       而那正是唯一有用的部分（这个截断让第一次跑的时候我什么都没看到）。 */
-    const all = String(err.message).split('\n');
-    for (const ln of all.slice(0, 16)) say('      ' + ln);
-    if (all.length > 16) say('      …（还有 ' + (all.length - 16) + ' 行）');
+    reportFailure(name, err);
+  }
+}
+
+/** 异步用例：必须 `await aok(...)` */
+async function aok(name, fn) {
+  try {
+    await fn();
+    passed += 1;
+    say('  ✔ ' + name);
+  } catch (err) {
+    reportFailure(name, err);
   }
 }
 
@@ -892,6 +918,28 @@ say('└────────────────────────
     assert.ok(d.buttons.all.label.includes('这个领域的全部'), '精选模式下底栏按钮还在说"今天全部/只看精选"：' + d.buttons.all.label);
   });
 }
+
+ok('★★ 考裁判自检：async 用例必须走 await aok（否则失败会被记成 ✔、结论还写"全部通过"）', () => {
+  /* ⚠️⚠️ 2026-09-30 审查发现：本文件曾有 **18 处** async 用例交给同步 ok() ——
+     前者拿到 Promise 就直接返回，`passed += 1` 并打印 ✔，
+     失败只落到未处理 rejection，而结论行**先**说出「结论：全部通过 ✔」，
+     之后进程才崩（退出码 1、报告文本与实际相反）。
+     test-all.mjs 里一直有这道守卫，本文件漏了。下面三条把它钉住。 */
+  const raw = fs.readFileSync(path.resolve(HERE, 'test-interaction.mjs'), 'utf8');
+  /* ⚠️ 先剥注释再匹配：上面那段说明里就举着那个反面写法，不剥会咬到自己的注释
+     （本项目在别处踩过两次）。 */
+  const self = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal(
+    /* ⚠️ `(?<![a-zA-Z_])` 不能省：`aok(` 里也含 `ok(` —— 少了它，这条断言会咬到
+       自己刚转换出来的 `await aok('…', async …)`（我第一次就是这么误报的）。 */
+    /(?<![a-zA-Z_])ok\(\s*['"][^'"]*['"]\s*,\s*async/.test(self),
+    false,
+    '又有 async 用例走了同步 ok() ⇒ 它的失败会被记成 ✔（改成 await aok(...)）',
+  );
+  const aoks = (self.match(/await aok\(/g) || []).length;
+  assert.ok(aoks >= 15, 'await aok( 的用例只剩 ' + aoks + ' 处 —— 守卫或用例被改回去了');
+  assert.ok(/返回了 Promise/.test(self), 'ok() 里的 Promise 守卫被删了 ⇒ async 用例又会假绿');
+});
 
 say('');
 say('【第一层】加载方式与真机一致');
@@ -1184,7 +1232,7 @@ await (async () => {
 
 {
   const r = await bootedRig();
-  ok('blocker 复现路径：点 chip → **立刻**点「展开更多」→ 那笔脏请求不许发出去', async () => {
+  await aok('blocker 复现路径：点 chip → **立刻**点「展开更多」→ 那笔脏请求不许发出去', async () => {
     r.clickChip(2);                       // 「开源」
     await r.sleep(20);
     const n = r.calls.length;
@@ -1203,7 +1251,7 @@ await (async () => {
 
 {
   const r = await bootedRig();
-  ok('换类别后取数失败：列表与 chip 高亮不许各说各话', async () => {
+  await aok('换类别后取数失败：列表与 chip 高亮不许各说各话', async () => {
     const before = r.view.items.length;
     r.clickChip(1);                        // 「AI」
     await r.sleep(20);
@@ -1218,7 +1266,7 @@ await (async () => {
 
 {
   const r = await bootedRig();
-  ok('翻页在途时换类别：过期结果不许被追加进列表', async () => {
+  await aok('翻页在途时换类别：过期结果不许被追加进列表', async () => {
     r.click('btnMore');
     await r.sleep(20);
     const mreq = r.calls[r.calls.length - 1];
@@ -1239,7 +1287,7 @@ await (async () => {
 
 {
   const r = await bootedRig();
-  ok('正常翻页仍然工作（闸门不许做成"永远关着"）', async () => {
+  await aok('正常翻页仍然工作（闸门不许做成"永远关着"）', async () => {
     const before = r.view.items.length;
     r.click('btnMore');
     await r.sleep(20);
@@ -1256,7 +1304,7 @@ await (async () => {
 
 {
   const r = await bootedRig();
-  ok('任务点名的交错序列：chip → 看今天全部 → 展开更多，最终只满足最后一个意图且载荷自洽', async () => {
+  await aok('任务点名的交错序列：chip → 看今天全部 → 展开更多，最终只满足最后一个意图且载荷自洽', async () => {
     r.clickChip(2);
     await r.sleep(20);
     r.click('btnAll');
@@ -1307,7 +1355,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRig();
-  ok('编辑入口只在选中**真实类型**时出现（「全部」没有可编辑的东西）', async () => {
+  await aok('编辑入口只在选中**真实类型**时出现（「全部」没有可编辑的东西）', async () => {
     assert.equal(r.editBtn().hidden, true, '选中「全部」时不该有编辑入口');
     r.clickChip(1);                        // 「AI」
     await r.sleep(20);
@@ -1329,7 +1377,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★★ 面板打开时必须把列表**藏起来**（否则列表文字画在面板上面，两层都读不出）', async () => {
+  await aok('★★ 面板打开时必须把列表**藏起来**（否则列表文字画在面板上面，两层都读不出）', async () => {
     /* 这条断言守的是一个**真机截图抓到的**缺陷：面板虽然 z-index 更高、
        底色也不透明，**列表的文字仍然画在面板上面**（透明窗口里滚动容器的
        合成层顺序问题；z-index / translateZ / contain / isolation
@@ -1360,7 +1408,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);      // 「开源」
-  ok('打开面板 → 读源清单 → 勾选状态来自主进程（不是本地猜的）', async () => {
+  await aok('打开面板 → 读源清单 → 勾选状态来自主进程（不是本地猜的）', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     const req = r.calls[r.calls.length - 1];
@@ -1381,7 +1429,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★★ 添加源：忙碌期间不许连点，失败原因必须原样说出来', async () => {
+  await aok('★★ 添加源：忙碌期间不许连点，失败原因必须原样说出来', async () => {
     /* 这条盯的是阶段 A 那个"先验再存"的动作。两个点最容易做坏：
        ① 一次点击 = 主进程**真抓一次**该地址 ⇒ 连点就是对着别人站点打好几遍
           （与"刷新"那条重入守卫同一个道理）；
@@ -1429,7 +1477,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★ 添加源成功：收起输入行、重读源清单、把新源并进来', async () => {
+  await aok('★ 添加源成功：收起输入行、重读源清单、把新源并进来', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
@@ -1453,7 +1501,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★ 添加源：空地址 / 空名字在渲染层就拦住（不去打扰主进程）', async () => {
+  await aok('★ 添加源：空地址 / 空名字在渲染层就拦住（不去打扰主进程）', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
@@ -1471,7 +1519,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★★★ 点「精选」按钮：一次点击 = 一次**带 pick 的取数**，而且只筛当前类型', async () => {
+  await aok('★★★ 点「精选」按钮：一次点击 = 一次**带 pick 的取数**，而且只筛当前类型', async () => {
     /* ★ 2026-09-30 位置改了：按钮**不再挂在每个 chip 上**，而是滑动条那一行里的
        **一个**、跟随当前选中的类型（导轨因此回到纯 chip —— 真机实测导轨宽度
        曾从 ~2900px 涨到 4499px，38 个类型拖不动）。
@@ -1502,7 +1550,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRig();
-  ok('★★ 导轨里不该再有任何「精选」按钮（它现在只有一个，住在滑动条那一行）', async () => {
+  await aok('★★ 导轨里不该再有任何「精选」按钮（它现在只有一个，住在滑动条那一行）', async () => {
     /* ⚠️ 这条守的是"位置"这件事本身：一旦有人把按钮挂回 chip 上，
        导轨宽度会再次翻倍（真机反馈："向右拖动选择的时候很不方便"）。 */
     for (let i = 0; i <= 6; i += 1) {
@@ -1522,7 +1570,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★ 「添加源」那一行随面板关闭一起收起（免得下次打开看到一个空输入框）', async () => {
+  await aok('★ 「添加源」那一行随面板关闭一起收起（免得下次打开看到一个空输入框）', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
@@ -1540,7 +1588,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★ 取消勾选一个源：写回主进程的是**去掉它之后**的集合（只增不减会让取消变成空操作）', async () => {
+  await aok('★ 取消勾选一个源：写回主进程的是**去掉它之后**的集合（只增不减会让取消变成空操作）', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1, 2], sources: PANEL_SOURCES });
@@ -1562,7 +1610,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★ 保存失败必须**回滚**并说出来（静默失败 = "设置存不住"）', async () => {
+  await aok('★ 保存失败必须**回滚**并说出来（静默失败 = "设置存不住"）', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
@@ -1578,7 +1626,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★ 设"不喜欢"之后必须**重新取数**（配额在服务端执行，不重取就看不到效果）', async () => {
+  await aok('★ 设"不喜欢"之后必须**重新取数**（配额在服务端执行，不重取就看不到效果）', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
@@ -1601,7 +1649,7 @@ const PANEL_SOURCES = [
 
 {
   const r = await bootedRigOnChip(2);
-  ok('★★ 删除类型是**两步**，而且条目一条都不会少', async () => {
+  await aok('★★ 删除类型是**两步**，而且条目一条都不会少', async () => {
     r.click('btnEditCat');
     await r.sleep(20);
     await r.ok('categorySources', { ok: true, categoryId: 2, sourceIds: [1], sources: PANEL_SOURCES });
