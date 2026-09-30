@@ -938,8 +938,12 @@ for (const m of MUTANTS) {
     /* ★ 每个变异体跑哪一份考裁判：默认 test-all，AI 那几条指向 test-ai-brief。
        两边都以结论行收尾，所以下面的判据不用分叉。 */
     const testFile = m.test ? path.join(ROOT, m.test) : path.join(ROOT, 'tools', 'test-all.mjs')
+    /* ★ 超时是必须的（2026-09-30 审查发现）：旧写法没有 timeout，也没有人读 r.status ——
+       一个"让测试挂住"的变异体（死循环、等一个永不返回的 socket）会让整条门禁
+       **无限期挂住**，而此刻源码正处在变异态、哨兵还在盘上。 */
     const r = spawnSync(process.execPath, [testFile], {
       cwd: ROOT, stdio: ['ignore', childFd, childFd],
+      timeout: 180_000, killSignal: 'SIGKILL',
     })
     if (r.error) spawnErr = String(r.error.code || r.error.message || r.error)
     out = fs.readFileSync(CHILD_LOG, 'utf8')
@@ -957,7 +961,28 @@ for (const m of MUTANTS) {
   }
   const ranAtAll = /结论：/.test(out)
   const failed = /结论：❌ FAIL/.test(out)
-  const named = out.includes(m.expect)
+  /* ★★ 判据必须落在**具体那条断言**上（2026-09-30 审查修复）。
+     ⚠️⚠️ 旧写法是 `named = out.includes(m.expect)` —— 它只问"整个输出里有没有这串字"，
+        而**通过**的断言也会把自己的名字打进输出（test-all 打印 `✓ <名字>`）⇒
+        83 条 expect 里有 31 条（37%）是某条通过断言的子串 ⇒
+        **任何无关的红**（夹具抖动、时钟边界、环境差异）都会让每条变异体都报
+        「✓ 落网 失败的正是那条断言=true」。也就是说"真守卫悄悄消失、别的断言替它红了"
+        这种最危险的情形，恰好会被判成落网。
+     ⇒ 现在先把输出切成"失败块"（`✗ 名字` 那一行 + 紧跟其后的缩进明细行），
+        再要求**某一块**里出现 expect：通过断言的文本不再参与匹配，
+        而"断言名字里没有、只在失败明细里出现"的 expect 仍然匹配得上。 */
+  const failBlocks = (() => {
+    const blocks = []
+    let cur = null
+    for (const line of out.split('\n')) {
+      const head = line.match(/^\s{2}[✗✘]\s+(.+)$/)
+      if (head) { cur = [head[1]]; blocks.push(cur); continue }
+      if (cur && /^\s{4,}\S/.test(line)) { cur.push(line.trim()); continue }
+      if (/^\s{2}[✔✓]/.test(line) || /^\S/.test(line)) cur = null
+    }
+    return blocks
+  })()
+  const named = failBlocks.some((b) => b.join('\n').includes(m.expect))
   const caught = failed && named
   if (!caught) allCaught = false
 
@@ -980,6 +1005,16 @@ for (const m of MUTANTS) {
     const line = out.split('\n').filter((l) => l.includes('✗')).slice(0, 4).join('\n   ')
     console.log('   实际失败项：\n   ' + line)
   }
+}
+
+/* ★ 过滤条件一个都没匹配到 ⇒ 必须报错（2026-09-30 审查）。
+   ⚠️ 旧行为：`node tools/test-mutants.mjs zzz-typo` 会打印
+      「全部变异体落网 ✔（本次只跑了 0 个：过滤条件「zzz-typo」）」并**以 0 退出** ——
+      而这个命令正是注释里推荐的高频用法，打错一个字就得到一次假绿灯。 */
+if (ONLY && ranCount === 0) {
+  console.error(`\n✗ 过滤条件「${ONLY}」没匹配到任何变异体（0 个）—— 拒绝报绿`)
+  console.error('  提示：过滤是拿 why / test 字段做**子串**匹配，换一个词试试。')
+  process.exit(2)
 }
 
 /* 还原后必须确认每个文件都**逐字节**回到原样 —— 变异测试污染源码是很危险的 */
