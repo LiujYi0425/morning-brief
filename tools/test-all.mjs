@@ -41,6 +41,40 @@ const require = createRequire(import.meta.url);
    手写的版本不会解码，于是得到一个**看起来对、打开却 ENOENT** 的路径。 */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+/* ★★ 测试用完的临时目录**必须自己收掉**（2026-09-30 顺手发现的真缺陷）
+ *
+ * ⚠️ 实测：本机 `%TEMP%` 里躺着 **73,175 个** `mb-*` 目录 / **8.0 GB** ——
+ *    元凶就是下面那个 `tmpDbFile()`：它 `mkdtempSync` 建目录，**从来不删**。
+ *    平时一次 `npm test` 漏十几个；而变异测试一轮要跑几十次 test-all
+ *    （83 个变异体 × 每次十几个目录），于是每跑一轮全量就再漏一千多个。
+ *    ⇒ 这类"跑得越多越脏"的漏和门禁是同一条链上的事：它不报错，
+ *      只让下一次测量悄悄变差（%TEMP% 到十万级条目时，建目录本身都开始变慢）。
+ *
+ * ⚠️ 这一段必须放在**文件顶部**，不能贴着 `tmpDbFile()` 放：
+ *    那个函数在它自己的定义**之前**就被调用了（第一层就有用例用它），
+ *    函数声明会提升、而 `const` 不会 ⇒ 会报
+ *    "Cannot access 'TMP_DIRS' before initialization"（本会话真的踩了一次）。
+ */
+const TMP_DIRS = [];
+/** 收掉登记过的临时目录，返回**真的删掉**的个数（供自检断言用）。
+ *  ⚠️ 删不掉的要**留在名单里**（退出时再试一次）—— 直接 pop 丢掉的话，
+ *     那些"现在有句柄、等会儿就没句柄"的目录会被永久漏掉。 */
+function cleanupTmpDirs() {
+  let removed = 0;
+  const keep = [];
+  for (const d of TMP_DIRS.splice(0)) {
+    try {
+      fs.rmSync(d, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      keep.push(d); // 有句柄没关就留着，退出前再试
+    }
+  }
+  TMP_DIRS.push(...keep);
+  return removed;
+}
+process.on('exit', cleanupTmpDirs);
+
 /**
  * 渲染层的纯函数模块（`view-model.js`），用**与真机完全相同的方式**加载：
  * 当经典脚本丢进 node:vm，从 `globalThis.MB_VIEW` 取出口。
@@ -621,8 +655,22 @@ ok('parseDate：脏数据返回 null（不编造）', () => {
 say();
 say('--- 第二层 · 完整抓取流程（注入假 fetcher，不联网）---');
 
+/* ★★ 测试用完的临时目录**必须自己收掉**（2026-09-30 顺手发现的真缺陷）
+ *
+ * ⚠️ 实测：本机 `%TEMP%` 里躺着 **73,175 个** `mb-*` 目录 / **8.0 GB** ——
+ *    元凶就是这一个函数：它 `mkdtempSync` 建目录，**从来不删**。
+ *    平时一次 `npm test` 漏十几个；而变异测试一轮要跑几十次 test-all
+ *    （83 个变异体 × 每次 15 个目录），于是每跑一轮全量就再漏一千多个。
+ *    ⇒ 这类"跑得越多越脏"的漏，和门禁是同一条链上的事：它不会报错，
+ *      只会让下一次测量悄悄变慢（本机 %TEMP% 十万级条目时，建目录本身都开始变慢）。
+ * ⇒ 登记 + 退出时统一清理（名单与清理函数在**文件顶部** ——
+ *    它们必须在那之前就初始化好，原因见那里的注释）。**删不掉就留着**
+ *    （Windows 上 SQLite 句柄没关时删不动），清理失败绝不让测试变红 ——
+ *    它是卫生问题，不是判据。
+ */
 function tmpDbFile(tag) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `mb-${tag}-`));
+  TMP_DIRS.push(dir);
   return path.join(dir, 'test.db');
 }
 
@@ -5284,6 +5332,19 @@ ok('★★ 变异判据的解析器：两种考裁判的格式都要认（不然
   /* 全绿的输出不许解析出任何失败块（否则"零失败"会被读成"有失败"） */
   assert.equal(parseFailBlocks('  ✓ 一条\n  ✓ 两条\n结论：✅ PASS').length, 0, '全绿的输出里解析出了失败块');
 });
+
+ok('★ 临时的测试库目录必须**自己收掉**（本机实测漏过 7.3 万个 / 8 GB）', () => {
+  /* ⚠️ 这不是洁癖：`tmpDbFile()` 每次建一个目录、从来不删，而变异测试一轮要跑
+     几十次 test-all ⇒ 跑得越多 %TEMP% 越脏（十万级条目时建目录本身都变慢）。
+     这正是"闸门自己"的卫生问题：不报错，只是让下一次测量悄悄变差。 */
+  const f = tmpDbFile('selfcheck-cleanup');
+  const dir = path.dirname(f);
+  assert.equal(fs.existsSync(dir), true, '夹具连目录都没建出来');
+  const removed = cleanupTmpDirs();
+  assert.ok(removed >= 1, 'cleanupTmpDirs 一个都没删掉（登记机制没接上？）');
+  assert.equal(fs.existsSync(dir), false, '临时目录还在 —— 退出时清理没生效，%TEMP% 会继续涨');
+  assert.equal(fs.existsSync(f), false, '目录还在，里面的测试库自然也还在');
+});
 /* ==================================================================
  * 变异测试**不在这里**
  * ------------------------------------------------------------------
@@ -5493,6 +5554,9 @@ ok('★★ 领域精选在主进程的接线：只认单类别、清掉分页、
 });
 
 /* ================================================================== */
+/* ★ 跑完把临时目录收掉 —— 这一步要在**所有用例都结束、句柄都关了之后**做，
+   所以放在结论行之前（`process.exit` 上的那个 handler 只是兜底）。 */
+cleanupTmpDirs();
 say();
 const okAll = failed === 0;
 say('────────────────────────────────────────────────────────────');

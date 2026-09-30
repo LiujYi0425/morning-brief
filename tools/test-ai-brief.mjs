@@ -36,6 +36,31 @@ const ok = (label, fn) => { try { fn(); pass++; console.log('✔ ' + label); } c
 const aok = async (label, fn) => { try { await fn(); pass++; console.log('✔ ' + label); } catch (e) { fail++; console.log('✗ ' + label + ' —— ' + String(e.message).slice(0, 160)); } };
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-brief-'));
+/* ⚠️ 收掉这个目录（2026-09-30 顺手补的同一个漏，详见 test-all.mjs 里 tmpDbFile 那段）：
+   建了从来不删 ⇒ 每跑一次 `npm test` 就在 %TEMP% 里多一个 mb-brief-xxx。
+   ⚠️ 光在末尾 `rmSync` 是**没用**的（原来那句就是这么写的）：SQLite 的句柄还开着，
+   Windows 上删不动 ⇒ 目录连着一堆 -wal 文件留在那儿。⇒ 打开过的库都登记，
+   退出前先 close 再删，这里的 handler 只是兜底。 */
+const OPEN_DBS = [];
+const openTracked = async (file) => {
+  const d = await openDb(file);
+  OPEN_DBS.push(d);
+  return d;
+};
+process.on('exit', () => {
+  for (const d of OPEN_DBS) {
+    try {
+      d.close();
+    } catch {
+      /* 已经关了 */
+    }
+  }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* 还有句柄就留着 */
+  }
+});
 let seq = 0;
 const tmpDb = () => path.join(dir, 'b' + (++seq) + '.db');
 
@@ -43,7 +68,7 @@ const tmpDb = () => path.join(dir, 'b' + (++seq) + '.db');
 const NOW = new Date('2026-09-25T07:30:00+08:00');
 const iso = (h) => new Date(Date.UTC(2026, 8, 24, 22, 0, 0) + h * 3600000).toISOString();
 async function seed(file, n = 40) {
-  const db = await openDb(file);
+  const db = await openTracked(file);
   const run = startRun(db, 'manual', NOW.toISOString());
   for (let i = 1; i <= n; i++) {
     insertItem(db, { title: '第' + i + '条新闻的标题', url: 'https://example.com/n/' + i, summary: '摘要 '.repeat(20), sourceName: '源' + (i % 4), publishedAt: iso(i % 12) }, run, NOW.toISOString());
@@ -120,7 +145,7 @@ await aok('围栏 + 寒暄不影响解析', () => { assert.equal(out.status, 'ok
 db = await seed(tmpDb());
 out = await generateBrief({ db, apiKey: '', now: NOW, client: fakeClient(() => '{}').client });
 await aok('没 Key 时明确说原因，且不落库', () => { assert.equal(out.reason, 'no-key'); assert.equal(getBrief(db), null); });
-const emptyDb = await openDb(tmpDb());
+const emptyDb = await openTracked(tmpDb());
 out = await generateBrief({ db: emptyDb, apiKey: 'sk-x', now: NOW, client: fakeClient(() => '{}').client });
 await aok('今天没抓到条目 → no-items', () => assert.equal(out.reason, 'no-items'));
 
@@ -367,5 +392,18 @@ ok('★★ 点一次就更新完：进度要写进菜单、菜单外面要有反
 });
 
 console.log('\n结论：' + (fail ? '❌ FAIL' : '✅ PASS') + ' —— ' + pass + ' 条断言全过 / ' + fail + ' 条失败（AI 简报）');
-try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 库还开着，删不掉就算了（临时目录） */ }
+/* 先把库关掉再删目录 —— 顺序反了在 Windows 上删不动（句柄没放），
+   这正是这段清理以前一直失败的原因。真正的兜底在 process.on('exit') 上。 */
+for (const d of OPEN_DBS) {
+  try {
+    d.close();
+  } catch {
+    /* 已经关了 */
+  }
+}
+try {
+  fs.rmSync(dir, { recursive: true, force: true });
+} catch {
+  /* 还有句柄就留着，不让它影响判据 */
+}
 process.exit(fail ? 1 : 0);

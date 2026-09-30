@@ -18,8 +18,9 @@
 
 这正是本项目记录过的那条教训（`HANDOFF-阶段B.md` 阶段 D 续第 4 节：
 "闸门本身坏了，看起来和「全都通过」一样安静"）。这一轮又抓到五处，
-其中两处**在审查之前一直是绿的**；另外还有一处是**修完之后全量复跑顺带抓出来的**
-（两条 `expect` 指错了断言 —— 见 2.⑥，那正是把判据收紧的目的）。
+其中两处**在审查之前一直是绿的**；另外两处是**修的过程里顺带抓出来的**：
+② 的直接产物（两条 `expect` 指错了断言，见 2.⑥）与收尾时发现的
+`%TEMP%` 漏了 8 GB（见 2.⑦）。
 
 ---
 
@@ -29,7 +30,7 @@
 cd /d D:\morning-brief
 git log --oneline -3        # 最新应当是：考裁判修复（第二步）/（第二步·补）/ 本交接文档
 git status --short          # 期望：干净（_commit-msg.txt 是 gitignore 的提交信息草稿）
-npm test                    # test-all 231 + test-interaction 60 + test-ai-brief 37
+npm test                    # test-all 232 + test-interaction 60 + test-ai-brief 37
 npm run check               # sync-check + dist:check（隐私边界），必须绿
 npm run test:mutants        # 83 个变异体 —— ⚠️ 全量约一小时，先看第 3 节的"分片跑法"
 ```
@@ -39,7 +40,7 @@ npm run test:mutants        # 83 个变异体 —— ⚠️ 全量约一小时�
 
 ---
 
-## 2. 这一轮修的五件事（症状 → 根因 → 修法 → 守它的东西）
+## 2. 这一轮修的东西（症状 → 根因 → 修法 → 守它的东西）
 
 ### ① 变异测试被打断，会把变异体留在工作树里
 
@@ -140,13 +141,30 @@ npm run test:mutants        # 83 个变异体 —— ⚠️ 全量约一小时�
 ⚠️ 第一条还说明了一件事：**"行为断言 + 源码断言"这对组合里，expect 要指向真正会红的那一条**
 （那条源码断言存在的理由正是"副本对了不算数"）。
 
+### ⑦ （收尾时顺手发现的真缺陷）测试把临时目录漏在 `%TEMP%` 里 —— **7.3 万个 / 8 GB**
+
+- **怎么发现的**：清理这一轮的分片副本时，顺手量了一下 `%TEMP%\mb-*` ——
+  **73,175 个目录 / 8.0 GB**，全是测试留下的。
+- **根因**：`tmpDbFile()`（`test-all.mjs`）每次 `mkdtempSync` 建一个目录、**从来不删**。
+  平时一次 `npm test` 漏十几个；而变异测试一轮要跑几十次 test-all
+  ⇒ **每跑一轮全量就再漏一千多个**（本会话的四轮分片跑了约 2500 次 test-all）。
+- **为什么它跟门禁是一件事**：它不报错，只让**下一次测量**悄悄变差
+  （`%TEMP%` 到十万级条目时，建目录本身都开始变慢）。
+- **修法**：登记 + 退出时清理（`cleanupTmpDirs()` 放在**文件顶部** ——
+  `tmpDbFile` 在它自己的定义之前就被调用了，`const` 不提升，本会话当场踩了一次
+  "Cannot access 'TMP_DIRS' before initialization"）；
+  `test-ai-brief.mjs` 那边是**另一种**失败：末尾本来就有一句 `rmSync`，
+  但 SQLite 句柄还开着 ⇒ Windows 上删不动，所以要先 `close` 再删。
+- **守它的东西**：`test-all` 新增一条断言（建一个目录 → 清理 → 断言它真的没了）。
+- **实测**：跑完 `npm test`，`%TEMP%\mb-*` 目录数 **+0**（修之前每次 +15 左右）。
+
 ---
 
 ## 3. 数字与证据
 
 | 门禁 | 本会话实测 |
 |---|---|
-| `npm test` · test-all | **231** 条断言（+3：中断还原、判据解析器三条合一、dist 串跑） |
+| `npm test` · test-all | **232** 条断言（+4：中断还原、判据解析器、dist 串跑、临时目录清理） |
 | `npm test` · test-interaction | **60** 条（+2：`[hidden]` 全局重置、自检按渲染结果判） |
 | `npm test` · test-ai-brief | 37 条 |
 | `npm run check` | 全绿（sync-check ＋ 隐私边界：asar 48 个文件 / 0.78 MB / 白名单严格相等） |
