@@ -15,11 +15,21 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openDb, startRun, insertItem, getBrief, countUnreadToday } from 'file:///D:/morning-brief/src/store/db.js';
-import { generateBrief, readAiConfig, writeAiConfig, todayUsage } from 'file:///D:/morning-brief/src/main/brief-service.js';
-import { createAiClient } from 'file:///D:/morning-brief/src/shared/ai/client.js';
-import { startupNotice } from 'file:///D:/morning-brief/src/shared/startup-notice.js';
-import { localDay, localDayStartIso } from 'file:///D:/morning-brief/src/shared/day.js';
+/* ⚠️⚠️ 必须用**相对路径** import（2026-09-30 审查修复）。
+ *
+ * 这五行原来写的是 `file:///D:/morning-brief/src/…` —— 绝对路径。后果有两个，
+ * 都是审查员实测出来的：
+ *   ① 把工程复制到别的目录（或 CI、第二个 worktree）之后，这个脚本 import 的
+ *      仍然是 **D:\morning-brief 那一棵树**：他在副本里把 `day.js` 的
+ *      `localDay` 改成 UTC 日，副本的 test-ai-brief 依旧「✅ PASS 37 条全过」——
+ *      它根本没用副本的源码（第三套门禁与工作树脱钩）；
+ *   ② 换台机器 / 换盘符 ⇒ `ERR_MODULE_NOT_FOUND`，直接跑不起来。
+ * ⇒ 与同文件 `readSrc()` 的写法统一，全部改成相对路径（import.meta.url 为基准）。 */
+import { openDb, startRun, insertItem, getBrief, countUnreadToday } from '../src/store/db.js';
+import { generateBrief, readAiConfig, writeAiConfig, todayUsage } from '../src/main/brief-service.js';
+import { createAiClient } from '../src/shared/ai/client.js';
+import { startupNotice } from '../src/shared/startup-notice.js';
+import { localDay, localDayStartIso } from '../src/shared/day.js';
 
 let pass = 0, fail = 0;
 const ok = (label, fn) => { try { fn(); pass++; console.log('✔ ' + label); } catch (e) { fail++; console.log('✗ ' + label + ' —— ' + String(e.message).slice(0, 160)); } };
