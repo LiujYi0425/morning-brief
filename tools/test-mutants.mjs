@@ -16,8 +16,12 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+/* ★ 判据本身（"失败的正是那条断言"）拆到 lib/ 下了 —— 它 2026-09-30 静默坏过一次，
+   坏的样子是"test-ai-brief 那 8 个变异体全部报漏网"（而它们其实全都落网）。
+   拆出来之后，两种输出格式都能被 test-all 真正跑一遍断言，而不是靠眼睛看。 */
+import { failureMentions } from './lib/fail-blocks.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -895,6 +899,116 @@ const CHILD_LOG = path.join(os.tmpdir(), 'mb-mutant-child.log')
 const ONLY = String(process.argv[2] || '')
 let ranCount = 0
 
+/* ─────────────────────────────────────────────────────────────────────
+ * ★★ 被打断时，源码必须**当场**回到原样（2026-09-30 审查的下一步）
+ * ─────────────────────────────────────────────────────────────────────
+ * ⚠️ 旧写法挡不住 Ctrl+C：`spawnSync` 是**阻塞**的 —— 它跑的那四十多秒里
+ *    Node 的事件循环根本不转，signal 处理函数一行都执行不到；
+ *    而 SIGINT 的默认动作就是当场终止进程 ⇒ `finally` 也不跑 ⇒
+ *    源码停在被改坏的那一行上，只能等下一次运行时读哨兵补救 ——
+ *    而"下一次"可能是几天以后，中间谁 `git commit -a` 就把变异体提交了。
+ *
+ * ⇒ 两条一起做，缺一不可：
+ *    ① 子进程换成**异步** spawn（事件循环活着，signal 才处理得到），
+ *       并且收到信号时**先杀子进程** —— 否则它会继续跑一份变异源码；
+ *    ② 装 SIGINT / SIGTERM / SIGHUP：还原 → 清哨兵 → 以 130 退出
+ *       （128+2，shell 里一眼看出"是人掐的"，不是断言失败）。
+ *
+ * ⚠️ 哨兵**仍然保留**：它挡的是连处理函数都跑不了的那种死法
+ *    （SIGKILL / 任务管理器结束进程 / 断电 / OOM）。
+ * ⚠️ 一条平台事实（照实写，不粉饰）：**Windows 上只有真正的控制台 Ctrl+C
+ *    才会触发这个处理函数** —— `process.kill(pid,'SIGTERM')` 在 Windows 上
+ *    是 TerminateProcess，不可捕获。所以这条路径**没法用机器复现**，
+ *    它由 test-all 里的源码断言守着（「中断必须当场还原」那一条），
+ *    而不是由一次真跑来证明。
+ */
+let inFlight = null // { abs, original, child }
+let interrupted = false
+
+function restoreInFlight() {
+  if (!inFlight) return false
+  const { abs, original } = inFlight
+  inFlight = null
+  try {
+    fs.writeFileSync(abs, original, 'utf8')
+  } catch (e) {
+    console.log(`✗ 还原失败（${e.message}）：${abs} —— 手动 git checkout 它`)
+    return false
+  }
+  try {
+    fs.rmSync(SENTINEL, { force: true })
+  } catch {
+    /* 哨兵删不掉不影响还原本身 */
+  }
+  return true
+}
+
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    /* 连按两次 = 用户明确要立刻停：别拦着（第一次已经还原过了） */
+    if (interrupted) process.exit(130)
+    interrupted = true
+    console.log(`\n⚠️ 收到 ${sig} —— 正在杀掉子进程并还原源码…`)
+    if (inFlight && inFlight.child) {
+      try {
+        inFlight.child.kill('SIGKILL')
+      } catch {
+        /* 已经死了 */
+      }
+    }
+    const ok = restoreInFlight()
+    console.log(ok ? '   源码已还原、哨兵已清 —— 工作树是干净的。' : '   ⚠️ 没还原成，看上面那行。')
+    process.exit(130)
+  })
+}
+
+/* ★ 异步跑一个变异体。resolve `{ error }`：error 非空 = "子进程没跑成"
+   （起不来 / 超时被杀），它与"跑了但断言没抓住"是两件事，绝不能混成一句。 */
+function runChildOnce(testFile) {
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = null
+    const childFd = fs.openSync(CHILD_LOG, 'w')
+    const done = (error) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      try {
+        fs.closeSync(childFd)
+      } catch {
+        /* 已经关了 */
+      }
+      resolve({ error })
+    }
+    /* ⚠️⚠️ 子进程的输出**必须走文件描述符，不能走管道**（这一条是实测撞出来的）。
+     *
+     * `stdio` 的缺省值是 'pipe'，而在带文件沙箱的环境里创建管道会被拒：
+     *   spawn 返回 status === null / error.code === 'EPERM' / stdout === undefined
+     * ⇒ 输出永远是空的 ⇒ **每一个**变异体都被判成「测试根本没跑起来」。
+     *   44 个变异体一起报「无效」，看着像自己的锚点全写错了，
+     *   而真相是子进程压根没起来 —— 这个误导性极大，所以在这里写死。
+     * 文件描述符没有这个限制，顺带也不再需要 maxBuffer（大输出不会被截断）。 */
+    const child = spawn(process.execPath, [testFile], {
+      cwd: ROOT,
+      stdio: ['ignore', childFd, childFd],
+    })
+    if (inFlight) inFlight.child = child
+    /* ★ 超时是必须的（2026-09-30 审查发现）：旧写法没有 timeout，也没有人读 r.status ——
+       一个"让测试挂住"的变异体（死循环、等一个永不返回的 socket）会让整条门禁
+       **无限期挂住**，而此刻源码正处在变异态、哨兵还在盘上。 */
+    timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* 已经死了 */
+      }
+      done('超时 180s（子进程已 SIGKILL）')
+    }, 180_000)
+    child.on('error', (e) => done(String(e.code || e.message || e)))
+    child.on('close', () => done(null))
+  })
+}
+
 for (const m of MUTANTS) {
   if (ONLY && !(String(m.why).includes(ONLY) || String(m.test || '').includes(ONLY))) continue
   ranCount += 1
@@ -921,40 +1035,37 @@ for (const m of MUTANTS) {
      ⚠️ `at` 是"新鲜度"的判据（见文件开头那段）：没有它，下一次运行无从判断
      这份哨兵是"刚刚中断"还是"两天前留下的" —— 后者按它还原会退掉一整段代码。 */
   fs.writeFileSync(SENTINEL, JSON.stringify({ at: Date.now(), file: m.file, files: { [m.file]: original } }), 'utf8')
+  /* ⚠️ 顺序不能反：先登记 inFlight（还原用的原文 + 子进程句柄），**再**写坏源码。
+     反过来的话，"写坏"与"登记"之间挨一个信号就没得还原了 ——
+     与哨兵必须先于写盘是同一条规矩。 */
+  inFlight = { abs, original, child: null }
   fs.writeFileSync(abs, replaceLiteral(original, m.from, m.to), 'utf8')
   let out = ''
   let spawnErr = ''
-  let childFd = null
   try {
-    /* ⚠️⚠️ 子进程的输出**必须走文件描述符，不能走管道**（这一条是实测撞出来的）。
-     *
-     * `stdio` 的缺省值是 'pipe'，而在带文件沙箱的环境里创建管道会被拒：
-     *   spawnSync 返回 status === null / error.code === 'EPERM' / stdout === undefined
-     * ⇒ 输出永远是空的 ⇒ **每一个**变异体都被判成「测试根本没跑起来」。
-     *   44 个变异体一起报「无效」，看着像自己的锚点全写错了，
-     *   而真相是子进程压根没起来 —— 这个误导性极大，所以在这里写死。
-     * 文件描述符没有这个限制，顺带也不再需要 maxBuffer（大输出不会被截断）。 */
-    childFd = fs.openSync(CHILD_LOG, 'w')
     /* ★ 每个变异体跑哪一份考裁判：默认 test-all，AI 那几条指向 test-ai-brief。
        两边都以结论行收尾，所以下面的判据不用分叉。 */
     const testFile = m.test ? path.join(ROOT, m.test) : path.join(ROOT, 'tools', 'test-all.mjs')
-    /* ★ 超时是必须的（2026-09-30 审查发现）：旧写法没有 timeout，也没有人读 r.status ——
-       一个"让测试挂住"的变异体（死循环、等一个永不返回的 socket）会让整条门禁
-       **无限期挂住**，而此刻源码正处在变异态、哨兵还在盘上。 */
-    const r = spawnSync(process.execPath, [testFile], {
-      cwd: ROOT, stdio: ['ignore', childFd, childFd],
-      timeout: 180_000, killSignal: 'SIGKILL',
-    })
-    if (r.error) spawnErr = String(r.error.code || r.error.message || r.error)
+    const r = await runChildOnce(testFile)
+    if (r.error) spawnErr = r.error
     out = fs.readFileSync(CHILD_LOG, 'utf8')
   } finally {
-    if (childFd !== null) fs.closeSync(childFd)
-    fs.writeFileSync(abs, original, 'utf8')
-    fs.rmSync(SENTINEL, { force: true })
+    restoreInFlight()
   }
   /* ★ 子进程**起不来**与「测试跑了但没结论」是两件事，绝不能混成一句
      —— 混了的话，环境问题会被读成「我的断言全废了」。 */
   if (spawnErr) {
+    /* ★ 超时与"起不来"必须分开报（2026-09-30 顺手补的一条）：
+       超时是**这个变异体**没跑出结论（测试可能挂住了），源码已经还原过；
+       而"起不来"是**这个环境**跑不了变异测试。
+       混成一句的话，一次超时会被读成"环境废了、别再往下看"，而真正该看的是那条挂住的测试。 */
+    if (/^超时/.test(spawnErr)) {
+      console.log(`\n✗ 变异体超时（${spawnErr}）：${m.why}`)
+      console.log(`   文件：${m.file}`)
+      console.log('   ⚠️ 这**不算漏网**，也不算抓住：它没跑出结论。源码已还原。')
+      allCaught = false
+      continue
+    }
     console.log(`\n✗✗✗ 子进程起不来（${spawnErr}）—— 这个环境跑不了变异测试，别再往下看了`)
     console.log('   （沙箱拒绝创建管道时会这样；把 stdio 换成文件描述符即可，见上面那段注释）')
     process.exit(1)
@@ -970,19 +1081,12 @@ for (const m of MUTANTS) {
         这种最危险的情形，恰好会被判成落网。
      ⇒ 现在先把输出切成"失败块"（`✗ 名字` 那一行 + 紧跟其后的缩进明细行），
         再要求**某一块**里出现 expect：通过断言的文本不再参与匹配，
-        而"断言名字里没有、只在失败明细里出现"的 expect 仍然匹配得上。 */
-  const failBlocks = (() => {
-    const blocks = []
-    let cur = null
-    for (const line of out.split('\n')) {
-      const head = line.match(/^\s{2}[✗✘]\s+(.+)$/)
-      if (head) { cur = [head[1]]; blocks.push(cur); continue }
-      if (cur && /^\s{4,}\S/.test(line)) { cur.push(line.trim()); continue }
-      if (/^\s{2}[✔✓]/.test(line) || /^\S/.test(line)) cur = null
-    }
-    return blocks
-  })()
-  const named = failBlocks.some((b) => b.join('\n').includes(m.expect))
+        而"断言名字里没有、只在失败明细里出现"的 expect 仍然匹配得上。
+     ⚠️ 第二天（同一次审查的复查）又发现解析只认 test-all 的格式，
+        于是 test-ai-brief 那 8 个变异体**全部**被误报成漏网 ——
+        ⇒ 解析器搬到 lib/fail-blocks.mjs，两种格式一起认，
+          并且由 test-all 里那三条断言真跑一遍（两种格式 + "通过断言的文本不许参与匹配"）。 */
+  const named = failureMentions(out, m.expect)
   const caught = failed && named
   if (!caught) allCaught = false
 

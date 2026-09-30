@@ -1127,6 +1127,79 @@ ok('★ 不许再用 window.prompt（Electron 渲染进程里它不存在，且�
   );
 });
 
+ok('★★ `[hidden]` 必须真的隐藏：card.css 里那条全局重置不能删（2026-09-30 审查 #3）', () => {
+  /* ⚠️ 事故形状：作者样式表里的 `display` 会压过浏览器默认的 `[hidden]{display:none}`，
+     而 `.chip--edit` / `.chip--pick` 都写了 `display:flex`（为了居中文案）⇒
+     `setShown(node,false)`（只增删 hidden 属性）对这两个按钮**完全无效**：
+       · 选中「全部」时「编辑」「精选」照样显示；
+       · 点下去什么也不发生 —— 正是本项目最忌讳的"点了没反应"。
+     ⇒ 全项目"hidden 语义还成立"就靠这一条 `!important` 全局重置撑着。
+     ⚠️ 为什么这条断言必须盯着 CSS：离线装置（tools/card-rig.mjs）**没有 CSS**
+        （节点上只有 `style: {}`），而断言查的是 IDL 属性 `el.hidden` ——
+        属性确实被设置了 ⇒ 离线全绿、真机坏。跨文件的那半边只能这样钉。 */
+  const css = readCss('card.css').replace(/\/\*[\s\S]*?\*\//g, ''); // 先剥注释，免得咬到注释里举的反例
+  const hit = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((r) => r[1].trim() === '[hidden]');
+  assert.equal(
+    hit.length,
+    1,
+    'card.css 里应当**恰好**有一条 `[hidden]` 规则（现在 ' + hit.length + ' 条）—— ' +
+      '它是整个界面里 hidden 语义还成立的唯一保证，不能删、也不该有第二条与它打架',
+  );
+  assert.ok(
+    /display\s*:\s*none\s*!important/.test(hit[0][2]),
+    '`[hidden]` 规则里不是 `display:none !important` —— 少了 !important 就压不过 .chip--edit 的 display:flex，' +
+      '那两个按钮会变成"属性说藏了、屏幕还显示、点下去没反应"',
+  );
+  /* 另外两份 CSS 也在同一页里，不许再有第二条 [hidden] 规则把它顶掉 */
+  for (const f of ['surface.css', 'tokens.css']) {
+    const other = readCss(f).replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const r of other.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      if (r[1].trim() !== '[hidden]') continue;
+      assert.ok(
+        /display\s*:\s*none/.test(r[2]),
+        f + ' 里有一条 `[hidden]` 规则却没写成 display:none —— 它会与 card.css 那条打架（谁后加载谁说了算）',
+      );
+    }
+  }
+});
+
+ok('★★ 真机自检必须按**渲染结果**判"藏没藏"（按属性判 = 自检跟着一起撒谎）', () => {
+  /* ⚠️ 2026-09-30 审查 #3 的另一半：诊断通道当时是按 `el.hidden` **属性**判的，
+     于是出事时它给出的正好是相反的结论（"hidden" —— 而用户眼里那个按钮就在屏幕上）。
+     诊断撒谎比没有诊断更糟：它会把人引去改本来完全正确的渲染逻辑。
+     ⇒ 现在判 getComputedStyle，并且**两个方向**都点名。 */
+  const card = readFileRel('src/renderer/card.js');
+  /* 判据函数本身：必须真的问渲染结果 */
+  const hf = card.match(/function hiddenFacts\(n\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(hf, '找不到 hiddenFacts() 的实现（"藏没藏"的唯一判据）');
+  assert.ok(
+    /getComputedStyle\(/.test(hf[0]) && /display\s*===\s*'none'/.test(hf[0]),
+    'hiddenFacts 没问 getComputedStyle().display —— 按 hidden 属性判的话，"属性设了但没藏住"这种情形自检会报成"已藏好"',
+  );
+  const btn = card.match(/function btnInfo\(id\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(btn, '找不到 btnInfo() 的实现');
+  assert.ok(
+    /hiddenFacts\(/.test(btn[0]),
+    'btnInfo 没有用 hiddenFacts —— 它又回去按 hidden 属性判了（那正是审查 #3 里看不见毛病的那个判据）',
+  );
+  assert.ok(
+    !/\bn\.hidden\s*\?/.test(btn[0]),
+    'btnInfo 又在拿 `n.hidden` 当判据 —— 属性一直是设着的，问它永远看不出"没藏住"',
+  );
+  const panel = card.match(/function panelBox\(\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(panel, '找不到 panelBox() 的实现');
+  assert.ok(
+    /hiddenAttr/.test(panel[0]) && /hf\.really/.test(panel[0]),
+    'panelBox 没把「属性（模型的意图）」与「渲染结果（用户实际看不看得见）」分开报 —— ' +
+      '两者不一致本身就是缺陷，混成一个字段就报不出来',
+  );
+  const verdict = card.slice(card.indexOf('var verdict = [];'), card.indexOf('window.MB_DOMCHECK'));
+  assert.ok(
+    /该藏起来却还在显示/.test(verdict),
+    'verdict 只查了"该显示却被藏了"这一个方向 —— "属性说藏了、实际还在显示（点了没反应）"照样溜得过去',
+  );
+});
+
 say('');
 say('【第一层之四】筛选栏面板的**可读性**（真机截图换来的两条硬约束）');
 

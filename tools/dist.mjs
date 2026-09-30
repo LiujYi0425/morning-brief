@@ -26,6 +26,13 @@
  * 另外它把"先生成图标"这一步也收进来了：win.icon 指向 build/icon.ico，
  * 文件不在时 electron-builder **不报错**，它直接退回 Electron 的默认图标 ——
  * 又一处"静默降级"，所以这步必须是硬前置。
+ *
+ * ★ 2026-09-30 审查的下一步：打包成功之后**自动**跑 `tools/check-dist.mjs`。
+ *   理由：那个脚本是"唯一的隐私边界闸门"（asar 不是加密归档，一条 `asar extract`
+ *   就把 data/ 里我的真实简报全取出来了），而它此前**只是被打印一句提醒** ——
+ *   能不能跑全凭人记得。而"没人跑的门禁"与"没有门禁"在交付上是一回事：
+ *   打包成功那一刻正是最容易顺手把 exe 发出去的时刻。
+ *   ⇒ 现在它进同一条命令，退出码由它决定（不通过 = npm run dist 非零退出）。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -62,8 +69,8 @@ function run(args) {
   })
 }
 
-/* ─────────────── 1/2 图标（硬前置） ─────────────── */
-console.log('[dist] 1/2 生成图标与托盘图标')
+/* ─────────────── 1/3 图标（硬前置） ─────────────── */
+console.log('[dist] 1/3 生成图标与托盘图标')
 let code = await run([path.join(ROOT, 'tools', 'make-icon.mjs')])
 if (code !== 0) {
   console.error('[dist] ✗ 图标生成失败 —— 中止。继续打包会用 Electron 默认图标。')
@@ -76,10 +83,10 @@ if (!fs.existsSync(ico)) {
 }
 console.log(`[dist]    build/icon.ico 就位（${fs.statSync(ico).size} 字节）`)
 
-/* ─────────────── 2/2 electron-builder ───────────────
+/* ─────────────── 2/3 electron-builder ───────────────
    CLI 入口从 electron-builder 自己的 package.json `bin` 字段读，
    不硬编码路径 —— 那属于"两份口径"，它换个目录就静默失效。 */
-console.log('[dist] 2/2 electron-builder --win')
+console.log('[dist] 2/3 electron-builder --win')
 const ebDir = path.join(ROOT, 'node_modules', 'electron-builder')
 const ebPkgFile = path.join(ebDir, 'package.json')
 if (!fs.existsSync(ebPkgFile)) {
@@ -102,8 +109,21 @@ console.log(`[dist]    electron-builder ${ebPkg.version} · ${path.relative(ROOT
 code = await run([cli, '--win'])
 if (code === 0) {
   console.log('\n[dist] ✓ 打包完成 → release/')
-  console.log('[dist]   下一步务必跑：npm run dist:check（核对隐私边界，不发出去之前必须过）')
-} else {
-  console.error(`\n[dist] ✗ electron-builder 退出码 ${code}`)
+  /* ─────────────── 3/3 隐私边界核对（不可跳过） ───────────────
+     ⚠️ 这一步**不是**"打包成功没成功"，是"这个产物能不能给别人"。
+        它失败时最可能的两种情形都很安静：asar 里混进了 data/、
+        或者体积闸门里塞进了别的东西 —— 而 exe 看上去完全正常。
+     ⇒ 退出码直接用它：check-dist 不通过 = 这次打包**没完成**。 */
+  console.log('[dist] 3/3 核对产物（隐私边界 · 白名单 · 体积闸门）')
+  const check = await run([path.join(ROOT, 'tools', 'check-dist.mjs')])
+  if (check === 0) {
+    console.log('\n[dist] ✓ 产物核对通过 —— 隐私边界干净，可以发出去了')
+  } else {
+    console.error(`\n[dist] ✗ 产物核对没过（退出码 ${check}）—— **别发出去**，按上面逐条处理`)
+  }
+  process.exit(check)
 }
+console.error(`\n[dist] ✗ electron-builder 退出码 ${code}`)
+/* ⚠️ 打包失败时**不跑** check-dist：那时 release/ 里躺的是上一次的产物，
+   跑它只会拿旧产物给出一个"通过"，把失败包装成成功。 */
 process.exit(code)

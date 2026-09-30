@@ -1862,12 +1862,36 @@
     };
   }
 
+  /* ★★ 「藏了没有」必须问**渲染结果**，不能只看 `hidden` 属性（2026-09-30 审查 #3）。
+   *
+   * ⚠️ 事故形状：作者样式表里的 `display` 会压过浏览器默认的 `[hidden]{display:none}`，
+   *    而 `.chip--edit` / `.chip--pick` 都写了 `display:flex`（为了居中文案）⇒
+   *    `setShown(node,false)` 只设属性、元素照样显示、点下去什么也不发生。
+   *    而**自检会跟着一起撒谎**：它按属性判，于是报 `hidden`，用户眼里是显示着的 ——
+   *    也就是说，出事时唯一的反馈通道给出的正好是相反的结论。
+   * ⇒ card.css 里那条 `[hidden] { display: none !important }` 是修法，
+   *    这里问 getComputedStyle 是**守它的那条判据**：以后谁把那条 !important 删了，
+   *    自检立刻改口说"属性设了、但没藏住"（而不是像以前那样断言"已经藏好了"）。
+   */
+  function hiddenFacts(n) {
+    var cs = getComputedStyle(n);
+    return {
+      attr: !!n.hidden,
+      really: cs.display === 'none' || cs.visibility === 'hidden',
+      display: cs.display,
+    };
+  }
+
   function btnInfo(id) {
     var n = document.getElementById(id);
     if (!n) return 'missing';
     var r = n.getBoundingClientRect();
-    return (n.hidden ? 'hidden' : n.disabled ? 'disabled' : 'shown') +
-      '(w=' + Math.round(r.width) + ',x=' + Math.round(r.left) + ',y=' + Math.round(r.top) + ')';
+    var h = hiddenFacts(n);
+    return (h.really ? 'hidden' : n.disabled ? 'disabled' : 'shown') +
+      '(w=' + Math.round(r.width) + ',x=' + Math.round(r.left) + ',y=' + Math.round(r.top) + ')' +
+      /* ⚠️ 后缀里**不许出现 "hidden" 这个词**：上面那段 verdict 用 /hidden/ 判"该显示却被藏了"，
+         多一个词就会把"属性设了但没藏住"误报成"被藏住了"。 */
+      (h.attr !== h.really ? '⚠属性说' + (h.attr ? '藏' : '显示') + '、实际' + (h.really ? '藏' : '显示') + '(display=' + h.display + ')' : '');
   }
 
   /**
@@ -1883,7 +1907,13 @@
     var n = document.getElementById('catPanel');
     if (!n) return { exists: false };
     var b = box('#catPanel');
-    b.hidden = !!n.hidden;
+    /* ★ 两个都要报，而且要分清（2026-09-30 审查 #3）：
+         · hiddenAttr = 模型的**意图**（setShown 设的那个属性）
+         · hidden     = 用户**实际看不看得见**（问 getComputedStyle）
+       两者不一致本身就是缺陷 —— 面板"没展开"而屏幕上还挂着一块，用户会以为界面坏了。 */
+    var hf = hiddenFacts(n);
+    b.hiddenAttr = hf.attr;
+    b.hidden = hf.really;
     var cardEl = document.querySelector('.card');
     b.cardBottom = cardEl ? Math.round(cardEl.getBoundingClientRect().bottom) : null;
     b.clippedBy = b.cardBottom != null && b.exists ? Math.max(0, b.bottom - b.cardBottom) : null;
@@ -2053,12 +2083,28 @@
         if (want.more.split('/')[0] === 'true' && /hidden/.test(b.more)) verdict.push('❌ 展开更多：该显示却被藏了');
         if (want.all && /hidden/.test(b.all)) verdict.push('❌ 看今天全部：该显示却被藏了（自持性被破坏）');
         if (want.collapse && /hidden/.test(b.collapse)) verdict.push('❌ 收起：展开态却没有收起按钮');
+        /* ★ 反方向也必须点名（2026-09-30 审查 #3 —— 那个 bug 正好落在这里）：
+             模型说"藏起来"，而它**其实还在显示** ⇒ 用户看得见、点下去什么也不发生，
+             正是本项目最忌讳的"点了没反应"。
+           ⚠️ 判据问的是**渲染结果**（btnInfo 里那个 token 来自 getComputedStyle），
+              不是 `el.hidden` —— 属性一直是设着的，问它永远看不出这个毛病。 */
+        if (want.more.split('/')[0] === 'false' && !/hidden/.test(b.more)) verdict.push('❌ 展开更多：该藏起来却还在显示（点了没反应）');
+        if (!want.all && !/hidden/.test(b.all)) verdict.push('❌ 看今天全部：该藏起来却还在显示（点了没反应）');
+        if (!want.collapse && !/hidden/.test(b.collapse)) verdict.push('❌ 收起：该藏起来却还在显示（点了没反应）');
 
         /* 编辑面板（本次功能）。四种判据分开说 —— 与上面那套同一口径：
            "没开"是正常状态，"开了却看不见/被裁"才是缺陷。 */
         var pn = report.panel;
         if (pn.exists === false) verdict.push('❌ 编辑面板容器不存在（card.html 里少了 #catPanel）');
-        else if (pn.hidden) verdict.push('· 编辑面板未展开（正常）');
+        else if (pn.hiddenAttr !== pn.hidden) {
+          /* ★ 属性与渲染结果打架 = 2026-09-30 审查 #3 那个 bug 的形状
+             （hidden 设了，而 CSS 的 display 把它顶回来了）。 */
+          verdict.push(
+            '❌ 编辑面板：hidden 属性说' + (pn.hiddenAttr ? '藏起来' : '显示') + '，实际却' +
+              (pn.hidden ? '藏起来了' : '显示着') + '（display=' + pn.display + '）' +
+              ' —— 查 card.css 那条 [hidden]{display:none!important} 还在不在',
+          );
+        } else if (pn.hidden) verdict.push('· 编辑面板未展开（正常）');
         else if (!pn.visible) verdict.push('❌ 编辑面板已展开但尺寸为 0（w=' + pn.w + ' h=' + pn.h + '）');
         else if (pn.clippedBy != null && pn.clippedBy > 0) {
           verdict.push('❌ 编辑面板被卡片裁掉 ' + pn.clippedBy + 'px（下沿 ' + pn.bottom + ' > 卡片底 ' + pn.cardBottom + '）—— 收起态要能装下它');

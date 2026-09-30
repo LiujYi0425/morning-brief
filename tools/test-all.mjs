@@ -34,7 +34,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
-/** 同步加载 node:sqlite —— 只给同步的变异体用（见 makeSyncTestDb 的说明） */
+/** 同步加载 node:sqlite —— 给**同步**夹具用（异步用例一律走 await import，见 makeSyncTestDb 的说明） */
 const require = createRequire(import.meta.url);
 /* ⚠️ 必须用 node:url 的 fileURLToPath，不能手写 `pathname.replace(...)`：
    工作目录里带空格（`D:\work Buddy\...`）时 URL 里是 `%20`，
@@ -194,6 +194,11 @@ import { selectByQuota, quotaOf, scopedQuota, classOf, PREF } from '../src/share
    所以下面能拿临时库真跑一遍 —— 而不是只咬源码）。 */
 import { pickDiverse, DOMAIN_PICK } from '../src/shared/pick.js';
 import { pickDomainToday } from '../src/main/brief-service.js';
+/* ★ 变异测试的判据解析器（"失败的**正是**那条断言"）。
+   它 2026-09-30 静默坏过一次：判据收紧之后只认 test-all 的缩进格式，
+   于是 test-ai-brief 那 8 个变异体**全部**被误报成"漏网"（而它们其实全都落网）。
+   ⇒ 判据本身也要有判据，下面那三条断言就是干这个的。 */
+import { parseFailBlocks, failureMentions } from './lib/fail-blocks.mjs';
 
 const lines = [];
 const say = (s = '') => {
@@ -622,11 +627,11 @@ function tmpDbFile(tag) {
 }
 
 /**
- * 同步建一个**最小可用**的测试库，供同步的变异体使用。
+ * 同步建一个**最小可用**的测试库，供**同步**用例使用。
  *
  * ⚠️ 为什么不用 `openDb`：它现在是异步的（`node:sqlite` 要延迟加载，
  *    因为**在 Electron 主进程顶层静态 import 它会原生崩溃**，见 store/db-setup.js）。
- *    而变异体的 `run()` 是同步的。
+ *    而同步用例（`ok()`）不能 await。
  *    ⇒ 这里用 `createRequire` 同步拿驱动 —— **测试进程里没有那个崩溃条件**
  *      （崩溃只发生在 Electron 主进程求值 `app.whenReady()` 之前）。
  *
@@ -4258,64 +4263,11 @@ ok('★ main/index.js 的 buildBrief 必须调用 selectByQuota，而且要传**
 });
 
 /* ------------------------------------------------------------------
- * 变异体用的**同步**夹具（变异体的 run() 不能是 async）
- *
- * ⚠️ 这里刻意把"删类型"与"写映射"的**真实实现**再写一遍（而不是调用
- *    db.js 里那两个函数）—— 变异体要能**独立地**把某一步改坏，
- *    然后看刚才那两条断言抓不抓得住。调用真实现就等于"拿实现验证实现"。
- *    所以下面这两段是**故意的副本**，不是重复代码：它们就是"坏实现"的宿主。
+ * （这里原来有一组"变异体用的同步夹具"：syncQuotaDb / syncDeleteCategory /
+ *   syncSetCategorySources / syncSetCategorySourcesAppendOnly /
+ *   syncDeleteCategoryWithItems。它们唯一的消费者是上面那张已删除的
+ *   V1–V18 假变异体表 ⇒ 一并删掉：留着就是"拆掉也没人发现的代码"。）
  * ------------------------------------------------------------------ */
-function syncQuotaDb() {
-  const { DatabaseSync } = require('node:sqlite');
-  const db = new DatabaseSync(':memory:');
-  db.exec(
-    'CREATE TABLE item (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT);' +
-      'CREATE TABLE category (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);' +
-      'CREATE TABLE item_category (item_id INTEGER, category_id INTEGER, PRIMARY KEY (item_id, category_id));' +
-      'CREATE TABLE source (id INTEGER PRIMARY KEY AUTOINCREMENT, feed_url TEXT UNIQUE, name TEXT);' +
-      'CREATE TABLE source_category (source_id INTEGER, category_id INTEGER, PRIMARY KEY (source_id, category_id));',
-  );
-  db.prepare("INSERT INTO category (id, name) VALUES (1, '甲'), (2, '乙')").run();
-  db.prepare("INSERT INTO source (id, feed_url, name) VALUES (1, 'https://a/feed', 'A'), (2, 'https://b/feed', 'B')").run();
-  const tag = db.prepare('INSERT INTO item_category (item_id, category_id) VALUES (?, ?)');
-  for (let i = 1; i <= 6; i += 1) {
-    db.prepare('INSERT INTO item (id, title) VALUES (?, ?)').run(i, '条目' + i);
-    tag.run(i, 1);
-    if (i % 2 === 0) tag.run(i, 2);
-  }
-  db.prepare('INSERT INTO source_category (source_id, category_id) VALUES (1, 1), (2, 1)').run();
-  return db;
-}
-
-/** 「删类型」的**正确**形状：只删分类与绑定，条目一条不动 */
-function syncDeleteCategory(db, categoryId) {
-  db.prepare('DELETE FROM item_category WHERE category_id = ?').run(categoryId);
-  db.prepare('DELETE FROM source_category WHERE category_id = ?').run(categoryId);
-  db.prepare('DELETE FROM category WHERE id = ?').run(categoryId);
-}
-
-/**
- * 「写映射」的**正确**形状：先清后写（覆盖式）。
- * ⚠️ 只增不减会让"取消勾选"变成空操作 —— 用户以为改好了，其实没有。
- */
-function syncSetCategorySources(db, categoryId, sourceIds) {
-  db.prepare('DELETE FROM source_category WHERE category_id = ?').run(categoryId);
-  const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
-  for (const id of sourceIds) ins.run(id, categoryId);
-}
-
-/** 「写映射」的**坏**形状：只增不减 —— V10 变异体的宿主 */
-function syncSetCategorySourcesAppendOnly(db, categoryId, sourceIds) {
-  const ins = db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, ?)');
-  for (const id of sourceIds) ins.run(id, categoryId); // 坏实现：没有先清
-}
-
-/** 「删类型」的**坏**形状：顺手把条目也删了（用户整理一下类型就永久丢数据） */
-function syncDeleteCategoryWithItems(db, categoryId) {
-  db.prepare('DELETE FROM item WHERE id IN (SELECT item_id FROM item_category WHERE category_id = ?)').run(categoryId);
-  syncDeleteCategory(db, categoryId);
-}
-
 /* ---------- 变异测试 ---------- */
 say();
 
@@ -5103,6 +5055,27 @@ ok('★★ 发布脚本必须拦住「同一个版本号发两次」', () => {
   assert.ok(/--force/.test(src), '没有 --force 旁路 —— 上一次传坏了就没法重发同一版');
 });
 
+ok('★★ 打包成功之后必须**自动**跑隐私边界核对（不能只打印一句「务必跑」）', () => {
+  /* ⚠️ 2026-09-30 审查：check-dist 是唯一的隐私边界闸门（asar 不是加密归档，
+     一条 asar extract 就把 data/ 里的真实简报全取出来了），而它此前**只是一个提醒** ——
+     能不能跑全凭人记得。而"没人跑的门禁"与"没有门禁"在交付上是一回事：
+     打包成功那一刻正是最容易顺手把 exe 发出去的时刻。 */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'tools', 'dist.mjs'), 'utf8');
+  assert.ok(/check-dist\.mjs/.test(src), 'dist.mjs 没有调用 check-dist —— 打包成功之后没人核对隐私边界');
+  const iRun = src.indexOf("'tools', 'check-dist.mjs'");
+  assert.ok(iRun > 0, '定位不到调用 check-dist 的那一行（本脚本结构变了？）');
+  /* 退出码必须由**核对结果**决定，不是由打包决定 —— 否则 CI 里看不出来 */
+  assert.ok(
+    /process\.exit\(check\)/.test(src),
+    '核对结果没有变成退出码（举例：仍旧 process.exit(code)）—— 核对失败在 CI 里看不出来',
+  );
+  /* ★ 打包**失败**时不许跑核对：那一刻 release/ 里躺的是上一次的产物，
+     跑它只会拿旧产物给出一个"通过"，把一次失败包装成成功。 */
+  const iFail = src.indexOf('electron-builder 退出码');
+  assert.ok(iFail > 0, '定位不到打包失败那条分支');
+  assert.ok(iRun < iFail, 'check-dist 被挪到"打包失败"那条路径上/之后了 —— 那会用上一次的旧产物给出假绿');
+});
+
 ok('★★ 开发态也必须找得到托盘图标（托盘菜单是唯一的退出入口）', () => {
   /* ⚠️ runtimeAsset 在开发态原来只找 <项目>/<rel>，而托盘图标实际住在
      src/renderer/assets/ ⇒ npm start 时托盘**静默消失**，用户只能去任务管理器。 */
@@ -5218,281 +5191,116 @@ ok('★★ 变异测试的哨兵必须会「过期」—— 否则它会把源�
   assert.ok(/process\.exit\(1\)/.test(branch), '过期哨兵只打印一句就继续 —— 那还是会往下盲写');
   assert.ok(!/writeFileSync\(path\.join\(ROOT/.test(branch), '过期分支里居然还在写盘（盲写就是要防的那件事）');
 });
-say('--- 变异测试 · 用例表抓不抓得住坏实现 ---');
-/** 每个变异体：改坏一处，期望"至少有一条断言失败" */
-const MUTANTS = [
-  {
-    id: 'V1',
-    desc: '实体解码顺序反了（&amp; 先解）',
-    run: () => {
-      // 坏实现：先解 &amp; 再解 &lt;
-      const bad = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<');
-      assert.equal(bad('&amp;lt;'), '&lt;'); // 会得到 '<' ⇒ 抛
-    },
-  },
-  {
-    id: 'V2',
-    desc: 'URL 归一化把 query 整个丢掉（会把不同文章合并）',
-    run: () => {
-      const bad = (s) => s.split('?')[0];
-      assert.notEqual(bad('https://e.com/p?id=1'), bad('https://e.com/p?id=2'));
-    },
-  },
-  {
-    id: 'V3',
-    desc: 'URL 解析失败返回空串（所有坏 URL 变成同一条 = 静默合并）',
-    run: () => {
-      /* ⚠️ 这个变异体第一版**写错了**：我给它套了个 try/catch 再返回 ''，
-         但 `canonicalizeUrl` 根本不会抛 —— 于是那个分支从不执行，
-         变异体"存活"，把用例表冤枉成假测试。
-         **变异体自己写错与假阴性同样有害**：它会让你去改本来正确的代码。
-         ⇒ 正确写法是**真的把行为改坏**：无法解析就返回空串。 */
-      const bad = (s) => {
-        try {
-          return new URL(s).toString();
-        } catch {
-          return '';
-        }
-      };
-      // 坏实现下："bad one" 与 "bad two" 都变成 '' ⇒ 相等 ⇒ 断言抛
-      assert.notEqual(bad('bad one'), bad('bad two'));
-    },
-  },
-  {
-    id: 'V4',
-    desc: '分页用 OFFSET（翻页期间插入新条目会漏条）',
-    /* ⚠️ 变异体是**同步**的（`run: () => {}`），所以这里不能用 await。
-       而它只需要一个能建表插数据的库 —— 与其为一个变异体引异步依赖，
-       不如直接用**内存库 + 同步建表**：变异体考的是"OFFSET 会不会重叠"，
-       与 schema 长什么样无关。这也让变异体保持零异步、不与主流程耦合。 */
-    run: () => {
-      const dbFile = tmpDbFile('mut-offset');
-      const db = makeSyncTestDb(dbFile);
-      const now = new Date().toISOString();
-      upsertSources(db, [{ name: 'S', feedUrl: 'https://s.com/f', kind: 'rss' }], now);
-      const runId = startRun(db, 'manual', now);
-      for (let i = 1; i <= 10; i += 1) {
-        insertItem(db, { title: `i${i}`, url: `https://e.com/${i}`, publishedAt: new Date(Date.UTC(2026, 8, 22, 0, 0, i)).toISOString(), sourceId: 1, sourceName: 'S' }, runId, now);
-      }
-      // 坏实现：OFFSET 式
-      const page1 = db.prepare('SELECT id FROM item ORDER BY published_at DESC, id DESC LIMIT 3 OFFSET 0').all();
-      insertItem(db, { title: '新插入', url: 'https://e.com/new', publishedAt: '2027-01-01T00:00:00Z', sourceId: 1, sourceName: 'S' }, runId, now);
-      const page2 = db.prepare('SELECT id FROM item ORDER BY published_at DESC, id DESC LIMIT 3 OFFSET 3').all();
-      db.close();
-      const p1 = page1.map((r) => r.id);
-      const p2 = page2.map((r) => r.id);
-      const overlap = p2.filter((id) => p1.includes(id));
-      assert.equal(overlap.length, 0, `OFFSET 式分页重叠了 ${overlap.length} 条 —— 证明游标用例有判别力`);
-    },
-  },
-  {
-    id: 'V5',
-    desc: '解析器把"缺标题"的条目也产出（编造空标题）',
-    run: () => {
-      const bad = (xml) => {
-        const blocks = xml.match(/<item\b[\s\S]*?<\/item\s*>/gi) || [];
-        return blocks.map(() => ({ title: '' })); // 坏实现：不校验
-      };
-      const r = bad('<rss><item><link>x</link></item></rss>');
-      assert.equal(r.length, 0, '坏实现会产出 1 条空标题 —— 证明"不编造标题"用例有判别力');
-    },
-  },
-  {
-    id: 'V6',
-    desc: '源失败时中断整轮（不隔离）',
-    run: () => {
-      const bad = (results) => {
-        const out = [];
-        for (const r of results) {
-          if (!r.ok) throw new Error('一个源失败就整体崩'); // 坏实现
-          out.push(r);
-        }
-        return out;
-      };
-      const results = [{ ok: false }, { ok: true }];
-      assert.doesNotThrow(() => bad(results), '坏实现会抛 —— 证明失败隔离用例有判别力');
-    },
-  },
 
-  /* ==================================================================
-   * V7–V11：本次功能（筛选栏）。
-   * 每一条都对应一个"用户看不见、后果却很重"的坏法 —— 这正是变异测试
-   * 存在的理由：普通断言只证明"现在是对的"，证明不了"改坏了会被发现"。
-   * ================================================================== */
-  {
-    id: 'V7',
-    desc: '配额退化成"降权排序"：不喜欢的有内容也可能一条都不剩（「少放」被做成「不放」）',
-    run: () => {
-      /* 坏实现：把三档各排一队、按顺序取满 15 条 —— 看起来"把不喜欢的排到最后"，
-         实际上喜欢与中性足够填满时，不喜欢的一条都进不来。 */
-      const rank = { 1: 0, 0: 1, '-1': 2 };
-      const prefs = new Map([['1', 1], ['2', 0], ['3', -1]]);
-      const items = []
-        .concat(cand('like', 40, [1], 0))
-        .concat(cand('mid', 40, [2], 1000))
-        .concat([{ id: 9999, title: '不喜欢的一条', categories: [3] }]);
-      const picked = items
-        .slice()
-        .sort((a, b) => rank[String(classOf(a, prefs))] - rank[String(classOf(b, prefs))])
-        .slice(0, 15);
-      const hasDislike = picked.some((x) => classOf(x, prefs) === -1);
-      assert.ok(picked.length === 15, '坏实现也给出 15 条 ⇒ **光看条数抓不住这个坏法**');
-      assert.equal(hasDislike, true,
-        '坏实现把不喜欢的那一条挤掉了 —— 证明"不能没有"那条断言咬得住（它要求的正是"里面有不喜欢的那条"）');
-    },
-  },
-  {
-    id: 'V8',
-    desc: '不喜欢不设上限：配额被放开（"少放"变回"全放进来"）',
-    run: () => {
-      const prefs = new Map([['1', 1], ['2', 0], ['3', -1]]);
-      const items = []
-        .concat(cand('like', 40, [1], 0))
-        .concat(cand('mid', 40, [2], 1000))
-        .concat(cand('hate', 40, [3], 2000));
-      /* 坏实现：把配额放开到 15（= 等于没有配额） */
-      const r = selectByQuota({ items, limit: 15, prefByCategory: prefs, quota: 15 });
-      assert.ok(r.counts.dislike <= quotaOf(15),
-        '坏实现让不喜欢占了 ' + r.counts.dislike + ' 条（配额是 ' + quotaOf(15) + '）—— 证明"不超过 K 条"那条断言有判别力');
-    },
-  },
-  {
-    id: 'V9',
-    desc: '删类型顺手删条目（用户整理一下类型就永久丢数据）',
-    run: () => {
-      const db = syncQuotaDb();
-      const before = db.prepare('SELECT COUNT(*) AS n FROM item').get().n;
-      syncDeleteCategoryWithItems(db, 1);          // 坏实现
-      const after = db.prepare('SELECT COUNT(*) AS n FROM item').get().n;
-      db.close();
-      assert.equal(after, before,
-        '坏实现把条目也删了（' + before + ' → ' + after + '）—— 证明"删类型之后条目还在"那条断言咬得住');
-    },
-  },
-  {
-    id: 'V10',
-    desc: '写「源 ↔ 类型」映射时只增不减（取消勾选变成空操作，用户以为改好了）',
-    run: () => {
-      const db = syncQuotaDb();
-      /* 用户此刻只想留源 2（源 1 已经被他取消勾选）—— 走**坏实现** */
-      syncSetCategorySourcesAppendOnly(db, 1, [2]);
-      const left = db.prepare('SELECT source_id FROM source_category WHERE category_id = 1 ORDER BY source_id').all().map((r) => Number(r.source_id));
-      db.close();
-      assert.equal(left.join(','), '2',
-        '坏实现留下了被取消勾选的那个源（实得 ' + left.join(',') + '）—— 证明"写回去的只剩没被取消的那个"那条断言咬得住');
-    },
-  },
-  /* ── 阶段 B：没有官方 feed 的站点（每一条都对应实测到的一件具体的事）── */
-  {
-    id: 'V12',
-    desc: '头条热榜"编造时间"（拿抓取时刻冒充发布时间）',
-    /* ⚠️ 接口根本不返回时间字段。用抓取时刻填的后果不是"差一点"：
-       50 条会拿到同一个时间戳，而且"源没给时间"和"这条就是现在发的"
-       从此分不开 —— 那是本项目写在 fetch-feeds.js 顶部的铁律第 ③ 条。 */
-    run: () => {
-      const bad = () => ({ publishedAt: new Date().toISOString() });
-      const it = bad();
-      assert.equal(it.publishedAt, null, '坏实现用抓取时刻冒充发布时间 —— 证明"不编造时间"那条断言咬得住');
-    },
-  },
-  {
-    id: 'V13',
-    desc: '直播链接当成资讯收下（点开是直播间，不是新闻）',
-    run: () => {
-      const bad = (url) => ({ url }); // 坏实现：不做任何过滤
-      const kept = [bad('https://webcast-open.douyin.com/open/media_live/9527')];
-      for (const it of kept) {
-        assert.ok(!/douyin|webcast/i.test(String(it.url || '')), '坏实现把直播当资讯收下了：' + it.url);
-      }
-    },
-  },
-  {
-    id: 'V14',
-    desc: '热榜 Url 的埋点没去掉（每抓一次就多一批"新"条目）',
-    /* ⚠️ 实测：同一条两次抓取的 Url 不同（带 hot_board_impr_id），
-       而 dedupeKey 优先用 URL ⇒ 不去埋点就等于每刷新一次多 50 条重复。 */
-    run: () => {
-      const bad = (raw) => raw; // 坏实现：原样保留
-      const a = { url: bad('https://www.toutiao.com/trending/1001/?log_pb=AAA'), title: '同一条' };
-      const b = { url: bad('https://www.toutiao.com/trending/1001/?log_pb=BBB'), title: '同一条' };
-      assert.equal(dedupeKey(a), dedupeKey(b), '坏实现下同一件事的去重键不同 —— 证明"埋点必须去掉"那条断言咬得住');
-    },
-  },
-  {
-    id: 'V15',
-    desc: '本机地址那道闸被绕过（没开开关也照样去打 127.0.0.1）',
-    run: () => {
-      const bad = () => null; // 坏实现：永远放行
-      const gate = bad('http://127.0.0.1:1200/cls/telegraph', {});
-      assert.ok(gate, '坏实现放行了本机地址 —— 证明"开关没开就一个请求都不发"那条断言咬得住');
-    },
-  },
-  /* ── 阶段 C：分类体系与「预置源的启用状态」 ── */
-  {
-    id: 'V16',
-    desc: '预置清单又覆盖 enabled（标了 enabled:false 的预置源就永远打不开了）',
-    run: () => {
-      const db = makeSyncTestDb(tmpDbFile('mut-enabled'));
-      const now = new Date().toISOString();
-      upsertSources(db, [{ name: 'S', feedUrl: 'https://s.com/f', kind: 'rss', enabled: 0 }], now);
-      const id = Number(db.prepare('SELECT id FROM source').get().id);
-      db.prepare('UPDATE source SET enabled = 1 WHERE id = ?').run(id);
-      // 坏实现：下一次 upsert 把清单里的 enabled 写回去
-      db.prepare('UPDATE source SET enabled = 0 WHERE feed_url = ?').run('https://s.com/f');
-      const left = db.prepare('SELECT enabled FROM source WHERE id = ?').get(id).enabled;
-      db.close();
-      assert.equal(left, 1, '坏实现把用户打开的源按回去了 —— 证明「不许覆盖 enabled」那条断言咬得住');
-    },
-  },
-  {
-    id: 'V17',
-    desc: '分类迁移不跳过「用户摘干净的源」（升级之后它自己回来）',
-    run: () => {
-      const db = syncQuotaDb();
-      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('unbound_by_user:1', '1');
-      const removedByUser = new Set(
-        db.prepare("SELECT key FROM meta WHERE key LIKE 'unbound_by_user:%'").all().map((r) => Number(String(r.key).slice('unbound_by_user:'.length))),
-      );
-      const honoured = removedByUser.has(1); // 坏实现里这里是 false
-      db.close();
-      assert.equal(honoured, true, '坏实现忽略了 unbound_by_user 记号 —— 证明「跳过用户摘干净的源」那条断言咬得住');
-    },
-  },
-  {
-    id: 'V18',
-    desc: '本机源批量开关把**公网源**也一起改了（「只动本机那一组」的边界被抹掉）',
-    run: () => {
-      const bad = () => 'UPDATE source SET enabled = 1'; // 坏实现：不带 WHERE
-      assert.ok(/WHERE/.test(bad()), '坏实现会连公网源一起改 —— 证明「公网源一个都不碰」那条断言咬得住');
-    },
-  },
-  {
-    id: 'V11',
-    desc: '用户改动被预置清单覆盖（每次启动都按代码里的清单重播一遍映射）',
-    run: () => {
-      const db = syncQuotaDb();
-      syncSetCategorySources(db, 1, [2]);          // 用户把源 1 从「甲」里摘掉，只留源 2
-      /* 坏实现：每次启动都按预置清单**无脑重播**（不看清里面已经有什么） */
-      for (const sid of [1, 2]) db.prepare('INSERT OR IGNORE INTO source_category (source_id, category_id) VALUES (?, 1)').run(sid);
-      const after = db.prepare('SELECT source_id FROM source_category WHERE category_id = 1 ORDER BY source_id').all().map((r) => Number(r.source_id));
-      db.close();
-      assert.equal(after.includes(1), false,
-        '坏实现把用户摘掉的源加回来了（实得 ' + after.join(',') + '）—— 证明"不会被预置清单覆盖"那条断言咬得住');
-    },
-  },
-];
+ok('★★ 变异测试被打断时必须**当场**还原源码（Ctrl+C 不许把变异体留在工作树里）', () => {
+  /* ⚠️ 2026-09-30 审查的下一步。旧写法用 `spawnSync` —— 它**阻塞事件循环**，
+     于是它跑着的那四十多秒里 signal 处理函数一行都执行不到，而 SIGINT 的默认
+     动作就是当场终止 ⇒ `finally` 也不跑 ⇒ 源码停在被改坏的那一行上。
+     ⚠️ 这不是假想：1a988db 那次中断留下的 `hasMore = true` 差一点被打进安装包
+     （打包用的正是那份被改坏的源码）。
+     ⚠️ 为什么只能靠源码断言：**Windows 上只有真正的控制台 Ctrl+C 才会触发这个
+     处理函数**（`process.kill(pid,'SIGTERM')` 在 Windows 上是 TerminateProcess，
+     不可捕获）⇒ 这条路径没法用机器复现，只能像其它"碰平台"的逻辑一样钉住。
+     下面每一条都对应一个"少一句就等于没做"的点。 */
+  const full = fs.readFileSync(path.resolve(HERE, '..', 'tools', 'test-mutants.mjs'), 'utf8');
+  const tableAt2 = full.indexOf('const MUTANTS = [');
+  const afterTable2 = full.indexOf('/* ⚠️⚠️ 所有替换都必须用');
+  assert.ok(tableAt2 > 0 && afterTable2 > tableAt2, '定位不到 MUTANTS 表（本脚本结构变了？）');
+  const src = full.slice(0, tableAt2) + full.slice(afterTable2);
 
-let survived = 0;
-for (const m of MUTANTS) {
-  let caught = false;
-  try {
-    m.run();
-  } catch {
-    caught = true;
-  }
-  if (!caught) survived += 1;
-  say(`  ${caught ? '✓' : '✗'} ${m.id} ${m.desc} → ${caught ? '落网' : '存活！用例表是假测试'}`);
-}
+  assert.ok(
+    !/spawnSync\(/.test(src),
+    '又用回了阻塞的 spawnSync —— 它跑着的时候 signal 处理函数根本没机会执行（Ctrl+C 就把变异体留在工作树里）',
+  );
+  assert.ok(
+    /for \(const sig of \['SIGINT', 'SIGTERM', 'SIGHUP'\]\)/.test(src),
+    '没装中断处理函数 —— Ctrl+C / 会话被掐时，源码会停在被改坏的那一行上',
+  );
+  /* 处理函数里的顺序：先杀子进程 → 再还原 → 最后退出。三步少一步都等于没做：
+       · 不杀子进程 ⇒ 它会拿着变异源码继续跑完（还占着 CPU 四十多秒）；
+       · 不还原     ⇒ 正是要防的那件事；
+       · 还原写在退出之后 ⇒ 那一步永远执行不到。 */
+  const hAt = src.indexOf("for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'])");
+  const hEnd = src.indexOf('function runChildOnce', hAt);
+  assert.ok(hAt > 0 && hEnd > hAt, '定位不到中断处理函数体');
+  const handler = src.slice(hAt, hEnd);
+  const iKill = handler.indexOf('inFlight.child.kill(');
+  const iRestore = handler.indexOf('restoreInFlight()');
+  /* ⚠️ 取**最后**一个 exit：处理函数开头还有一句"连按两次就别拦着"的提前退出，
+        用 indexOf 会取到那一句，于是"还原在退出之前"这条判据会永远为假。 */
+  const iExit = handler.lastIndexOf('process.exit(130)');
+  assert.ok(iKill > 0 && iRestore > 0 && iExit > 0, '处理函数里少了「杀子进程 / 还原 / 退出」其中一步');
+  assert.ok(iKill < iRestore, '先还原再杀子进程 —— 子进程会拿着变异源码继续跑');
+  assert.ok(iRestore < iExit, '先退出再还原 —— 还原那一步永远执行不到');
+
+  /* 还原函数本身：写回原文 + 清哨兵（不清的话，下一次运行会以为"上次是横死的"） */
+  const rAt = src.indexOf('function restoreInFlight()');
+  const rEnd = src.indexOf('for (const sig of', rAt);
+  assert.ok(rAt > 0 && rEnd > rAt, '定位不到 restoreInFlight');
+  const restore = src.slice(rAt, rEnd);
+  assert.ok(/fs\.writeFileSync\(abs, original, 'utf8'\)/.test(restore), '还原函数没把原文写回去');
+  assert.ok(/fs\.rmSync\(SENTINEL, \{ force: true \}\)/.test(restore), '还原之后没清哨兵');
+
+  /* 登记必须**先于**写坏源码 —— 反过来的话，"写坏"与"登记"之间挨一个信号就没得还原 */
+  const iReg = src.indexOf('inFlight = { abs, original, child: null }');
+  const iMut = src.indexOf('fs.writeFileSync(abs, replaceLiteral(');
+  assert.ok(iReg > 0 && iMut > 0, '定位不到"登记 inFlight / 写坏源码"那两行');
+  assert.ok(iReg < iMut, '先写坏源码再登记 —— 中间挨一个信号，源码就回不去了');
+
+  /* 正常路径仍然要还原（finally），超时闸也还在（一个挂住的变异体不许把门禁挂死） */
+  assert.ok(/\} finally \{\n\s+restoreInFlight\(\)/.test(src), '正常路径不再还原源码');
+  assert.ok(/180_000/.test(src), '超时闸没了 —— 挂住的变异体能让门禁无限期挂着，而源码还在变异态');
+});
+
+ok('★★ 变异判据的解析器：两种考裁判的格式都要认（不然整份文件的变异体会被误报成漏网）', () => {
+  /* ⚠️ 真实故障（2026-09-30 复查）：判据收紧成"只在失败块里找"之后，解析只认
+     test-all 的 `  ✗ 名字`（两格缩进），而 test-ai-brief 打的是
+     `✗ 名字 —— 明细`（**顶格**、一行到底）⇒ 那一整份文件的 8 个变异体
+     **全部**被判成"漏网"，而它们其实全都落网。
+     这正是本项目最怕的形状：**闸门坏了，读起来却像"断言不够"**。 */
+  const all = ['  ✓ 通过的那条', '  ✗ 失败的那条', '      Expected values to be strictly equal:', '      1 !== 2'].join('\n');
+  const blocks = parseFailBlocks(all);
+  assert.equal(blocks.length, 1, 'test-all 格式（两格缩进 + 明细）没被解析成一块：' + JSON.stringify(blocks));
+  assert.ok(
+    blocks[0].join('\n').includes('Expected values'),
+    '明细行没有被并进失败块 —— "断言名字里没有、只在失败明细里出现"的 expect 会匹配不上',
+  );
+
+  const brief = ['✔ 通过的', '✗ 降级时没有用量就不编数字 —— Expected values to be strictly equal:'].join('\n');
+  const b2 = parseFailBlocks(brief);
+  assert.equal(b2.length, 1, 'test-ai-brief 格式（顶格、一行到底）没被解析：' + JSON.stringify(b2));
+  assert.ok(b2[0].join('\n').includes('不编数字'), '顶格那条失败的正文没被收进失败块');
+
+  /* ★★ 这两条是整套判据的命门：**通过**的断言文本不许参与匹配。
+     否则任何无关的红都会让每条变异体都报"落网"（83 条 expect 里有 31 条是某条 ✓ 的子串）。 */
+  const passOnly = '  ✓ 降级时没有用量就不编数字\n  ✗ 另一条别的失败\n      别的原因';
+  assert.equal(
+    failureMentions(passOnly, '不编数字'),
+    false,
+    '通过断言的文本参与了匹配 —— 那"真守卫消失了、别的断言替它红了"恰好会被判成落网',
+  );
+  assert.equal(failureMentions(passOnly, '别的原因'), true, '只在失败明细里出现的 expect 匹配不上');
+
+  /* 全绿的输出不许解析出任何失败块（否则"零失败"会被读成"有失败"） */
+  assert.equal(parseFailBlocks('  ✓ 一条\n  ✓ 两条\n结论：✅ PASS').length, 0, '全绿的输出里解析出了失败块');
+});
+/* ==================================================================
+ * 变异测试**不在这里**
+ * ------------------------------------------------------------------
+ * ⚠️ 这里原来有一张 18 条（V1–V18）的 MUTANTS 表，2026-09-30 的审查判定它是
+ *    **假变异体**，已整表删除。判据很简单：**真正的变异测试要改坏生产代码**，
+ *    而那张表里每一条都是"在用例里手写一个坏实现，再断言这个坏实现不满足某条性质" ——
+ *    改坏的是本地那个 bad()，与 src/ 下任何一行代码无关。
+ *    所以它证明的是"assert 会抛"，不是"这条断言抓得住 bug"，
+ *    却让结论行报出「18 个变异体全部落网」——
+ *    **一份读起来像证据、实际不是证据的数字**。本项目对这种东西的口径很明确：
+ *    一段拆掉也没人发现的代码不是防线，是噪音。
+ *
+ * ⇒ 真变异测试在 tools/test-mutants.mjs（`npm run test:mutants`）：
+ *   它**真的改写 src/ 下的源文件**，共 83 条，每条都对应一种"改坏了用户看不出来"的坏法。
+ *   那份才是"改坏了会被抓住"的机器事实，因此是单独一条命令、不进 npm test。
+ * ⚠️ 别再往这个文件里加"手写坏实现"式的变异体 —— 那只会把结论行灌水。
+ * ================================================================== */
 
 /* ==================================================================
  * 第二十一层 · 领域精选（用户 2026-09-29：「每个领域加一个精选按键」）
@@ -5686,16 +5494,16 @@ ok('★★ 领域精选在主进程的接线：只认单类别、清掉分页、
 
 /* ================================================================== */
 say();
-const okAll = failed === 0 && survived === 0;
+const okAll = failed === 0;
 say('────────────────────────────────────────────────────────────');
 if (okAll) {
-  say(`结论：✅ PASS —— ${passed} 条断言全过，${MUTANTS.length} 个变异体全部落网。`);
+  say(`结论：✅ PASS —— ${passed} 条断言全过。`);
 } else {
   if (failed) say(`结论：❌ FAIL —— ${failed} 条断言不成立（通过 ${passed} 条）。`);
-  if (survived) say(`结论：❌ FAIL —— ${survived} 个变异体存活，用例表不具备判别力。`);
 }
 say('────────────────────────────────────────────────────────────');
 say();
+say('⚠️ 变异测试不在这里：`npm run test:mutants`（它真的改写 src/ 下的源文件，83 条）。');
 say('⚠️ 覆盖边界：本脚本证明"解析/归一化/去重/入库/分页/失败隔离"是对的。');
 say('   **不证明**真实网络能取到 feed —— 那需要真跑 `npm run ingest`。');
 
