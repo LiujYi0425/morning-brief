@@ -200,34 +200,49 @@ npm run test:mutants        # 83 个变异体 —— ⚠️ 全量约一小时�
 
 `tools/test-mutants.mjs` 会**就地改写** `src/` —— 所以分片跑法是：
 
-1. 把工程复制到一个临时目录（排除 `node_modules`/`.git`/`release`/`data`），
-2. 在**副本**的 runner 里打三行小补丁（按下标范围只跑一段），
+1. **每个分片一份独立的工程副本**（排除 `node_modules`/`.git`/`release`/`data`），
+2. 在**副本**的 runner 里打三行小补丁（只跑其中一片），
 3. 每个分片给**各自的 `TMP`/`TEMP`**（⚠️ 见第 6 节第 3 条），并行跑，最后把结论并起来。
 
-那三行补丁（打在副本的 `tools/test-mutants.mjs` 上，**仓库里那份不要动**）：
+⚠️⚠️ **"一份副本跑四片"是错的 —— 2026-10-01 亲脚踩过一次**：
+四个 runner 会同时在**同一批文件**上写变异体、又互相把对方写的还原掉；
+而哨兵文件是按**工程路径**取名的 ⇒ 四片共用一份哨兵，启动时那句"陈旧哨兵还原"
+会去覆盖别人**正在跑**的变异体。症状很有辨识度，**三条会同时冒出来**：
+
+```
+✗✗✗ src/xxx.js 没有还原干净，赶快修！      ← 别人的还原把我的变异体盖掉了
+✗ 漏网  …（判据没抓到）                     ← 变异体根本不在场，测试当然过
+✗ 变异体注入失败（找不到锚点）               ← 我读到的源码已经是别人改过的
+```
+
+⇒ 看到这三条一起出现，**先怀疑分片互相踩了**，别去改判据、也别怀疑断言。
+（真工作树不受影响：变异体只跑在副本里，出事时 `git status` 仍然是空的 —— 这一点要当场核。）
+
+那三行补丁（打在**每份副本**的 `tools/test-mutants.mjs` 上，**仓库里那份不要动**）：
 
 ```js
-/* ① 在 `const ONLY = String(process.argv[2] || '')` 之后加一行： */
-const MB_RANGE = '0:21'.split(':').map(Number)   // ← 每个分片换成自己的范围
-/* ② 把 `for (const m of MUTANTS) {` 那两行换成： */
+/* 把 `for (const m of MUTANTS) {` 换成下面这四行（按序号取模分片，比手写区间省事）：
+   MB_SHARD=0..3 各跑一片。 */
 let MB_I = -1
 for (const m of MUTANTS) {
   MB_I += 1
-  if (MB_I < MB_RANGE[0] || MB_I >= MB_RANGE[1]) continue
+  if (MB_I % 4 !== Number(process.env.MB_SHARD || 0)) continue
 ```
 
 ```powershell
-# 复制（副本目录名随便；注意别复制 node_modules）
-robocopy D:\morning-brief "$env:TEMP\mb-mut-s0" /E /XD node_modules .git release data .npm-cache build > $null
-# 各自独立的临时目录（否则多个分片会互相覆盖 mb-mutant-child.log）
-$env:TMP="$env:TEMP\mb-tmp-s0"; $env:TEMP=$env:TMP
+# 四份独立副本（每片一份）+ 各自独立的临时目录
+foreach ($i in 0..3) {
+  robocopy D:\morning-brief "$env:TEMP\mb-mut-s$i" /E /XD node_modules .git release data .npm-cache build > $null
+}
+$env:MB_SHARD='0'; $env:TMP="$env:TEMP\mb-mut-s0\tmp0"; $env:TEMP=$env:TMP
 cd "$env:TEMP\mb-mut-s0"; node tools/test-mutants.mjs
+# 其余三片：目录换 s1/s2/s3、MB_SHARD 换 1/2/3
 ```
 
 ⚠️ 三点必须说清：
 - 分片**只改"跑哪些"**（判据、还原、哨兵一字未改）；仓库里那份 runner **没有**分片代码。
 - 分片只是**初筛**：真出现"漏网"要用**仓库里那份未打补丁的** runner 单独复验一条。
-- 本会话那个"复制 + 打补丁"的小脚本放在 `%TEMP%` 里、**随时会被清掉**；
+- `%TEMP%` 里那些"复制 + 打补丁"的小脚本**随时会被清掉**；
   照上面两步重建即可（约 40 行），别把 `%TEMP%` 里的路径写进任何文档当依赖。
 
 ### 3.3 分片结果的原始形态（可复核）
