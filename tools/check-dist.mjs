@@ -270,6 +270,19 @@ if (!fs.existsSync(RELEASE)) {
         else bad('asar 缺 ' + need + ' —— 打包后应用会启动失败')
       }
 
+      /* ── B3c. MIT 的许可声明必须随副本一起发出去（2026-10-01）──
+       *
+       * 「发给别人」这件事的**合规底线**：MIT 条款写着
+       * "The above copyright notice and this permission notice shall be
+       *  included in all copies or substantial portions of the Software."
+       * 而装到别人机器上的那一份，正是"copies"。
+       * ⚠️ 它拦的是"打包配置被改回只留 src/ + package.json"这类回退 ——
+       *    那种回退不会让应用起不来（所以 B3 那组必备文件断言抓不到），
+       *    只会让发出去的东西少一张许可声明。 */
+      if (have.has('LICENSE')) ok('asar 含 LICENSE（MIT：许可声明随副本一起发）')
+      else bad('★ asar 里没有 LICENSE —— MIT 条款要求"随副本一起附上版权声明与许可"，' +
+               '而装到别人机器上的那一份就是副本')
+
       /* ── B3b. 白名单断言：asar 里**只允许**出现 src/ 与 package.json ──
        *
        * 起因是一次实测：把 M0 仓库合并进来之后，`m0-probe/`、`docs/`、`agents/`
@@ -283,15 +296,18 @@ if (!fs.existsSync(RELEASE)) {
        *
        * ⇒ 黑名单的失败方式是"漏了谁"（静默），白名单的失败方式是"少了谁"（立刻报错）。
        *   对"要发给别人的东西"来说，后者安全得多。 */
-      const ALLOWED = /^(src\/|package\.json$)/
+      /* ★ LICENSE 是这张白名单上的**唯一**例外，而且是有理由的那个：
+       *   MIT 要求"随副本一起附上版权声明与许可"，发出去的安装包就是副本。
+       *   （详见上面 B3c 的说明。） */
+      const ALLOWED = /^(src\/|package\.json$|LICENSE$)/
       const extra = files.filter((f) => !ALLOWED.test(f.path)).map((f) => f.path)
       if (extra.length) {
-        bad(`★ asar 里有 ${extra.length} 个文件不在白名单内（只允许 src/ 与 package.json）—— ` +
+        bad(`★ asar 里有 ${extra.length} 个文件不在白名单内（只允许 src/、package.json 与 LICENSE）—— ` +
             `它们会被一起发给收件人：`)
         for (const p of extra.slice(0, 25)) console.log('        ' + p)
         if (extra.length > 25) console.log(`        ...（还有 ${extra.length - 25} 个）`)
       } else {
-        ok('asar 内容严格等于白名单（src/ + package.json），没有任何多余目录')
+        ok('asar 内容严格等于白名单（src/ + package.json + LICENSE），没有任何多余目录')
       }
 
       fs.closeSync(asar.fd)

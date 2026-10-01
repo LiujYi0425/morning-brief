@@ -357,7 +357,107 @@ test-all 有一条断言守着这个数），而**重试恰好吸收这笔代价
 
 ---
 
-## 7. 与既有交接文档的关系
+## 8. 分发前审计：能不能直接打包发给别人（2026-10-01）
+
+**用户的问题**（原话）：「告诉我此程序是否可以直接打包发送给别人使用了，若不能则需要你进行修复」。
+
+**做法**：不靠读代码猜，而是**把打包好的程序当成"别人机器上的程序"来跑**。
+判据只有一条：**陌生人拿到安装包之后会撞上什么。**
+
+### 8.1 空数据目录的第一次启动（真机取证）
+
+```powershell
+Remove-Item env:ELECTRON_RUN_AS_NODE       # ⚠️ 本会话环境里它是 1；不清掉 exe 会退化成纯 Node
+$fresh = "$env:TEMP\mb-fresh"              # 空目录 = 全新机器上的 userData
+Start-Process 'release\win-unpacked\MorningBrief.exe' -ArgumentList "--user-data-dir=$fresh"
+```
+
+`boot.log` 的完整序列（**这就是"能跑"的形状**）：
+`module-evaluated → heartbeat-written → update-watchdog ok → pidfile-written →
+bootstrap-enter → db-opened → card-window-created → ipc-registered → tray-created →
+level-applied "applied" → scheduler-started`
+
+拿到的东西（`run.log` ＋ 直接读那份 `brief.db`）：
+
+- `[startup] 可见性提示：首次运行，置顶 6000ms ＋ 托盘气泡`（不是"装完屏幕上什么都没有"）；
+- `[scheduler] 启动判定：需要抓取 —— 从未成功抓取过` ⇒ **自动补抓**；
+- `[ingest] 首次运行：写入 117 个预置源` ＋ `按预置清单写入 443 条「源 ↔ 类型」映射`；
+- `[scheduler] 完成：成功 67 / 失败 0`；库里 **117 个源 / 29 个类别 / 3635 条**（读的时候还在抓），
+  当天 `todayTotal=628`，卡片默认那屏「显示 15 条」；
+- **没配 API Key 也有东西看**：卡片第一行如实写「未配置 API Key（点 ⚙ 设置）· 显示 15 条」，
+  下面就是当天真实的 15 条（InfoQ 中文 / 华尔街见闻…）。
+  代码侧口径：`buildAiState` 没有简报时 `briefView=false` ⇒ 退回普通列表（不是空白页）。
+
+⚠️ 顺手记一条**本次踩到的坑**：改 `$env:APPDATA` 指向空目录**模拟不了全新机器** ——
+Chromium 的 `app.getPath('appData')` 走 Windows shell API（`SHGetKnownFolderPath`）而不读进程环境变量。
+正确的做法是 `--user-data-dir=<空目录>`（Chromium 认这个开关，`app.getPath('userData')` 跟着变）。
+（第一次实验里 exe「6 秒内退出、退出码 0、什么都没写」其实是 `ELECTRON_RUN_AS_NODE=1` 让它退化成 Node 了，
+`--user-data-dir` 成了非法 Node 选项 ⇒ 退出码 9。**先清那个环境变量，再谈现象。**）
+
+### 8.2 另外两条环境轴
+
+- **装在带空格＋中文的目录里**（模拟 `C:\Program Files\MorningBrief`、或中文用户名的
+  `%LOCALAPPDATA%\Programs\...`）：整个 `win-unpacked` 复制到 `%TEMP%\mb 空格 测试 目录\MorningBrief`
+  再跑 ⇒ 同样完整走到 `scheduler-started`，库与日志都落在指定目录 ✓。
+  （置底脚本走 `-File`，而它是在 `-ExecutionPolicy Bypass -NoProfile -NonInteractive` 下调用的
+  ⇒ 收件人的 PowerShell 执行策略拦不住它。）
+- **双击两次**（别人的机器上最常见的动作）：见 8.3 —— 这是**唯一抓到的真毛病**。
+
+### 8.3 抓到的毛病：主进程没有单实例锁（已修）
+
+实测（同一份 `--user-data-dir` 起两次）：第二个实例**照样跑起来** ——
+`boot.log` 多一条 `module-evaluated`、`run.log` 多一条 `[main] 就绪`，
+屏幕上两个托盘图标、两张卡片窗，两个调度器在**同一个 `brief.db`** 上各抓一遍 117 个源。
+
+修法（`src/main/index.js`）：
+
+1. 模块顶部 `if (!app.requestSingleInstanceLock()) app.exit(0)`。
+   ⚠️ 位置**必须在任何"写数据目录"的动作之前** —— 心跳、更新看门狗、`writePidFile`
+   都在**模块求值阶段**跑；写心跳会骗过启动看门狗（"新版本起来了"的判据就是它），
+   写 pid 会把**正在跑的那个实例**的登记抢走。
+   ⚠️ 必须是 `app.exit(0)` 而不是 `app.quit()` —— 后者只是发起退出，本模块剩下的写入照做。
+2. `bootstrap()` 里注册 `app.on('second-instance', …)`：把卡片叫到前面
+   （复用 `announceWhereItIs`：不抢焦点、置顶几秒、再落回置底）。
+   光有锁的话第二次双击会**毫无反应** —— 那正是这个项目反复栽过的"点了没反应"。
+
+守它的判据（test-all ＋2 条）：锁必须先于那四处写入、必须与 `app.exit(0)` 配对、
+`second-instance` 必须注册在 `bootstrap()` 里（`^app\.on\(` 不许出现在 bootstrap 之前＝那条 0xC0000005 铁律）。
+
+**复验（打包之后又跑了一遍，判据是"第二次双击什么都不写"）**：
+
+| 检查 | 实测 |
+|---|---|
+| 第一个实例的 `boot.log` | 完整走到 `scheduler-started` ✓（锁没把启动形状搞坏） |
+| 第二次双击的那个进程 | 8 秒内退出、**退出码 0** ✓ |
+| `boot.log` 里 `module-evaluated` 行数 | **1 → 1，不变** ✓（拿不到锁的那一个一个字节都没写） |
+| 正在跑的那个实例的 `run.log` | 出现「又有人启动了一次：不再开第二个实例，把卡片叫到前面」✓ |
+| `MorningBrief.exe` 进程数 | 只有一套（4 个：主进程 ＋ GPU/renderer）✓ |
+
+### 8.4 顺手补的合规项：MIT 许可声明随包发
+
+MIT 条款要求"随副本一起附上版权声明与许可"，而装到别人机器上的那份**就是副本**
+⇒ `build.files` 白名单加 `LICENSE`，`tools/check-dist.mjs` 的 `ALLOWED` 同步放行 ＋ 新增 B3c 断言。
+打包后核对：`✓ asar 含 LICENSE（MIT：许可声明随副本一起发）`、
+`✓ asar 内容严格等于白名单（src/ + package.json + LICENSE）`。
+
+### 8.5 剩下**没法**用代码解决的一条（照实说）
+
+**安装包没有代码签名** ⇒ 别人第一次装会看到 Windows SmartScreen「已保护你的电脑 / 未知发布者」，
+要点「更多信息 → 仍要运行」。这要买证书（或让 Windows 慢慢累计信誉），不是代码能修的。
+发给别人时把这一句一起说清楚，对方就不会以为中了病毒。
+（另：只出 **x64**；Electron 44 要求 **Windows 10 1809+**。）
+
+### 8.6 审计里明确"验过没问题"的几处（免得下一位重做）
+
+- 源码里没有本机路径、没有密钥；`keystore.bin` 只在 `userData` 下；**库里没有任何 key/api 列**；
+- 置底脚本与托盘图标走 `extraResources`，打包态真的被调用到（`level-applied "applied"`）；
+- 更新检查在"全新安装"上也是通的：`[update] 已经是最新（本地 0.1.21，清单 0.1.21）`；
+- 卸载不删数据、安装不需要管理员（`perMachine:false`）、可自选目录（`oneClick:false`）、
+  桌面与开始菜单快捷方式名都是「晨报机」。
+
+---
+
+## 9. 与既有交接文档的关系
 
 - `HANDOFF.md`（筛选栏功能）、`HANDOFF-阶段A.md`、`HANDOFF-阶段B.md`（阶段 B/C/D）
   都是**有效**的，别推翻它们；本文件只覆盖"门禁自己"这一层。

@@ -5267,6 +5267,77 @@ ok('★★ 打包成功之后必须**自动**跑隐私边界核对（不能只�
   assert.ok(iRun < iFail, 'check-dist 被挪到"打包失败"那条路径上/之后了 —— 那会用上一次的旧产物给出假绿');
 });
 
+ok('★★ 第二次双击不该长出第二个实例（"发给别人用"必查：双击两次是最常见的动作）', () => {
+  /* ⚠️ 为什么补这条（2026-10-01 的分发审计，真机取证）：用空的 --user-data-dir
+     起两个实例，第二个**照样跑起来** —— boot.log 多一条 module-evaluated、
+     run.log 多一条「[main] 就绪」，屏幕上两个托盘图标、两张卡片窗，
+     两个调度器在同一个 brief.db 上各抓一遍 117 个源。
+     第一次装的人双击两次快捷方式就会撞上，而且他没法从界面上看出发生了什么。 */
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  assert.ok(/app\.requestSingleInstanceLock\(\)/.test(src), '主进程没拿单实例锁');
+  /* ★ 拿不到锁必须**立刻终止**：`app.quit()` 只是发起退出，本模块剩下那些
+     "写数据目录"的动作仍会跑完 —— 那正是要防的东西。 */
+  assert.ok(
+    /if \(!app\.requestSingleInstanceLock\(\)\) \{\s*app\.exit\(0\);\s*\}/.test(src),
+    '拿不到锁时没有 app.exit(0)（用 quit() 的话，模块作用域里的写入照做）',
+  );
+  /* ★★ 位置就是语义：锁必须在**任何写数据目录的动作之前**。
+     写心跳会骗过启动看门狗（"新版本起来了"的判据就是它），
+     写 pid 会把**正在跑的那个实例**的登记抢走。 */
+  const iLock = src.indexOf('app.requestSingleInstanceLock()');
+  for (const [needle, what] of [
+    [/\nmark\('module-evaluated'/, '第一条启动检查点'],
+    ["mark('heartbeat-written'", '心跳文件'],
+    ["mark('update-watchdog'", '更新看门狗'],
+    ['writePidFile(DATA_DIR', 'pid 登记'],
+  ]) {
+    const i = typeof needle === 'string' ? src.indexOf(needle) : src.search(needle);
+    assert.ok(i > 0, '定位不到「' + what + '」（' + needle + '）—— 本文件结构变了？');
+    assert.ok(iLock < i, '单实例锁排在「' + what + '」之后 —— 第二个实例会先写坏数据目录');
+  }
+  /* ★ 光有锁的话第二次双击"毫无反应"（用户以为程序坏了）：
+     正在跑的那个实例必须把卡片叫到前面。 */
+  const iHandler = src.indexOf("app.on('second-instance'");
+  assert.ok(iHandler > 0, '没有 second-instance 处理 —— 第二次双击毫无反应');
+  const iBootstrap = src.indexOf('async function bootstrap');
+  assert.ok(iBootstrap > 0, '定位不到 bootstrap()');
+  assert.ok(iHandler > iBootstrap, 'second-instance 注册在模块顶层了 —— 那正是铁律禁止的');
+  assert.ok(
+    /announceWhereItIs\(cardWin\)/.test(src.slice(iHandler, iHandler + 500)),
+    'second-instance 收到之后没有把卡片叫到前面',
+  );
+  /* ★ 顺手咬住那条铁律本身：bootstrap() 之前不许出现**顶格**的 app.on(...) ——
+     真机事故（0xC0000005、whenReady 永不触发）就是这么来的。
+     ⚠️ 用 `^app\.on\(` 而不是 `app\.on\(`：注释里提到它不算违规，
+        真正致命的是"在模块顶层真的注册了"。 */
+  assert.ok(
+    !/^app\.on\(/m.test(src.slice(0, iBootstrap)),
+    '模块顶层（bootstrap 之前）注册了 app.on —— 真机事故：whenReady 永不触发',
+  );
+});
+
+ok('★★ MIT 的许可声明必须随副本发出去（发给别人的安装包就是"副本"）', () => {
+  /* MIT 条款：「随副本一起附上版权声明与许可」。
+     安装包装到别人机器上 = 分发副本 ⇒ asar 里必须有 LICENSE。
+     ⚠️ 这条抓的是"打包白名单被改回去"：那种回退不会让应用起不来
+        （所以 check-dist 的必备文件那组断言看不到它），
+        只会让发出去的东西少一张许可声明。 */
+  const root = path.resolve(HERE, '..');
+  assert.ok(fs.existsSync(path.join(root, 'LICENSE')), '仓库里没有 LICENSE 文件');
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const files = (pkg.build && pkg.build.files) || [];
+  assert.ok(files.includes('LICENSE'), 'build.files 白名单里没有 LICENSE —— 发出去的那份没有许可声明');
+  /* ★ 行为断言（不是字符串比对）：把 check-dist 的白名单正则取出来**真的跑一遍** ——
+     否则"两处都改了、但改得对不上"照样能过。 */
+  const cd = fs.readFileSync(path.join(root, 'tools', 'check-dist.mjs'), 'utf8');
+  const m = /const ALLOWED = (\/[^\n]*?\/)\n/.exec(cd);
+  assert.ok(m, '定位不到 check-dist.mjs 里的 ALLOWED 白名单');
+  const ALLOWED = new RegExp(m[1].slice(1, m[1].lastIndexOf('/')));
+  assert.ok(ALLOWED.test('LICENSE'), 'check-dist 的白名单会把自己产物里的 LICENSE 判成"不该有的文件"');
+  assert.ok(ALLOWED.test('src/main/index.js') && ALLOWED.test('package.json'), '白名单把该放进包的文件也拦了');
+  assert.ok(!ALLOWED.test('docs/x.md') && !ALLOWED.test('tools/x.mjs'), '白名单放行了不该进包的目录');
+});
+
 ok('★★ 开发态也必须找得到托盘图标（托盘菜单是唯一的退出入口）', () => {
   /* ⚠️ runtimeAsset 在开发态原来只找 <项目>/<rel>，而托盘图标实际住在
      src/renderer/assets/ ⇒ npm start 时托盘**静默消失**，用户只能去任务管理器。 */
