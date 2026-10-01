@@ -27,6 +27,8 @@ import {
   parseManifest,
   decideUpdate,
   formatBytes,
+  isTransientUpdateError,
+  nextRetryDelayMs,
 } from '../shared/update.js';
 
 /** 状态文件名（放在数据目录里，跟数据库和日志同一处）。 */
@@ -153,8 +155,28 @@ function countFiles(dir) {
 /* ───────────────────────── 检查与下载 ───────────────────────── */
 
 /** 用 electron 的 net（Chromium 网络栈）取文本。Node 的 https 在本机连不上 github。 */
-export async function fetchText(url, { timeoutMs = 15000, net } = {}) {
+export async function fetchText(url, { timeoutMs = 15000, net, sleep } = {}) {
   const { net: electronNet } = net ? { net } : await import('electron');
+  /* ★ 重试（2026-10-01 修）：真机日志里这条路径上的失败**全是偶发**的 ——
+     HTTP 502 / 504 / 超时 / 取回来一个网页（见 shared/update.js 里那段说明）。
+     旧代码**一次就放弃**，于是"GitHub 抖一下"在用户那里就是"更新坏了"。
+     ⚠️ 只重试 `isTransientUpdateError` 认的那些（5xx / 429 / 超时 / 连接层错误）；
+        404 与"取回来是网页"**不重试** —— 同一秒再问三次，答案还是那个。 */
+  const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  let attempt = 0;
+  for (;;) {
+    attempt += 1;
+    try {
+      return await fetchOnce(electronNet, url, timeoutMs);
+    } catch (e) {
+      const delay = isTransientUpdateError(e && e.message) ? nextRetryDelayMs(attempt) : null;
+      if (delay == null) throw e;
+      await wait(delay);
+    }
+  }
+}
+
+function fetchOnce(electronNet, url, timeoutMs) {
   return new Promise((resolve, reject) => {
     let done = false;
     const finish = (fn, v) => { if (!done) { done = true; fn(v) } };
@@ -184,11 +206,15 @@ export async function fetchText(url, { timeoutMs = 15000, net } = {}) {
  * 检查更新。**任何失败都只返回结果，不抛** ——
  * 检查更新失败不该影响应用运行（它是附加功能，不是启动路径）。
  */
-export async function checkForUpdate({ dataDir, currentVersion, url, log = () => {}, net, allowPrerelease = false }) {
+/** 清单本身只有几 KB，10 秒足够；配合重试最坏 3×10s ＋ 2.8s ≈ 33 秒。
+ *  （菜单上那几秒是「正在处理更新…」，不会出现"点了没反应"那种没有任何动静的状态。） */
+export const MANIFEST_TIMEOUT_MS = 10000;
+
+export async function checkForUpdate({ dataDir, currentVersion, url, log = () => {}, net, sleep, allowPrerelease = false }) {
   const target = url || manifestUrl();
   let text;
   try {
-    text = await fetchText(target, { net });
+    text = await fetchText(target, { net, sleep, timeoutMs: MANIFEST_TIMEOUT_MS });
   } catch (e) {
     log(`[update] 检查失败（网络）：${e && e.message}`);
     return { action: 'error', why: '取不到清单：' + (e && e.message) };
@@ -216,11 +242,43 @@ export async function checkForUpdate({ dataDir, currentVersion, url, log = () =>
   return d;
 }
 
+/**
+ * 下载目录里只留**本次要下的那个**安装包。
+ *
+ * ⚠️ 真机上量出来的：`%APPDATA%\morning-brief\data\updates\download\` 里躺着
+ *    **5 个 106 MB 的旧安装包 = 531 MB** —— 每升一版就多一个，从来不删。
+ *    它们没有任何用处（校验完就装掉了，退路靠的是 rollback 快照），
+ *    纯粹是"跑得越多越脏"那一类漏。⇒ 下载之前先清。
+ */
+export function pruneOldDownloads(dir, keepFile) {
+  let removed = 0;
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    if (!/\.exe$/i.test(name)) continue;
+    const p = path.join(dir, name);
+    if (keepFile && path.resolve(p) === path.resolve(keepFile)) continue;
+    try {
+      fs.rmSync(p, { force: true });
+      removed += 1;
+    } catch {
+      /* 删不掉就留着（比如杀毒软件正占着），不阻塞下载 */
+    }
+  }
+  return removed;
+}
+
 /** 下载安装包并校验 sha256。**校验不过就删掉**，绝不留下半个文件等下次误用。 */
 export async function downloadUpdate({ manifest, dataDir, log = () => {}, net, onProgress }) {
   const dir = downloadDirOf(dataDir);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, path.basename(new URL(manifest.url).pathname) || 'update.exe');
+  const purged = pruneOldDownloads(dir, file);
+  if (purged) log(`[update] 清掉 ${purged} 个旧安装包（每版一个 106MB，不清会越攒越多）`);
 
   const { net: electronNet } = net ? { net } : await import('electron');
   await new Promise((resolve, reject) => {

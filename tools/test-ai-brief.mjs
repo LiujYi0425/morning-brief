@@ -293,7 +293,14 @@ ok('★ 「检查更新」必须把线上与本机两个版本都写出来（否
   assert.ok(js.includes('本机 '), '文案里没有本机版本');
   const up = readSrc('src/main/updater.js');
   assert.ok(up.includes('remoteVersion'), '检查结果没有带回线上版本');
-  assert.ok(js.includes('检查失败' + "' + (r.why"), '检查失败没有说原因');
+  /* ★ 2026-10-01 改判据（用户截图：「检查更新失败：取不到清单：HTTP 504」）。
+     旧判据只要求出现 `'检查失败' + (r.why` —— 那**只要把原始错误拼进去**就算过，
+     哪怕拼出来是一句用户无法行动的话。现在的要求更强：
+       ① 必须**经过翻译**（describeUpdateFailure：人话 + 下一步）；
+       ② 原始错误**仍然要进日志**（排查靠它，只是不直接甩给用户）。 */
+  assert.ok(js.includes('describeUpdateFailure(r.why)'), '检查失败没有把 r.why 翻成"能照着做"的话');
+  assert.ok(/updateNote = '检查失败：' \+ info\.say/.test(js), '失败结论没有用人话（info.say）');
+  assert.ok(js.includes('${r.why || '), '原始错误没有进日志 —— 排查时就没线索了');
 });
 
 /* ---- 16. 版本号标签（用户 2026-09-26：「在检查更新的上面，后面跟上版本号」）----

@@ -192,12 +192,18 @@ import {
   canonicalVersion,
   versionLabel,
   updateMenuLabel,
+  /* ★ 2026-10-01：检查失败之后"要不要重试 / 怎么跟用户说"这两件事的纯函数部分 */
+  isTransientUpdateError,
+  describeUpdateFailure,
+  nextRetryDelayMs,
+  autoRetryDelayMs,
+  MANUAL_DOWNLOAD_URL,
 } from '../src/shared/update.js';
 /* ★ 更新的 **I/O 外壳**（updater.js）在纯 Node 里**加载得动** ——
    它对 electron 是懒加载（`await import('electron')` 写在函数体里），
    而"去哪儿取清单"是注入的（`net`）。所以「线上版本有没有真的落盘」这件事
    可以**真的跑一遍 checkForUpdate** 来证，而不是靠读源码猜。 */
-import { checkForUpdate, loadState } from '../src/main/updater.js';
+import { checkForUpdate, loadState, pruneOldDownloads } from '../src/main/updater.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
 /* 「添加源」的地址判定（阶段 A）：同样是零依赖纯函数，
    所以它能被离线穷举 —— 这正是把它从 main/index.js 里拆出来的原因。 */
@@ -3188,10 +3194,143 @@ aok('★★ 检查更新必须把「线上是哪一版」写进状态文件（�
   /* ★ 反面：**检查失败不许把已知的线上版本抹掉**。
      网络抖一下菜单就少半截，是那种"看起来没坏、但信息在慢慢退化"的故障。 */
   const failNet = { request: () => { throw new Error('offline'); } };
-  const bad = await checkForUpdate({ dataDir: dir, currentVersion: '0.1.7', net: failNet, log: () => {} });
+  const bad = await checkForUpdate({ dataDir: dir, currentVersion: '0.1.7', net: failNet, log: () => {}, sleep: async () => {} });
   assert.equal(bad.action, 'error');
   assert.equal(loadState(dir, '0.1.7').lastRemote, '0.2.0', '一次检查失败就把已知的线上版本清掉了');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/* ==================================================================
+ * 第十一层之二 · 「现在无法更新」到底是哪一环（2026-10-01，用户报的）
+ * ------------------------------------------------------------------
+ * 用户截图：托盘气泡写着「检查更新失败：取不到清单：HTTP 504」，当前版本 0.1.16。
+ * 翻他自己的运行日志（%APPDATA%\morning-brief\data\run.log）看到的是**一串偶发失败**：
+ *     HTTP 404 / HTTP 502 / HTTP 504 / 清单不合格：不是合法 JSON：Unexpected token '<'
+ * 而同一条路径上也有大量**成功**记录（0.1.2 → 0.1.7 → 0.1.8 → 0.1.13 → 0.1.14 都升上去了）。
+ * ⇒ 结论：不是"更新坏了"，是**这条路时通时不通**，而旧代码一次就放弃、
+ *    并且只把 "HTTP 504" 摆给用户看 —— 一句他无法行动的话。
+ * 这一组断言把两件事钉住：① 该重试的必须重试；② 说给用户听的话必须**能照着做**。
+ * ================================================================== */
+say();
+say('--- 第十一层之二 · 更新检查的偶发失败：重试 / 说人话 / 清旧包 ---');
+
+ok('★★ 哪些失败值得重试（两个方向都要对：该重试的别放弃、不该重试的别浪费时间）', () => {
+  /* 真机日志里出现过的原文 —— 断言直接用它们当输入，不自己编 */
+  for (const m of ['HTTP 504', 'HTTP 502', 'HTTP 503', 'HTTP 500', 'HTTP 429', '超时 10000ms',
+    'net::ERR_CONNECTION_RESET', 'net::ERR_NAME_NOT_RESOLVED', 'net::ERR_TIMED_OUT']) {
+    assert.equal(isTransientUpdateError(m), true, `「${m}」应当被当成偶发失败（值得再试一次）`);
+  }
+  for (const m of ['HTTP 404', 'HTTP 403', 'HTTP 401',
+    `不是合法 JSON：Unexpected token '<', "<script>to"... is not valid JSON`]) {
+    assert.equal(isTransientUpdateError(m), false, `「${m}」不应当被重试 —— 同一秒再问三次，答案还是这个`);
+  }
+  assert.equal(isTransientUpdateError(undefined), true, '拿不到消息（连接层直接抛）也应当当作偶发');
+});
+
+ok('★★ 失败提示必须是**用户能照着做**的（真机那四句话逐一翻译）', () => {
+  const cases = [
+    ['取不到清单：HTTP 504', 'server'],
+    ['取不到清单：HTTP 502', 'server'],
+    ['取不到清单：HTTP 404', 'not-published'],
+    [`清单不合格：不是合法 JSON：Unexpected token '<', "<script>to"... is not valid JSON`, 'wrong-content'],
+    ['取不到清单：超时 10000ms', 'timeout'],
+    ['取不到清单：net::ERR_CONNECTION_REFUSED', 'offline'],
+  ];
+  for (const [raw, kind] of cases) {
+    const d = describeUpdateFailure(raw);
+    assert.equal(d.kind, kind, `「${raw}」被归到了 ${d.kind}，期望 ${kind}`);
+    assert.ok(d.say && d.say.length >= 8, `「${raw}」的 say 太短/为空：${d.say}`);
+    assert.ok(d.hint && d.hint.length >= 8, `「${raw}」的 hint 太短/为空：${d.hint}`);
+    /* ★ 每一句都必须给出**下一步**：手动下载页是用户唯一的自救途径 */
+    assert.ok(d.hint.includes(MANUAL_DOWNLOAD_URL), `「${raw}」的提示里没有手动下载地址 —— 用户无处可去`);
+    /* 原始错误码不许直接当成人话甩出去（可以出现在 say 里，但不能只有它） */
+    assert.ok(d.say !== raw, `「${raw}」的 say 原样照抄了错误消息`);
+  }
+  /* 偶发的那些要告诉用户"会自动再试"，否则他会以为必须自己盯着 */
+  for (const raw of ['取不到清单：HTTP 504', '取不到清单：超时 10000ms', '取不到清单：net::ERR_CONNECTION_REFUSED']) {
+    assert.ok(/再试|稍后|过一会儿|自动/.test(describeUpdateFailure(raw).hint), `「${raw}」没告诉用户会自动再试`);
+  }
+});
+
+ok('★ 自动重试的节奏：两次（15 分钟 / 60 分钟）之后就停，不许无限重试', () => {
+  assert.equal(nextRetryDelayMs(1), 800, '第一次重试前的等待不是 0.8s');
+  assert.equal(nextRetryDelayMs(2), 2000, '第二次重试前的等待不是 2s');
+  assert.equal(nextRetryDelayMs(3), null, '第三次还在重试 —— 单次请求最多重试两次');
+  assert.equal(nextRetryDelayMs(0), null, 'attempt 从 1 开始');
+  assert.equal(autoRetryDelayMs(1), 15 * 60 * 1000, '第一次自动重试不是 15 分钟');
+  assert.equal(autoRetryDelayMs(2), 60 * 60 * 1000, '第二次自动重试不是 60 分钟');
+  assert.equal(autoRetryDelayMs(3), null, '自动重试没有上限 —— 网络一直不通就会一直重试下去');
+});
+
+await aok('★★ 真跑一遍重试：前两次 504、第三次成功 ⇒ 必须拿到清单（而且要说明重试了几次）', async () => {
+  const dir = tmpDbFile('update-retry');
+  fs.mkdirSync(dir, { recursive: true });
+  const manifest = { version: '0.2.0', releasedAt: '2026-10-01T00:00:00.000Z',
+    url: 'https://example.com/MorningBrief-Setup-0.2.0.exe', sha256: 'a'.repeat(64), size: 1024, minFrom: '', notes: '' };
+
+  let attempts = 0;
+  const flakyNet = {
+    request: () => {
+      attempts += 1;
+      const n = attempts;
+      const handlers = {};
+      const req = {
+        on: (ev, fn) => { handlers[ev] = fn; return req },
+        end: () => queueMicrotask(() => {
+          if (n < 3) {
+            handlers.response({ statusCode: 504, resume() {} });
+            return;
+          }
+          const res = { statusCode: 200 };
+          res.on = (ev, fn) => {
+            if (ev === 'data') fn(Buffer.from(JSON.stringify(manifest), 'utf8'));
+            else if (ev === 'end') fn();
+            return res;
+          };
+          handlers.response(res);
+        }),
+      };
+      return req;
+    },
+  };
+  const waits = [];
+  const r = await checkForUpdate({
+    dataDir: dir, currentVersion: '0.1.16', net: flakyNet, log: () => {},
+    sleep: async (ms) => { waits.push(ms) },
+  });
+  assert.equal(attempts, 3, `只请求了 ${attempts} 次 —— 504 之后没有重试`);
+  assert.deepEqual(waits, [800, 2000], '重试的等待间隔不对（退避表没生效）');
+  assert.equal(r.action, 'available', '重试之后拿到了清单，却没有判成"有新版本"');
+  assert.equal(r.remoteVersion, '0.2.0');
+
+  /* 反面：404 是"线上确实没有"，重试只是让用户多等 3 秒 */
+  let n404 = 0;
+  const net404 = { request: () => { n404 += 1; const h = {}; const req = { on: (e, f) => { h[e] = f; return req }, end: () => queueMicrotask(() => h.response({ statusCode: 404, resume() {} })) }; return req } };
+  const r2 = await checkForUpdate({ dataDir: dir, currentVersion: '0.1.16', net: net404, log: () => {}, sleep: async () => {} });
+  assert.equal(r2.action, 'error');
+  assert.equal(n404, 1, '404 被重试了 —— 那是"线上确实没有这个文件"，重试无意义');
+  assert.equal(r2.why, '取不到清单：HTTP 404');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+ok('★ 下载目录里只留本次那个安装包（真机上攒了 5 个 × 106MB = 531MB）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-updates-prune-'));
+  try {
+    const keep = path.join(dir, 'MorningBrief-Setup-0.1.18.exe');
+    for (const n of ['MorningBrief-Setup-0.1.13.exe', 'MorningBrief-Setup-0.1.2.exe', 'MorningBrief-Setup-0.1.7.exe']) {
+      fs.writeFileSync(path.join(dir, n), 'x');
+    }
+    fs.writeFileSync(keep, 'y');
+    fs.writeFileSync(path.join(dir, 'last-result.json'), '{}'); // 非 exe：不许动
+    const removed = pruneOldDownloads(dir, keep);
+    assert.equal(removed, 3, `应当清掉 3 个旧包，实际 ${removed}`);
+    assert.ok(fs.existsSync(keep), '把本次要下的那个包也删了');
+    assert.equal(fs.readdirSync(dir).filter((f) => /\.exe$/i.test(f)).length, 1, '还留着别的 exe');
+    assert.ok(fs.existsSync(path.join(dir, 'last-result.json')), '把非安装包的文件也删了');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /* ================================================================== */

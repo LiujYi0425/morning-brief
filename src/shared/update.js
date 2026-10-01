@@ -368,3 +368,132 @@ export function updateMenuLabel({ busy = false, readyVersion = '', note = '', pc
   if (readyVersion) return `✅ 更新到 ${readyVersion}（点击安装并重启）`;
   return note ? `检查并更新（${note}）` : '检查并更新（有新版本会直接装并重启）';
 }
+
+/* ==================================================================
+ * 取清单失败之后：① 要不要重试？② 怎么跟用户说？
+ * ------------------------------------------------------------------
+ * ⚠️ 这一段来自真机日志（用户的机器，2026-10-01 之前的记录）：
+ *     检查失败（网络）：HTTP 404
+ *     检查失败（网络）：HTTP 502
+ *     检查失败（网络）：HTTP 504          ← 用户截图里那条
+ *     清单不合格：不是合法 JSON：Unexpected token '<', "<script>to"…   ← 取回来是个网页
+ *   它们全是**同一条路径上的偶发失败**（GitHub 在国内时通时不通、代理半死、
+ *   开机时网络还没起来），而当时的代码**一次就放弃**，只把 "HTTP 504" 摆给用户看 ——
+ *   用户看到的是一句他无法行动的话，于是结论只能是"更新坏了"。
+ *
+ * ⇒ 两件事分开，而且**都做成纯函数**（这样它们能被离线穷举）：
+ *   ① `isTransientUpdateError` —— 这次失败值不值得重试（5xx / 429 / 超时 / 连接层错误）；
+ *   ② `describeUpdateFailure`  —— 说人话 + **给下一步**（重试会自动发生 / 手动下载页）。
+ *
+ * ⚠️ 判据刻意写在 shared 而不是 updater.js：后者 import electron，
+ *    写进去就永远没有断言（本项目在别处栽过很多次，见 R-B11）。
+ * ================================================================== */
+
+/** 用户能自己点进去下载安装包的地方（失败提示里要给出这个 —— 否则他无处可去）。 */
+export const MANUAL_DOWNLOAD_URL = 'https://github.com/LiujYi0425/morning-brief/releases/latest';
+
+/**
+ * 这次失败值不值得再试一次？
+ *
+ * ⚠️ 两个方向不等价，所以判据要写清楚：
+ *   · 5xx / 429 / 超时 / 连接层错误 —— **下一次很可能就好了**（对，重试）；
+ *   · 其它 4xx（404 / 403 / 401）—— DNS 与权限问题，重试只是让用户多等 6 秒（不重试）；
+ *   · 取回来是 HTML（公共 Wi-Fi 的登录页 / 网络被劫持）—— **不重试**：
+ *     同一秒里再问三次，拿回来的还是那个登录页。这要用户自己动手。
+ */
+export function isTransientUpdateError(message) {
+  const m = String(message == null ? '' : message);
+  if (/不是合法 JSON|<script|<!DOCTYPE|<html/i.test(m)) return false; // 劫持/门户页：重试无用
+  if (/^HTTP 5\d\d/.test(m)) return true;
+  if (/^HTTP 429/.test(m)) return true;
+  if (/超时|timed? ?out/i.test(m)) return true;
+  if (/^HTTP 4\d\d/.test(m)) return false; // 404 / 403 / 401 等：重试无意义
+  return true; // 连接层错误（ERR_CONNECTION_* / ERR_NAME_NOT_RESOLVED / ERR_TIMED_OUT…）
+}
+
+/** 第 n 次重试前等多久（毫秒）。1 → 0.8s，2 → 2s，之后不再等（返回 null = 放弃）。
+ *  ⚠️ 刻意只重试**两次**：一次检查最坏就是 3×10s（清单超时）＋ 2.8s ≈ 33 秒 ——
+ *     再长的话，用户点一次「检查更新」要盯着菜单等一分多钟，那比失败还难受。 */
+export const RETRY_DELAYS_MS = [800, 2000];
+export function nextRetryDelayMs(attempt) {
+  const i = Number(attempt) - 1;
+  if (!Number.isInteger(i) || i < 0 || i >= RETRY_DELAYS_MS.length) return null;
+  return RETRY_DELAYS_MS[i];
+}
+
+/**
+ * 把失败翻成**用户能行动的一句话**。
+ * @returns {{kind:string, say:string, hint:string, manualUrl:string}}
+ */
+export function describeUpdateFailure(message) {
+  const m = String(message == null ? '' : message);
+  const manualUrl = MANUAL_DOWNLOAD_URL;
+  const tail = `也可以手动下载安装：${manualUrl}`;
+
+  if (/不是合法 JSON|<script|<!DOCTYPE|<html/i.test(m)) {
+    return {
+      kind: 'wrong-content',
+      say: '取回来的不是更新清单，而是一个网页（公共 Wi-Fi 的登录页、或网络被劫持时就是这样）',
+      hint: `连上正常的网络后再点一次「检查更新」；${tail}`,
+      manualUrl,
+    };
+  }
+  const code = (m.match(/HTTP (\d{3})/) || [])[1];
+  if (code && code.startsWith('5')) {
+    return {
+      kind: 'server',
+      say: `线上服务暂时不可用（GitHub 返回 ${code}）`,
+      hint: `这通常是暂时的 —— 程序过一会儿会自己再试一次；${tail}`,
+      manualUrl,
+    };
+  }
+  if (code === '429') {
+    return {
+      kind: 'rate-limit',
+      say: 'GitHub 在限流（短时间内问得太频繁）',
+      hint: `过十几分钟再点一次；${tail}`,
+      manualUrl,
+    };
+  }
+  if (code === '403' || code === '401') {
+    return {
+      kind: 'denied',
+      say: `线上拒绝了这次请求（HTTP ${code}）`,
+      hint: `如果本机挂着代理，试着换一条线路；${tail}`,
+      manualUrl,
+    };
+  }
+  if (code === '404') {
+    return {
+      kind: 'not-published',
+      say: '线上找不到更新清单（这个版本可能还没发布，或者 release 被删了）',
+      hint: `去发布页看看有没有新版本：${manualUrl}`,
+      manualUrl,
+    };
+  }
+  if (/超时|timed? ?out/i.test(m)) {
+    return {
+      kind: 'timeout',
+      say: '连 GitHub 超时了（国内网络下很常见，尤其是刚开机、或挂着代理的时候）',
+      hint: `程序过一会儿会自己再试一次；${tail}`,
+      manualUrl,
+    };
+  }
+  return {
+    kind: 'offline',
+    say: '连不上 GitHub（本机网络没通、或代理没生效）',
+    hint: `检查一下网络/代理；程序过一会儿会自己再试一次；${tail}`,
+    manualUrl,
+  };
+}
+
+/** 自动重试的间隔（分钟）：第 1 次失败后 15 分钟、第 2 次后 60 分钟，之后不再自动重试。
+ *  ⚠️ 为什么要自动重试：启动 8 秒后那次检查**最容易撞上"网络还没起来"**
+ *     （刚开机时尤其如此），而那一次失败会以「检查更新失败」的形式留在菜单上 ——
+ *     用户看到的就是"更新坏了"。 */
+export const AUTO_RETRY_MINUTES = [15, 60];
+export function autoRetryDelayMs(failCount) {
+  const i = Number(failCount) - 1;
+  if (!Number.isInteger(i) || i < 0 || i >= AUTO_RETRY_MINUTES.length) return null;
+  return AUTO_RETRY_MINUTES[i] * 60 * 1000;
+}

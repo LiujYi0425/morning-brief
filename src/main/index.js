@@ -36,7 +36,7 @@ import {
 } from '../shared/runtime-state.js';
 import { createBootMark, teeConsole, createLogSink } from '../shared/run-log.js';
 import { bootWatchdog, markHealthy, rollbackNow, checkForUpdate, downloadUpdate, applyUpdate, loadState } from './updater.js';
-import { formatBytes, versionLabel, updateMenuLabel } from '../shared/update.js';
+import { formatBytes, versionLabel, updateMenuLabel, describeUpdateFailure, isTransientUpdateError, autoRetryDelayMs } from '../shared/update.js';
 import { runIngest } from '../ingest/fetch-feeds.js';
 import {
   openDb,
@@ -1114,6 +1114,27 @@ async function bootstrap() {
   let updateNote = '';      // 上一次检查的结论（显示在菜单里）
   let updatePct = -1;       // 下载进度（-1 = 还没有进度：正在检查 / 正在准备）
 
+  /* ★★ 偶发失败要**自动再试**（2026-10-01 修，用户报的"现在无法更新"就是它）
+   *
+   * 真机日志里这条路径的失败全是偶发的：`HTTP 502` / `HTTP 504` / 超时 /
+   * 取回来一个网页（换 DNS、代理半死、公共 Wi-Fi 的登录页）。
+   * 而**启动 8 秒后那一次自动检查最容易撞上"网络还没起来"** ——
+   * 旧行为是：失败 → 菜单留一句「检查更新失败」→ 一直挂到下次启动，
+   * 用户点一次、失败一次，结论自然就是"更新坏了"。
+   * ⇒ 偶发失败按 15 分钟、60 分钟各自动再试一次（最多两次；不可重试的失败不试）。 */
+  let updateFails = 0;
+  let updateRetryTimer = null;
+  const scheduleUpdateRetry = (kind) => {
+    updateFails += 1;
+    const delay = autoRetryDelayMs(updateFails);
+    if (delay == null || updateRetryTimer) return;
+    console.log(`[update] ${Math.round(delay / 60000)} 分钟后自动再试一次（第 ${updateFails} 次失败：${kind}）`);
+    updateRetryTimer = setTimeout(() => {
+      updateRetryTimer = null;
+      void runUpdateCheck({ interactive: false });
+    }, delay);
+  };
+
   /* ★ 版本号标签（用户 2026-09-26 要的）：菜单里常驻一行「当前版本 vX · 线上 vY」。
    *
    * `lastRemote` 从**状态文件**里读，而不是只留这一次检查的结果 ——
@@ -1197,6 +1218,7 @@ async function bootstrap() {
            所以重启之后菜单上那半截还在）。 */
         if (r.remoteVersion) lastRemote = r.remoteVersion;
         if (r.action === 'available') {
+          updateFails = 0;
           updateReady = r.manifest;
           updateNote = '';
           if (interactive) {
@@ -1204,6 +1226,7 @@ async function bootstrap() {
             notifyUpdate(`发现 v${r.manifest.version}，正在下载（装完会自动重启）`);
           }
         } else if (r.action === 'none') {
+          updateFails = 0;
           /* ★ 两个版本在正上方那行已经是常驻的了，这里只说结论本身。
              但**两者不一致时仍然写出来** —— 那正是"更新功能看起来坏了"的真实成因：
              本机比线上还新（0.1.4~0.1.7 从没发布过），"已是最新"四个字没错，
@@ -1219,20 +1242,29 @@ async function bootstrap() {
             notifyUpdate(`已经是最新（线上 ${remote} · 本机 ${mine}）`);
           }
         } else {
-          /* 检查失败也要说清为什么（原来只有「检查失败」三个字） */
-          updateNote = '检查失败' + (r.why ? '：' + String(r.why).slice(0, 30) : '');
+          /* ★ 检查失败：说人话 + **给出下一步**（2026-10-01 修）。
+             以前这里只把原始错误摆出来（用户截图里那句「取不到清单：HTTP 504」）——
+             一句他无法行动的话，结论只能是"更新坏了"。
+             ⇒ 用纯函数翻成「线上服务暂时不可用（GitHub 返回 504）」＋
+                「过一会儿会自己再试一次 / 也可以手动下载」。
+             ⚠️ 原始错误仍然进日志（排查要靠它），只是不直接甩给用户。 */
+          const info = describeUpdateFailure(r.why);
+          updateNote = '检查失败：' + info.say;
           if (interactive) {
-            console.log('[update] ' + (r.why || '未知原因'));
-            /* ⚠️ 失败也必须让用户看见 —— 而且要说人话：
-               真机上撞到过"取回来的是个网页"（DNS 被污染/代理没生效），
-               那时只写「清单不合格」用户完全不知道该怎么办。 */
-            notifyUpdate('检查更新失败：' + String(updateNote).replace(/^检查失败：?/, ''));
+            console.log(`[update] ${r.why || '未知原因'} —— ${info.kind}：${info.say}（${info.hint}）`);
+            notifyUpdate(`检查更新失败：${info.say}\n${info.hint}`);
+          } else {
+            console.log(`[update] 自动检查失败（${info.kind}）：${info.say}`);
           }
+          /* 偶发失败 ⇒ 过一会儿自己再试（不可重试的失败不排） */
+          if (isTransientUpdateError(r.why)) scheduleUpdateRetry(info.kind);
         }
       } catch (err) {
-        updateNote = '检查失败';
+        const info = describeUpdateFailure(err && err.message);
+        updateNote = '检查失败：' + info.say;
         console.log('[update] 检查异常：' + (err && err.message));
-        if (interactive) notifyUpdate('检查更新失败：' + (err && err.message));
+        if (interactive) notifyUpdate(`检查更新失败：${info.say}\n${info.hint}`);
+        if (isTransientUpdateError(err && err.message)) scheduleUpdateRetry(info.kind);
       } finally {
         updateBusy = false;
         /* ★ 重建菜单必须放在这里：结论（updateNote / updateReady / lastRemote）都已经写好了，
