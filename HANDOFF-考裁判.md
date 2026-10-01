@@ -337,6 +337,24 @@ s3（下标 [63:83)）：源码已还原且逐字节一致：✓（共 7 个文�
    `.gitignore` 第 30 行屏蔽了它。它不影响打包（`build.files` 是白名单），
    但**会让人分不清"我跑的是哪一份"** —— 排查时先确认 `MorningBrief.exe` 的版本与路径。
 
+**★ 探针量出来的两件事**（`_probe-update-net.mjs`，真 Electron ＋ 真 `net` ＋ 真地址；跑完即删）：
+
+```
+[probe] fetchText 成功：4488 字节 / 25170ms     ← 冷进程里的**第一次**请求
+[probe] checkForUpdate（同进程第二次）619ms      ← 紧接着的第二次
+```
+
+⇒ ① **那 25 秒是"第一次通话"的一次性代价**（代理自动探测 / DNS / 建连），不是 GitHub 慢。
+两个推论都已写进代码：**超时不许缩短**（`MANIFEST_TIMEOUT_MS` 钉在 15s，
+test-all 有一条断言守着这个数），而**重试恰好吸收这笔代价** ——
+第一次超时的那次请求已经把连接摸热，紧接着的第二次是亚秒级的。
+② **在本机跑任何 Electron 探针之前必须 `Remove-Item env:ELECTRON_RUN_AS_NODE`**：
+这个会话环境里它是 `1`（DSH 自己就是 Electron），会让 `electron.cmd` **退化成纯 Node**
+（`import('electron')` 的键只有 `default`/`module.exports`，`app`/`net` 全是 undefined），
+于是量到的根本不是生产行为。另：**静态** `import { app, net } from 'electron'` 会当场
+`SyntaxError: The requested module 'electron' does not provide an export named 'app'` ——
+探针必须照抄生产代码那条路（动态 `await import('electron')`）。
+
 ---
 
 ## 7. 与既有交接文档的关系

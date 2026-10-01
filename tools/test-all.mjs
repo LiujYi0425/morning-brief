@@ -203,7 +203,7 @@ import {
    它对 electron 是懒加载（`await import('electron')` 写在函数体里），
    而"去哪儿取清单"是注入的（`net`）。所以「线上版本有没有真的落盘」这件事
    可以**真的跑一遍 checkForUpdate** 来证，而不是靠读源码猜。 */
-import { checkForUpdate, loadState, pruneOldDownloads } from '../src/main/updater.js';
+import { checkForUpdate, loadState, pruneOldDownloads, MANIFEST_TIMEOUT_MS } from '../src/main/updater.js';
 import { validateExternalUrl } from '../src/main/url-guard.js';
 /* 「添加源」的地址判定（阶段 A）：同样是零依赖纯函数，
    所以它能被离线穷举 —— 这正是把它从 main/index.js 里拆出来的原因。 */
@@ -3260,6 +3260,10 @@ ok('★ 自动重试的节奏：两次（15 分钟 / 60 分钟）之后就停，
   assert.equal(autoRetryDelayMs(1), 15 * 60 * 1000, '第一次自动重试不是 15 分钟');
   assert.equal(autoRetryDelayMs(2), 60 * 60 * 1000, '第二次自动重试不是 60 分钟');
   assert.equal(autoRetryDelayMs(3), null, '自动重试没有上限 —— 网络一直不通就会一直重试下去');
+  /* ★ 单次取清单的超时**不许被缩短**（真机探针量出来的：冷进程里第一次请求
+     25.2 秒才成功、同进程第二次只要 0.62 秒 ⇒ 缩短超时会把"慢但能成"变成"三次都失败"）。
+     这条断言钉的是那个数，不是"随便给个超时"。 */
+  assert.ok(MANIFEST_TIMEOUT_MS >= 15000, `清单超时被改成了 ${MANIFEST_TIMEOUT_MS}ms —— 比真机量出来的 15s 还短`);
 });
 
 await aok('★★ 真跑一遍重试：前两次 504、第三次成功 ⇒ 必须拿到清单（而且要说明重试了几次）', async () => {
