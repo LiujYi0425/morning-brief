@@ -199,6 +199,17 @@ Get-CimInstance Win32_Process |
 - **变异体分片**：每片要有**自己的工程副本** ＋ **自己的 `$env:TMP`/`$env:TEMP`**（共用会三连坏）。
 - `npm run dist` 报 `EPERM ... release\win-unpacked\...`：只杀 `ExecutablePath` 匹配
   `*release\win-unpacked*` 的进程，**别碰用户装好的那份**。
+- **GUI 探针别挂在后台作业里前台 `&` 跑**：作业一收尾，Electron 会跟着一起消失
+  （看着像"应用自己退了"，第一轮探针就被这个骗过）⇒ 用 `Start-Process` 脱离当前 shell，
+  收尾**只按 `$p.Id`** 杀。
+- **按命令行清扫进程必须限定进程名**：`Where-Object { $_.Name -eq 'electron.exe' -and
+  $_.CommandLine -like '*<标记>*' }`。只按 `CommandLine` 匹配会把**你自己这条 pwsh**
+  （命令行里就含那个标记）连同 DSH 一起杀掉（真踩了，代价是一次 job runner 崩）。
+- **PowerShell 截图是"物理像素"**（DPI-unaware）：`CopyFromScreen` 抓物理分辨率，而
+  `Screen.Bounds` 给的是**虚拟**坐标 ⇒ 150% 缩放下只按虚拟尺寸抓会**少截右下约 1/3**
+  （看着像"窗口被切了"，其实是被图切了）。比例 = 物理 ÷ 虚拟
+  （`Win32_VideoController.CurrentHorizontalResolution`）；`New-Object System.Drawing.Bitmap`
+  的两个尺寸参数要 `[int]` 强转，否则报「参数无效」。
 
 ---
 
