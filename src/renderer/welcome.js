@@ -236,7 +236,15 @@
     var cs = window.getComputedStyle(el);
     var r = el.getBoundingClientRect();
     out.exists = true;
-    out.hidden = cs.display === 'none' || cs.visibility === 'hidden';
+    /* ⚠️⚠️ 显隐**不能只看自己的 computed display**（2026-10-01 真机自检抓到的活例）：
+     *   藏起来的是**父行** `#footB`（它带 hidden），而 `#btnGen` 自己没写 hidden。
+     *   按规范，`getComputedStyle` 对"display:none 子树里的后代"返回的是**它自己的**
+     *   display（`inline-block`），**不是** `none` —— 于是这行代码把"已经藏好了"
+     *   报成「✗ 该藏起来却还在显示（点了没反应）」，正好是相反的结论。
+     *   这正是本项目记过的那条教训：**诊断撒谎比没有诊断更糟**（会把人引去改对的代码）。
+     * ⇒ 可靠的判据是"**到底有没有生成盒子**"：`getClientRects()` 为空就说明
+     *   自己或**任何一个祖先**是 display:none。（`visibility:hidden` 单列，它仍生成盒子。） */
+    out.hidden = cs.display === 'none' || cs.visibility === 'hidden' || el.getClientRects().length === 0;
     out.w = Math.round(r.width);
     out.h = Math.round(r.height);
     out.top = Math.round(r.top);

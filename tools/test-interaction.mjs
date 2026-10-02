@@ -2005,6 +2005,25 @@ ok('★★ 欢迎窗调用的每条通道都必须在 preload 里真的存在', 
   }
 });
 
+ok('★★ 自检判"藏没藏"必须照顾**祖先**藏起来的情况（否则自检会给出相反的结论）', () => {
+  /* 2026-10-01 真机自检抓到的活例：`#btnGen` 自己**没写** hidden，藏起来的是它的
+     **父行** `#footB`。而按规范，`getComputedStyle` 对 `display:none` 子树里的后代
+     返回的是**它自己的** display（`inline-block`），**不是** `none`
+     ⇒ 自检把"其实已经藏好了"报成「✗ 该藏起来却还在显示（点了没反应）」，正好相反。
+     ⚠️ 这正是本项目那条老教训：**诊断撒谎比没有诊断更糟** —— 它会把人引去改本来
+     正确的代码（2026-09-30 审查 #3 同款）。
+     ⇒ 可靠判据是"**到底有没有生成盒子**"：`getClientRects()` 为空 / `offsetParent`
+     为 null，说明自己或**任何一个祖先**是 display:none。 */
+  const a = W_JS_C.indexOf('function facts(');
+  const b = W_JS_C.indexOf('function dirLine(');
+  assert.ok(a > 0 && b > a, '定位不到 welcome.js 的 facts()（结构变了？）');
+  const body = W_JS_C.slice(a, b);
+  assert.ok(
+    /getClientRects|offsetParent/.test(body),
+    'facts() 只看元素自己的 computed display —— 被祖先藏起来的元素会被误报成"还在显示"',
+  );
+});
+
 say('');
 say('────────────────────────────────────────────────────────');
 say('断言 ' + passed + ' 通过 / ' + failed + ' 失败；变异体 ' + MUTANTS.length + ' 个');
