@@ -2024,6 +2024,32 @@ ok('★★ 自检判"藏没藏"必须照顾**祖先**藏起来的情况（否则
   );
 });
 
+ok('★★ 自检必须判「Key 输入框在不在首屏」（真机踩过：窗太矮，输入框掉到折线下）', () => {
+  /* 2026-10-01 真机：WELCOME_SIZE 还是 460×420 的时候，正文内容 410px、可见只有
+     287px ⇒ `#keyInput`（top=358）落在折线（foot top=346）**下方 12px**，
+     首屏最后一行只剩「打开申请页面」按钮。用户当天拍板把窗高改成 560。
+     ⚠️ 两种"看着像判据、其实判不出来"的写法，正是这条断言存在的理由：
+       · `dirLine('Key 输入框', …, true)` 只判"有没有生成盒子" —— 折线下方的
+         元素照样生成盒子，所以它在**故障状态下也是 ✔**；
+       · `scrollH <= clientH` 只判"整体装不装得下" —— 输入框正好压在折线下时
+         它同样可能是 ✔（底栏仍在面板内）。
+     ⇒ 必须拿**输入框的矩形**与**正文视口（滚动容器）的矩形**逐个比。
+     静态断言守不住"窗口够不够高"（那要渲染了才知道），但能守住**这条判据还在**。 */
+  const a = W_JS_C.indexOf('function check(');
+  const b = W_JS_C.indexOf('window.MB_WELCOME_CHECK');
+  assert.ok(a > 0 && b > a, '定位不到 welcome.js 的 check()（结构变了？）');
+  const body = W_JS_C.slice(a, b);
+  assert.ok(
+    /keyInput\.top\s*>=\s*bodyBox\.top/.test(body)
+      && /keyInput\.bottom\s*<=\s*bodyBox\.bottom/.test(body),
+    'check() 没有拿 Key 输入框的矩形与正文视口比 —— 输入框掉到折线下不会被发现',
+  );
+  assert.ok(
+    /✗ Key 输入框不在首屏/.test(body),
+    'check() 里缺少"输入框不在首屏"的 ✗ 分支（它必须是判据，不是一句记录）',
+  );
+});
+
 say('');
 say('────────────────────────────────────────────────────────');
 say('断言 ' + passed + ' 通过 / ' + failed + ' 失败；变异体 ' + MUTANTS.length + ' 个');

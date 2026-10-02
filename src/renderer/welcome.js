@@ -307,7 +307,26 @@
     out.verdict.push(dirLine('先不配，先看新闻', out.el.btnSkip, true));
     out.verdict.push(dirLine('生成今天的精选（保存成功后才该出现）', out.el.btnGen, false));
     out.verdict.push(dirLine('存法选择（系统加密不可用时才该出现）', out.el.modeRow, false));
-    /* ④ 正文可滚动是设计（内容比一屏高），只如实记录，不算失败 */
+    /* ④ ★ 首屏必须看得见 `#keyInput` —— 2026-10-01 真机抓到的活例，也是用户
+       当天拍板把窗高 420 改成 560 的那条：高 420 时正文内容 410px、可见只有
+       287px，输入框（top=358）落在折线（346）下面 12px。
+       ⚠️ 为什么必须单列一条，而不是靠上面那条 dirLine「Key 输入框=shown」：
+       那条只判"**有没有生成盒子**" —— 落在折线下方的元素照样生成盒子。
+       可靠判据是"**矩形整个落在滚动视口内**"（这扇窗只弹一次，没有第二次机会）。 */
+    var bodyBox = facts(elBody);
+    var keyOnFirstScreen = out.el.keyInput.exists && !out.el.keyInput.hidden
+      && out.el.keyInput.top >= bodyBox.top
+      && out.el.keyInput.bottom <= bodyBox.bottom;
+    out.verdict.push(
+      keyOnFirstScreen
+        ? '✔ 首屏看得见 Key 输入框（' + out.el.keyInput.top + '–' + out.el.keyInput.bottom
+          + '，正文视口 ' + bodyBox.top + '–' + bodyBox.bottom + '）'
+        : '✗ Key 输入框不在首屏：' + out.el.keyInput.top + '–' + out.el.keyInput.bottom
+          + '，正文视口 ' + bodyBox.top + '–' + bodyBox.bottom
+          + ' —— 这扇窗只弹一次，用户很可能找不到它（改 window.js 的 WELCOME_SIZE）',
+    );
+    /* ⑤ 正文余量：如实记录。单看"内容比视口高"不等于故障（滚一下就够了），
+       真正的硬判据是上面那条"输入框在不在首屏" ⇒ 这条只做记录，不给结论。 */
     out.verdict.push(
       out.bodyScroll.scrollH <= out.bodyScroll.clientH
         ? '✔ 正文一屏装得下（' + out.bodyScroll.scrollH + '≤' + out.bodyScroll.clientH + '）'
