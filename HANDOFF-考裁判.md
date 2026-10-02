@@ -470,6 +470,45 @@ MIT 条款要求"随副本一起附上版权声明与许可"，而装到别人�
 - 卸载不删数据、安装不需要管理员（`perMachine:false`）、可自选目录（`oneClick:false`）、
   桌面与开始菜单快捷方式名都是「晨报机」。
 
+### 8.7 追加审计项：首次运行引导窗（2026-10-02）
+
+**为什么它算「分发前审计」的一条**：它是**陌生人拿到安装包之后看到的第一个东西**，
+而且**只出现一次** —— 首屏没看全，就没有第二次机会。所以必须用**打包版**验，不能只验开发态。
+
+**判据**：打包后的 exe，在**空数据目录**里第一次启动，会不会自己把这扇窗弹出来、弹成什么样。
+
+```powershell
+Remove-Item env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+$ud   = "$env:TEMP\mb-a5-ud";   $data = "$env:TEMP\mb-a5-data"
+Remove-Item -Recurse -Force $ud,$data -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $ud,$data | Out-Null
+$env:MB_DATA_DIR = $data
+Start-Process 'release\win-unpacked\MorningBrief.exe' -ArgumentList "--user-data-dir=$ud"
+```
+
+**实测读数**（`release\win-unpacked\MorningBrief.exe`，**246174720 字节**，2026-10-02 14:23 打包）：
+
+| 检查 | 实测 |
+|---|---|
+| 窗口（`EnumWindows` 按标题） | `晨报机 · 第一次使用` · **460×560** @ (744,140) —— 与 `WELCOME_SIZE` **逐字相符** |
+| 欢迎窗个数 | **1**（没有第二扇） |
+| `boot.log` 序列 | `… → level-applied "applied" → scheduler-started at=07:30 → `**`welcome shown`** |
+| 渲染层自检（`run.log`） | **9 条 verdict 零 ✗**，含 `✔ 首屏看得见 Key 输入框（358–389，正文视口 59–486）`、`✔ 正文一屏装得下（427≤427）` |
+| 幂等标记 | `welcome_done = 1`（`node _scan-meta.mjs <data>\brief.db welcome`） |
+| 截图 | `%TEMP%\mb-a5-packaged-welcome.png` |
+
+⚠️ **这一条为什么值得单列**：开发态能弹**不等于**打包态能弹 —— `build.files` 白名单漏文件
+正是这类事故的经典形态（漏了 `welcome.html` 就是「打包后一启动就失败」）。
+`tools/check-dist.mjs` 的 B3 必备文件清单已把那三个文件写进去，本轮 dist 的 3/3 核对里
+`✓ asar 含 src/renderer/welcome.html / welcome.js / styles/welcome.css` 三条都在。
+
+⚠️ **顺带在这条审计里抓到并修掉一个真缺陷**（开发态真机复核时发现）：
+窗高还是 420 的时候，正文内容 **410px** > 可见 **287px** ⇒ `#keyInput` 落在折线下方 **12px**，
+首屏最后一行只剩「打开申请页面」按钮 —— 而这扇窗**只弹一次**。
+修法：`WELCOME_SIZE.h` **420 → 560**（用户拍板），并给自检添一条**硬判据**
+（旧的 `dirLine('Key 输入框', …)` 只判「有没有生成盒子」，**在故障状态下照样给 ✔**）。
+**教训与 §8.6 那份审计同款**：「代码看着对」和「对方的屏幕上看得见」是两件事。
+
 ---
 
 ## 9. 与既有交接文档的关系
