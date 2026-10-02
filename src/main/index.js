@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { app, screen, powerMonitor } from 'electron';
 
-import { createCardWindow, setCardState, nativeHwnd, CARD_SIZE, alignToPhysicalGrid } from './window.js';
+import { createCardWindow, createWelcomeWindow, setCardState, nativeHwnd, CARD_SIZE, alignToPhysicalGrid } from './window.js';
 import { registerIpc } from './ipc.js';
 import {
   createScheduler,
@@ -992,8 +992,80 @@ async function applyBottomLevel(win) {
   return levelApplied;
 }
 
+/**
+ * 首次运行：把「配一个 API Key」这件事**当面问一次**（用户 2026-10-01 拍板）。
+ *
+ * 背景：不配 Key 也能用（卡片上有当天的资讯），但**AI 精选是这程序的主要价值**，
+ * 而"要配 Key"这件事此前只写在卡片顶上那一行小字里 —— 陌生人装完很可能
+ * 永远不知道有这么个东西。
+ *
+ * ⚠️ 六条纪律（都对应具体的失败方式）：
+ *   ① **只弹一次**：标记 `welcome_done` 在**弹出来的那一刻**就写，
+ *      不是在窗口关闭时写 —— 半路被杀掉/直接断电也不会变成"每次开机都弹"；
+ *   ② 已经配过 Key 的人**不打扰**（重装但数据还在的情形）；
+ *   ③ 「先不配，先看新闻」是**一等公民**：这扇窗不是门禁，关掉它什么都不影响
+ *      （Key 是可选项，卡片上那行提示继续留着）；
+ *   ④ 整段包在 try 里 —— **弹窗失败绝不能影响抓取与卡片**（R-E04 同一条纪律）；
+ *   ⑤ 调用点必须在 `mark('ipc-registered')` 之后 —— 窗里的按钮全靠
+ *      apikey:set / ai:generate 那几条通道，早一步建就是个连不上主进程的空壳；
+ *   ⑥ 返回值只入日志（`mark('welcome', …)`），不参与任何控制流。
+ *
+ * @returns {'shown'|'already-open'|'done-before'|'already-configured'|'failed'}
+ */
+function maybeShowWelcome() {
+  try {
+    if (welcomeWin && !welcomeWin.isDestroyed()) return 'already-open';
+    if (getMeta(getDb(), 'welcome_done') === '1') return 'done-before';
+
+    /* 已经配过 Key（或 keystore 里读得到）⇒ 不必问，顺手把标记写上，省得以后又弹 */
+    let configured = false;
+    try {
+      configured = keyStatus().configured === true;
+    } catch {
+      configured = false; // 读不出来就当成没配：宁可多问一次，也不要漏掉该问的人
+    }
+    if (configured) {
+      setMeta(getDb(), 'welcome_done', '1');
+      console.log('[welcome] 这台机器上已经有 API Key —— 不打扰');
+      return 'already-configured';
+    }
+
+    welcomeWin = createWelcomeWindow();
+    welcomeWin.once('closed', () => {
+      welcomeWin = null;
+    });
+    /* ★ 自检（这扇窗只弹一次，出问题连"再看一眼"的机会都没有 ⇒ 必须留证据）。
+       自检结果由**渲染层自己**打进统一日志（见 welcome.js 的 check()），
+       这里只在"自检函数根本没被定义"时报警 —— 那正是"welcome.js 没加载/
+       没进包"这种最该被抓到的故障。 */
+    welcomeWin.webContents.on('did-finish-load', () => {
+      setTimeout(() => {
+        if (!welcomeWin || welcomeWin.isDestroyed()) return;
+        welcomeWin.webContents
+          .executeJavaScript(
+            'window.MB_WELCOME_CHECK ? window.MB_WELCOME_CHECK("main-triggered") : "MB_WELCOME_CHECK 未定义"',
+          )
+          .then((r) => {
+            if (typeof r === 'string' && r.indexOf('未定义') >= 0) console.log('[welcome] ✗ ' + r);
+          })
+          .catch((err) => console.log('[welcome] ✗ 自检没跑成：' + (err && err.message)));
+      }, 1200);
+    });
+    /* ★ 标记与建窗**同一步**（见纪律 ①） */
+    setMeta(getDb(), 'welcome_done', '1');
+    console.log('[welcome] 首次运行：弹出「配一个 API Key」窗口（只弹这一次，关掉不影响使用）');
+    return 'shown';
+  } catch (err) {
+    console.log(`[welcome] ✗ 没能弹出（不影响使用）：${err && err.message}`);
+    return 'failed';
+  }
+}
+
 /* ---------------- 启动 ---------------- */
 let cardWin = null;
+/** 「第一次使用：配一个 API Key」窗口。⚠️ 与托盘同理：必须是模块级引用，
+    局部变量会被 GC 掉、窗口随即消失（见 maybeShowWelcome） */
+let welcomeWin = null;
 let scheduler = null;
 /** 停止请求的轮询器（见 bootstrap 里的说明） */
 let stopWatcher = null;
@@ -1924,6 +1996,16 @@ async function bootstrap() {
   } catch (err) {
     mark('level-FAILED', String(err && err.message));
   }
+
+  /* ---------------- 首次运行：当面问一次 API Key ----------------
+   * 位置与时机见 maybeShowWelcome 的注释（纪律 ⑤ ⑥）。这里补两条：
+   *   · 包在 `setTimeout` 里是**不能阻塞启动** —— 抓取、托盘、调度器都在后面；
+   *   · 延后 1.2s 是为了避开 `announceWhereItIs` 正把卡片抬到最前的那几秒
+   *     （首次运行它会置顶 6s）：两扇窗同时抢最前面，对话框很可能被压在卡片后面。
+   * ⚠️ 这个定时器**没有 clearTimeout**：进程退出时一起消失，不做别的控制流。 */
+  setTimeout(() => {
+    mark('welcome', maybeShowWelcome());
+  }, 1200);
 
   /* ---------------- 定时抓取 ---------------- */
   scheduler = createScheduler({

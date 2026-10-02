@@ -263,6 +263,14 @@ if (!fs.existsSync(RELEASE)) {
         'src/preload/index.cjs',
         'src/renderer/card.html',
         'src/renderer/card.js',
+        /* ★ 欢迎窗三个文件（2026-10-01）：首次运行那扇「配一个 API Key」的窗
+           （见 src/main/index.js 的 maybeShowWelcome）。
+           ⚠️ 漏掉它们的后果很隐蔽：**主功能全都正常**，只有首次运行的提示
+           变成一扇空白窗（`loadFile` 找不到文件 → 白框），而它只弹一次 ——
+           连"再试一次"的机会都没有。 */
+        'src/renderer/welcome.html',
+        'src/renderer/welcome.js',
+        'src/renderer/styles/welcome.css',
         'src/shared/runtime-state.js',
         'src/store/db.js',
       ]) {

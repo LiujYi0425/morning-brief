@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-surface="glass">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      CSP 与 card.html **逐字同一口径**（理由见 card.html 里那段说明）：
+      `default-src 'none'` + 显式 `file:`。这个窗口里同样没有任何外联能力，
+      「打开申请页面」是走主进程的协议白名单交给系统浏览器。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; font-src 'self' file:;"
+    />
+    <title>晨报机 · 第一次使用</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/surface.css" />
+    <link rel="stylesheet" href="styles/welcome.css" />
+  </head>
+  <body>
+    <!-- class="card" 给的是**同一套玻璃材质**（surface.css 里唯一的形态来源）；
+        class="sheet" 只负责"在这扇窗里怎么摆"（welcome.css）。 -->
+    <div class="card sheet" role="dialog" aria-modal="true" aria-labelledby="wTitle">
+      <!-- 顶栏：可拖动（-webkit-app-region: drag），但 ✕ 必须 no-drag。
+           ⚠️ 卡片那边不用这个属性（它会吞掉区域内全部鼠标事件，而卡片的顶栏
+              整体是"展开/收起"按钮）；这里顶栏没有别的用途，所以可以放心用。 -->
+      <div class="sheet__bar" id="bar">
+        <span class="sheet__title" id="wTitle">第一次使用：配一个 API Key（可选）</span>
+        <button class="sheet__x" id="btnClose" type="button" aria-label="关闭这个窗口（先不配）">✕</button>
+      </div>
+
+      <div class="sheet__body" id="body">
+        <p class="p">
+          晨报机每天早上 <b>07:30</b> 抓一遍你订阅的源，把当天的资讯摆到右上角那张小卡片上。
+          配一个 API Key 之后，它会再用 AI 从当天几百条里挑出最值得看的
+          <b id="pickCount">10</b> 条，写成一句话总览。
+        </p>
+        <p class="p p--quiet">
+          <b>不配也能用</b>：卡片上照常有当天的资讯，只是不做 AI 精选。
+          配 Key 这件事随时可以在卡片上的「⚙ 设置」里再做。
+        </p>
+
+        <p class="sect">三步拿到 Key</p>
+        <ol class="steps">
+          <li>打开下面的申请页面，注册并充几块钱（按每天几百条资讯算，一天大约几分钱）。</li>
+          <li>在那里建一个 API Key，复制它。</li>
+          <li>粘到下面的框里，点「保存 Key」。</li>
+        </ol>
+        <div class="row" id="applyRow">
+          <button class="btn" id="btnApply" type="button">打开申请页面</button>
+          <span class="hint" id="host">platform.deepseek.com</span>
+        </div>
+
+        <label class="lbl" for="keyInput">API Key</label>
+        <input
+          class="inp"
+          id="keyInput"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="粘一个 API Key（只留在本机）"
+        />
+        <!--
+          系统加密不可用时**必须让用户显式选存法**（架构约束 ④：不许静默明文）。
+          与 card.js 的 ⚙ 面板同一套文案 —— 只有这一处例外：它在欢迎窗里，
+          默认收起，只有在主进程说"加密不可用"（或者保存时回 needsChoice）才出现。
+        -->
+        <div class="row" id="modeRow" hidden>
+          <label class="lbl lbl--inline" for="modeSel">存法</label>
+          <select class="inp inp--sel" id="modeSel">
+            <option value="memory">只存内存（重启要重填，最安全）</option>
+            <option value="plaintext">明文落盘（不推荐）</option>
+          </select>
+        </div>
+
+        <p class="note">
+          Key 只留在你这台机器上（默认用系统加密存放），模型调用由这台机器直连供应商、
+          不经过任何服务器；这个程序里也没有"把 Key 读回来"的通道。
+        </p>
+        <p class="msg" id="msg" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="sheet__foot">
+        <!-- 第一组：还没保存时 -->
+        <div class="foot-row" id="footA">
+          <button class="btn" id="btnSave" type="button" data-primary="on">保存 Key</button>
+          <span class="spacer"></span>
+          <button class="btn" id="btnSkip" type="button">先不配，先看新闻</button>
+        </div>
+        <!-- 第二组：保存成功之后（把"接下来干什么"摆在最显眼处） -->
+        <div class="foot-row" id="footB" hidden>
+          <button class="btn" id="btnGen" type="button" data-primary="on">生成今天的精选</button>
+          <button class="btn" id="btnTest" type="button">测一下能不能用</button>
+          <span class="spacer"></span>
+          <button class="btn" id="btnDone" type="button">完成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ⚠️ 经典 script（不许 type="module"）：与 card.html 同一条 CSP 理由。
+         本文件里**没有** import/export，也**没有** console.log。 -->
+    <script src="welcome.js"></script>
+  </body>
+</html>

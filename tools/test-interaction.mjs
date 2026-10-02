@@ -1762,6 +1762,246 @@ const PANEL_SOURCES = [
 }
 })();
 
+/* =====================================================================
+   【第一层之四】首次运行那扇「配一个 API Key」窗（2026-10-01）
+   ---------------------------------------------------------------------
+   这扇窗与卡片有三处不同，每一处都带来一类**新的**失败方式：
+     · 它是**独立文档**（welcome.html）⇒ 不再有 card.css 那些兜底：
+       `[hidden]` 的全局重置、正文的 `user-select` 都要自己再说一遍；
+     · 它**只弹一次**（看过就不再出现）⇒ 坏了没人有机会再看一眼：
+       id 拼错这类"静默失效"必须在这里被咬住；
+     · 它**收 API Key**（全程序唯一的输入框）⇒ 明文边界要钉死在
+       "只在保存那一刻读一次，用完即弃，进不了日志"。
+   剩下"到底长什么样"由**真机自检**负责（welcome.js 里的 MB_WELCOME_CHECK，
+   与卡片 2026-09-30 那轮同一套取证方式：按渲染结果判，不按属性判）。
+   ===================================================================== */
+say('');
+say('【第一层之四】首次运行欢迎窗（welcome.html / welcome.js / welcome.css）');
+
+const W_HTML = readFileRel('src/renderer/welcome.html');
+const W_JS = readFileRel('src/renderer/welcome.js');
+const W_CSS = readCss('welcome.css');
+const W_WINDOW = readFileRel('src/main/window.js');
+const W_INDEX = readFileRel('src/main/index.js');
+
+/** 把 html 里的 CSP 取出来（两份文档必须一字不差） */
+function cspOf(html) {
+  const m = html.match(/content="(default-src[^"]*)"/);
+  return m ? m[1] : null;
+}
+
+/* ⚠️ 反向断言（"不许出现 X"）必须先**去掉注释**再查 —— 这条是自找的教训：
+   第一版直接把源码丢给断言，结果三条全部误报，因为注释里本来就写着
+   「不许 type="module"」「window.close() 在 Electron 里就是关掉这扇窗口」
+   「形态值不在这里：backdrop-filter …」——**注释里提到**与**代码里真的做了**
+   是两回事。同一类坑之前也踩过一次正向版本（`indexOf("mark('module-evaluated'")`
+   命中了我自己注释里的同名字符串）。
+   ⚠️ JS 不能拿"两条斜杠"的正则硬删注释：字符串里的 https 网址会让它把后半行
+   吃掉（这条注释自己就中过一次招：里面写出来的那条正则里的星号加斜杠
+   提前把这段块注释关掉了，node --check 当场报语法错）。
+   所以自己走一遍、字符串里跳过。 */
+function stripJs(src) {
+  let out = '';
+  let i = 0;
+  let str = null;
+  while (i < src.length) {
+    const c = src[i];
+    const n = src[i + 1];
+    if (str) {
+      out += c;
+      if (c === '\\') { out += src[i + 1] || ''; i += 2; continue; }
+      if (c === str) str = null;
+      i += 1;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { str = c; out += c; i += 1; continue; }
+    if (c === '/' && n === '/') { while (i < src.length && src[i] !== '\n') i += 1; continue; }
+    if (c === '/' && n === '*') {
+      i += 2;
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i += 1;
+      i += 2;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+const stripHtml = (src) => src.replace(/<!--[\s\S]*?-->/g, '');
+const stripCss = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '');
+
+const W_HTML_C = stripHtml(W_HTML);
+const W_JS_C = stripJs(W_JS);
+const W_CSS_C = stripCss(W_CSS);
+
+ok('★★ welcome.html 的 CSP 必须与 card.html 逐字相同（放宽的那份就是新开的口子）', () => {
+  const card = cspOf(readFileRel('src/renderer/card.html'));
+  const wel = cspOf(W_HTML_C);
+  assert.ok(card, 'card.html 里找不到 CSP');
+  assert.ok(wel, 'welcome.html 里找不到 CSP');
+  assert.equal(wel, card, '两份文档的 CSP 必须一字不差');
+});
+
+ok('★ welcome.html 只有一个**经典**脚本，且不加载 card.js', () => {
+  const tags = W_HTML_C.match(/<script[^>]*>/g) || [];
+  assert.equal(tags.length, 1, '欢迎窗只该有一个 script 标签：' + JSON.stringify(tags));
+  assert.equal(tags[0], '<script src="welcome.js">', '必须是无 type 的经典脚本（模块脚本会被 CSP 拦）');
+  assert.ok(!/type\s*=\s*"module"/.test(W_HTML_C), 'CSP 是 default-src none，模块脚本会被拦');
+  assert.ok(!/script[^>]*card\.js/.test(W_HTML_C), '欢迎窗不该加载 card.js —— 两个文档各管各的');
+});
+
+ok('★★ welcome.js 里的每个 $(\'id\') 都必须在 welcome.html 里真的有那个 id', () => {
+  /* ⚠️ 这条为什么重要：拼错一个 id 在真机上就是**静默失效**（按钮点了没反应、
+     提示永远不出现），而这扇窗只弹一次 —— 用户不会再来告诉你。 */
+  const ids = new Set([...W_HTML_C.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+  const used = [...W_JS_C.matchAll(/\$\('([^']+)'\)/g)].map((m) => m[1]);
+  assert.ok(used.length >= 10, 'welcome.js 读的元素太少，不像这个窗口：' + used.length);
+  const missing = used.filter((u) => !ids.has(u));
+  assert.deepEqual(missing, [], 'welcome.js 读了 HTML 里不存在的 id：' + JSON.stringify(missing));
+  for (const must of [
+    'keyInput', 'btnSave', 'btnSkip', 'btnClose', 'btnApply', 'btnGen', 'btnTest',
+    'btnDone', 'msg', 'modeRow', 'modeSel', 'footA', 'footB', 'pickCount',
+  ]) {
+    assert.ok(ids.has(must), 'welcome.html 缺 id="' + must + '"');
+  }
+  /* 反方向：HTML 里那些"给 JS 用的"钩子不许是孤儿（留了 id 却没人用 = 有东西没接上） */
+  for (const hook of ['btnSave', 'btnSkip', 'btnClose', 'btnGen', 'btnTest', 'btnDone']) {
+    assert.ok(used.includes(hook), 'id="' + hook + '" 在 welcome.js 里没人用 —— 按钮没接线');
+  }
+});
+
+ok('★★ Key 明文：全文件只读一次、进不了日志、保存成功立刻清空', () => {
+  assert.equal(
+    (W_JS_C.match(/var v = inp\.value/g) || []).length, 1,
+    'inp.value 必须在保存那一刻被读**恰好一次**（多了就说明有第二条把 Key 拿出来的路）',
+  );
+  assert.equal(
+    (W_JS_C.match(/inp\.value/g) || []).length, 2,
+    'inp.value 只该出现两次：读一次（保存那一刻）+ 成功后清空一次',
+  );
+  assert.ok(/inp\.value = ''/.test(W_JS_C), '保存成功必须清空输入框（Key 不该继续留在界面上）');
+  assert.equal((W_JS_C.match(/console\.log/g) || []).length, 0, '不许有 console.log：日志统一走 api.log，才审得清');
+  assert.ok(!/ipcRenderer\s*\./.test(W_JS_C), '不许直接摸 ipcRenderer（只能走 window.mb）');
+  assert.ok(!/\brequire\s*\(/.test(W_JS_C), '不许 require()');
+  assert.ok(!/^\s*import\s/m.test(W_JS_C), '不许 import（经典脚本 + CSP）');
+  assert.ok(!/^\s*export\s/m.test(W_JS_C), '不许 export（经典脚本 + CSP）');
+  /* ★★ 把每个 say(...) 的实参原文抠出来，逐个检查里面有没有 Key 的影子 */
+  const args = [];
+  const re = /say\(/g;
+  let m;
+  while ((m = re.exec(W_JS_C))) {
+    let depth = 0;
+    let i = m.index + 3;
+    for (; i < W_JS_C.length; i += 1) {
+      const ch = W_JS_C[i];
+      if (ch === '(') depth += 1;
+      else if (ch === ')') { depth -= 1; if (depth === 0) break; }
+    }
+    args.push(W_JS_C.slice(m.index + 4, i));
+  }
+  assert.ok(args.length >= 8, 'say(...) 调用太少（留痕不全）：' + args.length);
+  for (const a of args) {
+    assert.ok(!/inp\.value/.test(a), 'say(...) 里出现了输入框的值：' + a);
+    assert.ok(!/\bv\b/.test(a), 'say(...) 里出现了 Key 变量 v：' + a);
+  }
+});
+
+ok('★★ 关闭路径只有一条：window.close() 恰好一次，且 ✕/Esc/先不配/完成共用它', () => {
+  const closes = W_JS_C.match(/window\.close\(\)/g) || [];
+  assert.equal(closes.length, 1, 'window.close() 必须只有一处（多了就说明有绕过 leave() 的关闭路径）');
+  const def = W_JS_C.match(/function leave\(reason\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(def, '找不到 leave()');
+  assert.ok(/window\.close\(\)/.test(def[0]), 'window.close() 必须就在 leave() 里');
+  for (const [code, what] of [
+    [/leave\('用户填完了 Key，关掉欢迎窗'\)/, '「完成」'],
+    [/leave\('用户选了「先不配」'\)/, '「先不配，先看新闻」'],
+    [/leave\('用户点了 ✕（等同于先不配）'\)/, '✕'],
+    [/leave\('用户按了 Esc（等同于先不配）'\)/, 'Esc'],
+  ]) {
+    assert.ok(code.test(W_JS_C), what + ' 没有走 leave() —— 少一条"用户选了什么"的留痕');
+  }
+  assert.ok(
+    /id="btnSkip"[^>]*>先不配，先看新闻</.test(W_HTML_C),
+    '「先不配」必须是一个看得见的按钮（Key 是可选项，不是门禁）',
+  );
+});
+
+ok('★ 欢迎窗的样式：独立文档要自己兜住 [hidden]、可选中文字、不许抄形态值', () => {
+  assert.ok(
+    /\[hidden\]\s*\{\s*display:\s*none\s*!important/.test(W_CSS_C),
+    'welcome.css 必须自己再写一遍 [hidden]{display:none!important}（它不加载 card.css）',
+  );
+  const body = declBlock(W_CSS_C, '.sheet__body');
+  assert.ok(body, 'welcome.css 里找不到 .sheet__body');
+  assert.ok(
+    /user-select\s*:\s*text/.test(body),
+    'surface.css 的 .card 是 user-select:none ⇒ 要粘 Key 的正文必须改回 user-select:text',
+  );
+  const sheet = declBlock(W_CSS_C, '.sheet');
+  assert.ok(sheet, 'welcome.css 里找不到 .sheet');
+  assert.ok(
+    /inset\s*:\s*var\(--win-pad\)/.test(sheet),
+    '.sheet 必须用 inset: var(--win-pad)（与 window.js 的 WIN_PAD 是一对）',
+  );
+  /* 形态值只许在 tokens.css / surface.css（R-C08）——组件 CSS 里出现就是复制粘贴漏进来的 */
+  for (const bad of ['backdrop-filter', 'box-shadow', 'linear-gradient']) {
+    assert.ok(!W_CSS_C.includes(bad), 'welcome.css 里出现了 ' + bad + '（形态值只许在 tokens / surface）');
+  }
+  /* 状态色只许落在左边那道竖条上，不许拿去写正文（对比度是算过的硬规则 R-C02） */
+  /* ⚠️ 写成 (?:^|[;\s])color: 而不是裸的 color: —— 后者会被
+     `border-left-color: var(--state-ok)` 满足（子串命中），断言就成了摆设。 */
+  assert.ok(
+    !/(?:^|[;\s])color:\s*var\(--state-/.test(W_CSS_C),
+    '正文不许直接用 --state-* 当文字色（R-C02 对比度）',
+  );
+  assert.ok(/border-left-color:\s*var\(--state-/.test(W_CSS_C), '.msg 的状态色应当落在 border-left-color 上');
+});
+
+ok('★ 欢迎窗必须"抢焦点、显在任务栏"，且绝不许被置底', () => {
+  const body = W_WINDOW.match(/export function createWelcomeWindow\(\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(body, 'window.js 里找不到 createWelcomeWindow()');
+  const src = body[0];
+  assert.ok(/alwaysOnTop:\s*true/.test(src), '欢迎窗必须置顶（它不是那张会沉底的卡片）');
+  assert.ok(/skipTaskbar:\s*false/.test(src), '欢迎窗要出现在任务栏里');
+  assert.ok(/win\.show\(\)/.test(src), '欢迎窗要 show()（抢焦点）—— 卡片那边才是 showInactive()');
+  assert.ok(/welcome\.html/.test(src), '加载的必须是 welcome.html');
+  /* ★★ 最要命的一条：卡片那套"置底 + 不抢焦点"绝不能落到这扇窗上 ——
+     把"第一件该做的事"放进一个会沉到所有窗口下面的地方，等于没做。 */
+  assert.ok(!/applyBottomLevel\(welcomeWin/.test(W_INDEX), '禁止把欢迎窗置底');
+  const wm = W_WINDOW.match(/export const WELCOME_SIZE = \{ w: (\d+), h: (\d+) \}/);
+  assert.ok(wm, 'window.js 里找不到 WELCOME_SIZE');
+  assert.equal((Number(wm[1]) - 40) % 2, 0, '欢迎窗内容宽度必须是偶数（与 CARD_SIZE 同一条规矩）');
+  assert.equal((Number(wm[2]) - 40) % 2, 0, '欢迎窗内容高度必须是偶数（与 CARD_SIZE 同一条规矩）');
+});
+
+ok('★★ 欢迎窗调用的每条通道都必须在 preload 里真的存在', () => {
+  /* 静态脚本没有类型检查：写错一个方法名，真机上表现为"点了没反应"，
+     而这扇窗只弹一次。⇒ 逐个核对。 */
+  const preload = readFileRel('src/preload/index.cjs');
+  const ns = new Set();
+  const fns = [];
+  for (const m of W_JS_C.matchAll(/api\.([A-Za-z_]+)\.([A-Za-z_]+)\(/g)) {
+    ns.add(m[1]);
+    fns.push(m[2]);
+  }
+  for (const m of W_JS_C.matchAll(/api\.([A-Za-z_]+)\(/g)) fns.push(m[1]);
+  assert.ok(fns.length >= 5, '欢迎窗调用的接口太少，不像这个窗口：' + fns.length);
+  for (const n of ns) {
+    /* ⚠️ 只要求 `ai:` 这个键存在 —— preload 里写的是 `ai: Object.freeze({`，
+       要求紧跟 `{` 的话这条断言会因为外壳写法而误报。 */
+    assert.ok(
+      new RegExp('\\b' + n + '\\s*:').test(preload),
+      'preload 里没有命名空间 mb.' + n + ' —— 欢迎窗已经在用它了',
+    );
+  }
+  for (const f of fns) {
+    assert.ok(
+      new RegExp('\\b' + f + '\\s*:').test(preload),
+      'preload 里没有 ' + f + ' —— 欢迎窗已经在用它了（真机上表现为点了没反应）',
+    );
+  }
+});
+
 say('');
 say('────────────────────────────────────────────────────────');
 say('断言 ' + passed + ' 通过 / ' + failed + ' 失败；变异体 ' + MUTANTS.length + ' 个');

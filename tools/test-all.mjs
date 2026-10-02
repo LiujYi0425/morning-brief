@@ -5768,6 +5768,113 @@ ok('★★ 领域精选在主进程的接线：只认单类别、清掉分页、
 });
 
 /* ================================================================== */
+/* 第二十二层 · 首次运行那扇「配一个 API Key」窗（2026-10-01）           */
+/* ------------------------------------------------------------------ */
+/* 用户原话：「我感觉，让陌生人装上第一件事就是弹窗让他们填写API Key更好」。
+   拍板：另开一扇**真弹窗**小窗；**只弹第一次**（看过一次就不再打扰）。
+   ⚠️ 这里考主进程那一半（渲染层那一半在 tools/test-interaction.mjs）。
+   它是**只弹一次**的，所以两种写法都很贵：
+     · 标记写早了 ⇒ 窗口没建成却记成"弹过了"，这辈子不会再弹；
+     · 标记不写/写晚了 ⇒ 每次开机都弹 —— 那是打扰，不是贴心。 */
+say();
+say('--- 第二十二层 · 首次运行的「配一个 API Key」窗（只弹一次）---');
+
+ok('★★ 「弹过了」这个标记必须写在**建窗之后 / 成功返回之前**', () => {
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  const iFn = src.indexOf('function maybeShowWelcome()');
+  assert.ok(iFn > 0, '主进程里找不到 maybeShowWelcome()');
+  const body = src.slice(iFn, iFn + 3000);
+  const iCreate = body.indexOf('createWelcomeWindow()');
+  assert.ok(iCreate > 0, 'maybeShowWelcome() 里没有建窗');
+  const iMeta = body.indexOf("setMeta(getDb(), 'welcome_done', '1')", iCreate);
+  assert.ok(iMeta > 0, '建窗之后没有写 welcome_done 标记 —— 每次开机都会弹');
+  const iReturn = body.indexOf("return 'shown'");
+  assert.ok(iReturn > 0, '找不到成功返回（本文件结构变了？）');
+  assert.ok(iMeta < iReturn, 'welcome_done 写在 return 之后 —— 那行永远跑不到');
+  /* ★ 窗口引用必须是**模块级**的：局部变量会被 GC 掉、窗口随即消失
+     （托盘那次真事故的同一个坑）。 */
+  assert.ok(
+    /^let welcomeWin = null;/m.test(src),
+    '没有模块级的 let welcomeWin —— 局部引用会被 GC，窗口会自己消失',
+  );
+  /* ★ 关掉之后要把引用放回 null，否则再也弹不出来（且 maybeShowWelcome 会误判 already-open） */
+  assert.ok(
+    /welcomeWin\.once\('closed', \(\) => \{[\s\S]{0,80}welcomeWin = null;/.test(body),
+    "窗口关闭时没有把 welcomeWin 置回 null",
+  );
+  /* ★ 整段必须包在 try 里：弹窗失败绝不能影响抓取与卡片（R-E04 同一条纪律） */
+  const iCatch = body.indexOf('} catch (err) {');
+  assert.ok(iCatch > 0, '整段没有 try/catch —— 弹窗失败会影响启动');
+  assert.ok(iCatch > iCreate, '建窗排在 catch 之后（结构变了？）');
+  assert.ok(
+    !body.slice(iCatch, iCatch + 400).includes("'welcome_done'"),
+    'catch 里也写了 welcome_done —— 弹窗失败会被记成"弹过了"，用户再也看不到这扇窗',
+  );
+});
+
+ok('★★ 已经配过 Key 的人不许打扰（重装但数据还在）', () => {
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  const iFn = src.indexOf('function maybeShowWelcome()');
+  const body = src.slice(iFn, iFn + 3000);
+  assert.ok(
+    /configured\s*=\s*keyStatus\(\)\.configured === true/.test(body),
+    '没有检查"这台机器上是否已经配过 Key"',
+  );
+  const iConf = body.indexOf('if (configured) {');
+  assert.ok(iConf > 0, '找不到"已配过"那一支');
+  const iCreate = body.indexOf('createWelcomeWindow()');
+  assert.ok(iConf < iCreate, '"已配过"那一支排在建窗之后 —— 已经配过的人照样会被弹窗');
+  assert.ok(
+    body.slice(iConf, iCreate).includes("'welcome_done', '1'"),
+    '"已配过"那一支没写标记 ⇒ 每次开机都要再判一遍（且日志会反复说"不打扰"）',
+  );
+  /* ★ 已经弹过 / 正在开着，都要**提前返回**，不许走到建窗那一步 */
+  assert.ok(/=== '1'\) return 'done-before'/.test(body), '没有"弹过了就不再弹"的判定');
+  assert.ok(/return 'already-open'/.test(body), '没有"已经开着就别再建一个"的判定');
+});
+
+ok('★★ 欢迎窗必须晚于 IPC 注册、且不能阻塞启动', () => {
+  const src = fs.readFileSync(path.resolve(HERE, '..', 'src', 'main', 'index.js'), 'utf8');
+  const iIpc = src.indexOf("mark('ipc-registered')");
+  assert.ok(iIpc > 0, "定位不到 mark('ipc-registered')");
+  const iCall = src.indexOf("mark('welcome', maybeShowWelcome())");
+  assert.ok(iCall > 0, '启动路径上没有调用 maybeShowWelcome()');
+  assert.ok(
+    iCall > iIpc,
+    '欢迎窗的调用点排在 IPC 注册之前 —— 窗里的按钮会是个连不上主进程的空壳',
+  );
+  const before = src.slice(Math.max(0, iCall - 240), iCall);
+  assert.ok(
+    before.includes('setTimeout(() => {'),
+    '调用点没有包在 setTimeout 里 —— 一扇窗不该挡住抓取/托盘/调度器',
+  );
+  /* ★ 铁律顺带咬一口：bootstrap() 之前不许出现顶格的 app.on(...) */
+  const iBootstrap = src.indexOf('async function bootstrap');
+  assert.ok(iBootstrap > 0, '定位不到 bootstrap()');
+  assert.ok(
+    !/^app\.on\(/m.test(src.slice(0, iBootstrap)),
+    '模块顶层（bootstrap 之前）注册了 app.on —— 真机事故：whenReady 永不触发',
+  );
+});
+
+ok('★ 欢迎窗不许新增 IPC 通道，但它的三个文件必须进"打包必备"清单', () => {
+  /* ⚠️ 这个窗口只用已有的那几条通道（apikey:* / ai:* / item:open / app:log）：
+     少一条通道就少一处安全边界。 */
+  const ch = fs.readFileSync(path.resolve(HERE, '..', 'src', 'shared', 'ipc-channels.js'), 'utf8');
+  assert.ok(!/welcome/i.test(ch), 'IPC 通道表里出现了 welcome —— 这个窗口不需要新通道');
+  /* ⚠️ 漏进包里的后果特别隐蔽：主功能全正常，只有"首启该弹的那扇窗"变成空白，
+     而它**只弹一次** —— 用户不会有机会再看一眼。 */
+  const cd = fs.readFileSync(path.resolve(HERE, '..', 'tools', 'check-dist.mjs'), 'utf8');
+  for (const f of [
+    'src/renderer/welcome.html',
+    'src/renderer/welcome.js',
+    'src/renderer/styles/welcome.css',
+  ]) {
+    assert.ok(cd.includes("'" + f + "'"), 'check-dist 的"打包必备"清单里没有 ' + f);
+  }
+});
+
+/* ================================================================== */
 /* ★ 跑完把临时目录收掉 —— 这一步要在**所有用例都结束、句柄都关了之后**做，
    所以放在结论行之前（`process.exit` 上的那个 handler 只是兜底）。 */
 cleanupTmpDirs();

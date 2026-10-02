@@ -165,6 +165,84 @@ export function createCardWindow(opts = {}) {
   return win;
 }
 
+/**
+ * 「第一次使用：配一个 API Key」窗口的尺寸（设计值）。
+ *
+ * = 内容 420×380 + WIN_PAD 20×2。**为什么不复用 CARD_SIZE**：
+ *   ① 这扇窗里要塞进四段说明 + 一个输入框 + 两组按钮，卡片那个 400×340 的
+ *      内容区装不下（真机上"底栏被裁"就是这个老毛病）；
+ *   ② 它是**独立的窗口**，尺寸跟着自己的内容走，不该被卡片的形态变化牵着走。
+ * ⚠️ 与卡片同一条规矩：这里写的是**窗口**尺寸；卡片/面板本身仍由
+ *    CSS 的 `inset: var(--win-pad)` 定位（见 styles/welcome.css）。
+ */
+export const WELCOME_SIZE = { w: 460, h: 420 };
+
+/**
+ * 创建「第一次使用」窗口（内容见 src/renderer/welcome.html）。
+ *
+ * 为什么必须**另开一扇窗**，而不是把这几句话塞进卡片里 —— 这是架构性的：
+ *   卡片是 `HWND_BOTTOM` + `WS_EX_NOACTIVATE`（ADR-012：置底、不抢焦点、
+ *   点了不激活）。把"第一件该做的事"放进一个**会沉到所有窗口下面**、
+ *   而且点它不激活的地方，等于没做。所以这扇窗的全部参数都与卡片相反：
+ *     · `alwaysOnTop: true`  —— 它是提示，飘到浏览器后面就等于没弹；
+ *     · `skipTaskbar: false` —— 用户一时找不到时，任务栏里能把它叫回来；
+ *     · `ready-to-show` 时 `show()`（**抢焦点**）—— 接下来他要往输入框里粘东西，
+ *       不抢焦点等于让他先满屏找一遍窗口。全工程唯一一处抢焦点，且只弹一次。
+ *   它**不参与**置底那套：`applyBottomLevel` 只对 cardWin 调。
+ *
+ * ⚠️ 其余参数（构造尺寸不可信 → setBounds 校正、物理网格对齐、preload 与
+ *    sandbox 口径）与 createCardWindow 逐字一致 —— 那几条都是真机踩出来的。
+ */
+export function createWelcomeWindow() {
+  const size = WELCOME_SIZE;
+  const display = screen.getPrimaryDisplay();
+  const wa = display.workArea;
+  const pos = alignToPhysicalGrid(
+    wa.x + Math.round((wa.width - size.w) / 2),
+    wa.y + Math.round((wa.height - size.h) * 0.24),
+    display.scaleFactor,
+  );
+
+  const win = new BrowserWindow({
+    width: size.w,
+    height: size.h,
+    x: pos.x,
+    y: pos.y,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    resizable: false,
+    movable: true,
+    minimizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    show: false,
+    focusable: true,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: PRELOAD,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  });
+
+  // ★ 构造参数尺寸不可信 → 落定后校正一次（与卡片同一条真机结论）
+  win.setBounds({ x: pos.x, y: pos.y, width: size.w, height: size.h });
+
+  win.loadFile(path.join(RENDERER_DIR, 'welcome.html'));
+
+  win.once('ready-to-show', () => {
+    win.show(); // ★ 与卡片的 showInactive 相反：这里要焦点（见函数头）
+    win.focus();
+  });
+
+  return win;
+}
+
 /** 切换收起/展开（保持左上角不动 —— 位置稳定性优先） */
 export function setCardState(win, next) {
   if (!win || win.isDestroyed()) return null;

@@ -1,0 +1,231 @@
+/* =====================================================================
+   welcome.css —— 只在「第一次使用：配一个 API Key」这扇窗里生效
+   ---------------------------------------------------------------------
+   ⚠️ 三条必须守住的规矩（每条都对应一次真机事故，不是风格偏好）：
+
+     ① **形态值不在这里**：`backdrop-filter` / 半透明底 / 硬编码阴影只许出现在
+        tokens.css 与 surface.css（硬规则 R-C08）。所以这扇窗直接挂 surface.css
+        的 `.card` 材质类，本文件只写"怎么摆"，不写"长什么样"。
+
+     ② **`[hidden]` 必须真的隐藏**：作者样式表里的 `display` 会压过浏览器默认的
+        `[hidden]{display:none}` —— 卡片上正是这么出过一次事（`.chip--pick` 的
+        `display:flex` 顶掉了 hidden：属性说藏了、屏幕还显示、点下去没反应）。
+        本页是**另一个文档**（不加载 card.css），所以这条重置必须在这份文件里
+        **再说一遍**，不能省。
+
+     ③ **正文颜色只用 tokens 里的三档**（alpha 是算过的：0.96/0.68/0.62 →
+        14.2–17.4 / 6.1–6.7 / 5.0–5.4 : 1，全部过 R-C02 的 4.5:1）。
+        `--state-ok/warn/bad` 是给**状态条**用的，不许拿去写正文 —— 状态由
+        左侧那道 3px 竖条承担，文字保持可读。这与卡片上"选中不靠 accent 文字色"
+        是同一条思路。
+   ===================================================================== */
+
+/* 与 card.css 的 `.card` 同一条规矩：定位交给 inset，**不许**再写 width/height
+   （绝对定位下两者过约束，会把外投影的画布吃掉）。 */
+.sheet {
+  position: absolute;
+  inset: var(--win-pad);
+}
+
+/* 见文件头 ② —— 少了它，`#modeRow`（display:flex）和两组底栏就藏不住 */
+[hidden] {
+  display: none !important;
+}
+
+/* ---------------- 顶栏：可拖动（这扇窗没有"点顶栏展开"之类的用途，
+   所以能放心用 app-region；卡片那边不行，那会吞掉整条顶栏的点击） ---------------- */
+.sheet__bar {
+  -webkit-app-region: drag;
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--gap-2);
+  padding: 10px var(--gap-3) 6px;
+}
+.sheet__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.sheet__x {
+  -webkit-app-region: no-drag;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  line-height: 1;
+  cursor: pointer;
+}
+.sheet__x:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+/* ---------------- 正文：可滚动 + **可选中** ----------------
+   ⚠️ surface.css 的 `.card` 上有 `user-select: none`（卡片不该能被拖选）。
+   这扇窗里满是要照着做的步骤和一个要粘贴的输入框 ⇒ 必须改回可选。 */
+.sheet__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 2px var(--gap-3) 0;
+  user-select: text;
+}
+
+.p {
+  margin: 0 0 var(--gap-2);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--text-primary);
+}
+.p--quiet {
+  color: var(--text-secondary);
+}
+.sect {
+  margin: var(--gap-3) 0 var(--gap-1);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.steps {
+  margin: 0 0 var(--gap-2);
+  padding-left: 18px;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--text-secondary);
+}
+.steps li {
+  margin-bottom: 2px;
+}
+.row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--gap-2);
+  margin: var(--gap-2) 0 var(--gap-3);
+}
+.lbl {
+  display: block;
+  margin: 0 0 var(--gap-1);
+  font-size: var(--fs-meta);
+  color: var(--text-secondary);
+}
+.lbl--inline {
+  margin: 0;
+  flex: 0 0 auto;
+}
+.hint {
+  font-size: var(--fs-meta);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note {
+  margin: var(--gap-3) 0 0;
+  font-size: var(--fs-meta);
+  line-height: var(--lh-body);
+  color: var(--text-tertiary);
+}
+
+/* ---------------- 输入 ---------------- */
+.inp {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: var(--fs-body);
+  color: var(--text-primary);
+  background: var(--chip-bg);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-chip);
+  padding: 6px 9px;
+  user-select: text;
+}
+.inp--sel {
+  width: auto;
+  max-width: 240px;
+}
+.btn:focus-visible,
+.inp:focus-visible,
+.sheet__x:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------------- 状态行：颜色只落在那道 3px 竖条上 ---------------- */
+.msg {
+  margin: var(--gap-3) 0 0;
+  border-left: 3px solid var(--divider);
+  padding: 2px 0 2px var(--gap-2);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--text-primary);
+  min-height: 1.4em;
+}
+.msg[data-level='ok'] {
+  border-left-color: var(--state-ok);
+}
+.msg[data-level='bad'] {
+  border-left-color: var(--state-bad);
+}
+.msg[data-level='busy'] {
+  border-left-color: var(--accent);
+}
+
+/* ---------------- 底栏：按钮**不许被压扁**（同 .foot 的教训） ---------------- */
+.sheet__foot {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--divider);
+  padding: 10px var(--gap-3) 12px;
+}
+.foot-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--gap-2);
+}
+.spacer {
+  flex: 1 1 auto;
+  min-width: var(--gap-1);
+}
+
+/* 按钮范式照抄 card.css 的 `.btn`（只是字号抬到 --fs-body：
+   这扇窗的按钮是"照着做"的一部分，不该用卡片上那种 11px 的小字）。
+   ⚠️ 主按钮**不用** accent 做文字色：`--text-primary` + 加粗 + accent 描边，
+   与卡片上 `.btn[data-primary='on']` 同一套做法（accent 压在浅底上只有 3.2–3.9:1）。 */
+.btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  padding: 6px 14px;
+  border-radius: var(--radius-chip);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+.btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.btn[data-primary='on'] {
+  background: var(--chip-bg-on);
+  border-color: var(--accent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
