@@ -5875,6 +5875,70 @@ ok('★ 欢迎窗不许新增 IPC 通道，但它的三个文件必须进"打包
 });
 
 /* ================================================================== */
+/* 第二十三层 · 「接续契约」：新会话说一句「继续」就能开工（2026-10-01）  */
+/* ------------------------------------------------------------------ */
+/* 为什么把它写进考裁判：这一轮的收尾动作不是"功能做完了"，而是
+   **把上下文交给下一个会话**。交接这件事有个特点 —— 它坏了**没人会发现**：
+   功能照样能跑、门禁照样绿，只有"下一个我自己"会白白重做一遍、或者走错方向。
+
+   于是把契约钉成两条**机器事实**：
+     ① 根目录 `AGENTS.md`（AI 助手唯一入口）的 §0 必须指向一份 `HANDOFF-*.md`；
+        **当前那一份 `HANDOFF-继续.md` 只要还在盘上，就必须被点着名** ——
+        否则用户说「继续」就真的只是一句话，没有落点。
+     ② `AGENTS.md` 必须被文档治理豁免（它没有、也不该有 frontmatter）。
+        漏了这条的后果是"**门禁红得莫名其妙**"：sync-check 会报它缺元数据块，
+        而修的人多半会去给 AGENTS.md 硬加一个 frontmatter —— 那就错了。
+   ⚠️ 这里刻意**不**断言 `HANDOFF-继续.md` 必须存在：它是"这一轮"的工作单，
+      干完就该换成下一份（那时改 AGENTS.md 的指针即可，本条断言不会拦人）。 */
+say();
+say('--- 第二十三层 · 接续契约：说一句「继续」就能开工（AGENTS.md）---');
+
+ok('★★ 根目录 AGENTS.md 的 §0 必须指向交接工作单', () => {
+  const root = path.resolve(HERE, '..');
+  const p = path.join(root, 'AGENTS.md');
+  assert.ok(fs.existsSync(p), '根目录没有 AGENTS.md —— 新会话没有"开工入口"');
+  const src = fs.readFileSync(p, 'utf8');
+  const i0 = src.indexOf('## 0.');
+  assert.ok(i0 >= 0, 'AGENTS.md 里找不到 §0（"用户说继续时第一件事"应当就写在里面）');
+  const i1 = src.indexOf('## 1.', i0);
+  assert.ok(i1 > i0, 'AGENTS.md 的章节结构变了（§0 与 §1 之间定位不到）');
+  const sec0 = src.slice(i0, i1);
+  assert.ok(
+    /HANDOFF-[^\s`、）)，。]*\.md/.test(sec0),
+    'AGENTS.md §0 没有指向任何 HANDOFF-*.md —— 说「继续」之后没有落点',
+  );
+  if (fs.existsSync(path.join(root, 'HANDOFF-继续.md'))) {
+    assert.ok(
+      sec0.includes('HANDOFF-继续.md'),
+      'HANDOFF-继续.md 就在根目录，而 AGENTS.md §0 没点它的名 —— 指针过期了',
+    );
+  }
+  assert.ok(sec0.includes('继续'), 'AGENTS.md §0 里没有「继续」这个触发词');
+});
+
+ok('★ AGENTS.md 必须被文档治理豁免，且不许被 .gitignore 吃掉', () => {
+  /* ① 豁免：否则 sync-check 会报"缺少元数据块"，而正确的修法是豁免、不是加 frontmatter。 */
+  const sc = fs.readFileSync(path.resolve(HERE, 'sync-check.mjs'), 'utf8');
+  const m = sc.match(/const SKIP_ENTRY_FILES = new Set\(\[([^\]]*)\]\)/);
+  assert.ok(m, 'sync-check.mjs 里找不到 SKIP_ENTRY_FILES —— 豁免机制被删了？');
+  for (const name of ['README.md', 'AGENTS.md']) {
+    assert.ok(m[1].includes("'" + name + "'"), '文档治理豁免名单里没有 ' + name);
+  }
+  assert.ok(
+    /SKIP_ENTRY_FILES\.has\(name\)/.test(sc),
+    'SKIP_ENTRY_FILES 定义了却没被 collectMarkdown 用上（豁免是个摆设）',
+  );
+  /* ② 不许被忽略：AGENTS.md 必须随仓库走 —— 换台机器 clone 下来照样能接活。 */
+  const ig = fs.readFileSync(path.resolve(HERE, '..', '.gitignore'), 'utf8');
+  const ignored = ig
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'))
+    .some((l) => l === 'AGENTS.md' || l === '/AGENTS.md');
+  assert.ok(!ignored, '.gitignore 把 AGENTS.md 忽略了 —— 新克隆的机器上没有开工入口');
+});
+
+/* ================================================================== */
 /* ★ 跑完把临时目录收掉 —— 这一步要在**所有用例都结束、句柄都关了之后**做，
    所以放在结论行之前（`process.exit` 上的那个 handler 只是兜底）。 */
 cleanupTmpDirs();

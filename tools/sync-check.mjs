@@ -73,6 +73,15 @@ const SKIP_PREFIX = '_';
  *   修法：让扫描器的豁免与 .gitignore 的那份登记**同一个口径**（按前缀认），
  *   以后新加 HANDOFF-阶段X.md 不必再改这里。 */
 const SKIP_FILES = /^HANDOFF(-|\.|$)/;
+/* ⚠️ 另外两个**入口文件**同样不进治理体系（它们本来就不该有 frontmatter）：
+ *   · `README.md` —— 给人看的门面；
+ *   · `AGENTS.md` —— 给 **AI 助手**看的开工须知（2026-10-01 新增）。
+ *     为什么要有它：用户说一句「**继续**」就要能接着干活，而新会话最先看到的是
+ *     仓库根目录 —— `AGENTS.md` §0 就写着「先读 `HANDOFF-继续.md`」，
+ *     于是"接活"这件事不再依赖谁记得住上下文。
+ *   `tools/test-all.mjs` 有一条断言守着这个集合（名字被删掉 ⇒ 门禁红），
+ *   因为**它坏了的表现恰好是"门禁红得莫名其妙"**（会说 AGENTS.md 缺元数据块）。 */
+const SKIP_ENTRY_FILES = new Set(['README.md', 'AGENTS.md']);
 const MASTER_PLAN = '项目计划工程书.md';
 const REGISTRY = 'agents/registry.json';
 
@@ -180,7 +189,7 @@ function collectMarkdown(dir) {
     }
     if (!name.endsWith('.md')) continue;
     if (name.startsWith(SKIP_PREFIX)) continue; // 模板文件不参与校验
-    if (dir === '.' && name === 'README.md') continue;
+    if (dir === '.' && SKIP_ENTRY_FILES.has(name)) continue; // 入口文件，见上方 SKIP_ENTRY_FILES 说明
     if (dir === '.' && SKIP_FILES.test(name)) continue; // 本地交接文档，见上方 SKIP_FILES 说明
     out.push(full);
   }
